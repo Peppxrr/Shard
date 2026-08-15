@@ -1,0 +1,45 @@
+# Node
+node_modules/
+dist/
+out/
+*.tsbuildinfo
+
+# Build output
+build/
+build_x64/
+build_x86/
+**/build/
+*.user
+*.suo
+.vs/
+
+# Vendor (submodule checkouts are tracked via gitlink; local build artifacts inside must not be)
+vendor/obs-studio/build/
+vendor/obs-studio/build_x64/
+vendor/obs-studio/build_x86/
+vendor/obs-studio/.deps/
+
+# App runtime data
+app/release/
+app/resources/core-bin/
+app/resources/bin/
+
+# Logs & temp
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Local toolchains
+vs_buildtools.exe
+
+# Directory junctions into vendor/obs-studio (content comes from the submodule)
+core/deps/
+core/shared/
+core/cmake/
+
+# Internal repo guidelines (not published)
+AGENTS.md
+
+# Fetched by scripts/fetch-ffmpeg.ps1 (pinned SHA-256)
+vendor/ffmpeg/

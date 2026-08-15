@@ -1,0 +1,15 @@
+Your goal is to finish all of these keep working and running tests to the best of your ability throw me a question prompt if you really need it otherwise try your best
+
+1. Game capture does the same thing desktop capture used to with the window not filling out the full frame
+2. Recording indicator isn't working currently for game or desktop active
+3. Save settings button switches to saved but doesn't reset until you close and open settings should reset after a few seconds
+4. Allow full custom keybinds being able to add new ones, what they will do clip/record, and custom amounts of time seconds and minutes
+5. In the library viewer when i make a new clip it doesn't show a preview is just greyed out and i cant even play the file in the viewer i can directly from the file location so its an issue with the app hitting play does nothing the viewer just flashes almost like a refresh
+6. App has no icon in the windows tray is just transparent give it the icon for the app
+7. Rename the app to Shard
+8. Some ui elements are cut off cant see the dropdown arrow for long texts example would be my voicemeeter sources
+9. Make known games a drop down show 10 when not expanded and have it be scrollable when mouse is hovering over it
+10. Make a little bar at the bottom of the ui put the storage bar to the left and active capture to the right
+11. In the search bar allow me to search by date aswell
+12. Id like all audio tracks to be able to be split fragmented mp4
+13. Editing clips will need completely reworked give it a new ui, audio track splitting, and a live preview of where you are shortening not the entire base video itself

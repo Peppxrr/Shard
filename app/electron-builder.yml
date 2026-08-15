@@ -1,0 +1,37 @@
+# electron-builder packaging. Windows: nsis per-user + portable.
+# Linux targets can be added later without touching app code (core CMake is
+# already cross-platform via obs-studio).
+appId: com.shard.app
+productName: Shard
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/main/**/*
+  - dist/renderer/**/*
+  - package.json
+extraResources:
+  - from: resources/core-bin
+    to: core-bin
+    filter:
+      - "**/*"
+  - from: build/icon-256.png
+    to: icon.png
+  - from: resources/games.json
+    to: games.json
+asar: true
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  shortcutName: Shard
+portable:
+  artifactName: ${productName}-${version}-portable.exe

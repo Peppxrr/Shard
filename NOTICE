@@ -1,0 +1,18 @@
+NOTICE
+======
+
+ClipForge embeds and links OBS Studio's libobs and ships OBS Studio plugins
+(win-capture, win-wasapi, obs-x264, obs-nvenc, obs-qsv11, obs-ffmpeg,
+obs-outputs, obs-filters, image-source, text-freetype2).
+
+OBS Studio — Copyright (C) 2012-2025 Lain Bailey and contributors
+https://obsproject.com/  |  GNU GPL v2.0 (see LICENSE)
+
+This distribution includes a copy of the OBS Studio source tree pinned at tag
+32.2.1 in `vendor/obs-studio`, per the requirements of GPL section 5
+(conveying corresponding source for the GPL-licensed libraries we link).
+Modifications to the vendored OBS source, if any, are listed in
+`vendor/obs-studio` commit history.
+
+OBS is a trademark of Lain Bailey. ClipForge is not affiliated with or
+endorsed by the OBS Project.
