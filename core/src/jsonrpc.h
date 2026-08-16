@@ -2,7 +2,7 @@
 
 #include "app.h"
 #include "config.h"
-#include "game_detect.h"
+#include "game_system.h"
 #include "recorder.h"
 #include "replay_ring.h"
 #include "sources.h"
@@ -19,7 +19,7 @@ namespace clipforge {
 class Rpc {
 public:
   Rpc(App& app, Config& config, Events& events, SourceManager& sources, EncoderManager& encoders,
-      ReplayRing& ring, Recorder& recorder, GameDetect& games);
+      ReplayRing& ring, Recorder& recorder, GameSystem& games);
 
   // Full JSON-RPC request text -> response text ("" for notifications).
   std::string handle(const std::string& requestText);
@@ -49,7 +49,7 @@ private:
   EncoderManager& encoders_;
   ReplayRing& ring_;
   Recorder& recorder_;
-  GameDetect& games_;
+  GameSystem& games_;
 
   std::atomic<bool> shutdownRequested_{false};
 };

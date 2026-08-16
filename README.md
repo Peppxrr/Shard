@@ -1,103 +1,218 @@
 # Shard
 
-Medal-style game clipper for Windows (Linux-ready architecture).
+**A local-first Windows game clipper built on OBS.**
 
-A C++ core embeds OBS Studio's libobs and runs a RAM replay buffer that
-continuously captures the desktop or the foreground game (WGC — no injection,
-so anti-cheat / borderless games work). A global hotkey saves the last
-N seconds/minutes to a library; clips are viewable and editable in-app
-(trim + cut, per-audio-track selection); edited clips export via ffmpeg to a
-target size (default ≤ 10 MB for Discord). A storage-limit watchdog
-auto-deletes the oldest unprotected clips, and known games are auto-detected
-(toast + tagging + optional auto-record).
+Shard keeps a rolling replay buffer in RAM, detects running games, and saves the last few seconds or minutes with a global hotkey. The Electron desktop app includes a searchable clip library, video viewer, non-destructive editor, multi-track audio controls, and target-size exports for services such as Discord.
 
-## Features
+> **Status:** early development. Windows is the supported runtime today; the core keeps platform-specific capture code isolated for future Linux work.
 
-- **Capture modes** — `auto` (game window when a game is active, desktop otherwise),
-  `screen` (desktop always), `game` (game only). The capture subject follows the
-  game while its process is alive — clicking away doesn't stop it; switching
-  between open games is debounced 10 s with the buffer kept.
-- **Codecs** — H.264 (x264/NVENC) and AV1 (NVENC) capture; AV1 replay clips are
-  keyframe-corrected so every save decodes cleanly.
-- **Audio** — each configured audio source gets its own track in recordings and
-  clips (plus a master mix); files are fragmented mp4 (crash-safe, no remux).
-- **Library** — search (game / filename / date), sort (newest, oldest, favorites,
-  duration, size, game), relative timestamps, live delete/favorite updates,
-  drag-out to Discord/Explorer.
-- **Editor** — result preview (plays the trimmed/cut output live), in/out +
-  middle cuts, per-track audio selection on export.
-- **Extras** — custom hotkeys with arbitrary durations, storage bar + capture
-  indicator in a bottom status bar, configurable clip directory, overlay vs
-  Windows notifications.
+## Highlights
 
-## Architecture
+- **RAM replay buffer** — bounded by duration and memory, anchored to video keyframes, and written only when a clip is saved.
+- **Automatic game detection** — Steam and other launcher discovery, process monitoring, known-game management, session tracking, and optional automatic recording.
+- **Flexible capture** — automatic game/desktop switching, screen-only mode, or game-only mode.
+- **Minimized-game support** — Windows Graphics Capture for normal use, with an OBS-compatible Game Capture hook underneath for applications that permit it.
+- **Hardware encoding** — H.264 through NVENC when available with x264 fallback; NVENC AV1 is also supported.
+- **Independent audio tracks** — master mix plus per-source tracks for editing and export.
+- **Crash-tolerant recording** — fragmented MP4 output avoids a separate remux step for normal recordings.
+- **Clip library** — search, sorting, favorites/protection, thumbnails, import, deletion, storage limits, and drag-out to Explorer or Discord.
+- **Editor and export** — trim ranges, remove middle sections, choose audio tracks, preview the result, and export to a target file size.
+- **Configurable hotkeys** — multiple replay durations with automatic re-registration after transient Windows shortcut failures.
 
-```
-core/            C++ capture engine embedding OBS's libobs (GPL-2.0)
-  └─ src/        boot, sources (capture-subject director), encoders,
-                 replay ring, recorder, game detect, JSON-RPC server
-app/             Electron + React + TypeScript shell
-  ├─ src/main/   core client, settings, hotkeys, library DB, storage, export
-  ├─ src/renderer/  library, viewer, editor, settings, status bar
-  └─ src/shared/ contracts.ts — cross-language RPC/settings schema
-vendor/obs-studio/  pinned OBS submodule (32.2.1)
-scripts/         build.ps1, e2e.ps1 + e2e-client.mjs, fetch-ffmpeg.ps1
+## How it works
+
+```mermaid
+flowchart LR
+    Game[Game or desktop] --> Capture[WGC + OBS Game Capture]
+    Capture --> OBS[Embedded libobs]
+    OBS --> Ring[RAM replay ring]
+    OBS --> Recorder[Fragmented MP4 recorder]
+    Ring --> Mux[obs-ffmpeg-mux]
+    Mux --> Clips[Clip files]
+    Core[clipcore.exe] <-->|JSON-RPC over localhost WebSocket| Main[Electron main]
+    Main <-->|typed IPC| UI[React renderer]
+    Main --> Library[(SQLite library)]
+    Main --> Export[FFmpeg editor/export pipeline]
 ```
 
-The core exposes a WebSocket JSON-RPC 2.0 server on `127.0.0.1` (ephemeral
-port, printed as the first stdout line `PORT <n>`); the Electron main process
-spawns the core and speaks JSON-RPC to it. All contracts live in
-`app/src/shared/contracts.ts` and are mirrored exactly by the core's JSON
-handlers.
+### Capture strategy
 
-## Building
+Shard layers two Windows capture backends for a detected game:
 
-Prerequisites: Windows 10 2004+ (19041+), Visual Studio 2022 Build Tools with
-the "Desktop development with C++" workload, CMake, Git, Node.js 22+.
+1. **Windows Graphics Capture** is the normal path. It works while a game is focused, unfocused, or covered without injecting into the game.
+2. **OBS-compatible Game Capture** uses the architecture-matched OBS helper and graphics hook when in-process capture is required, primarily for genuinely minimized windows.
+
+The compatibility path is validated with x64 D3D11, x64 D3D12, and x86 D3D11 targets. Anti-cheat software may still reject an unsigned third-party capture hook. The exact implementation, safety boundaries, test matrix, and current VRChat/EAC result are documented in [`GAME_CAPTURE_AUDIT.md`](GAME_CAPTURE_AUDIT.md).
+
+Shard does not bypass anti-cheat, reuse another vendor's signed binaries, install kernel components, or require reduced Windows security settings.
+
+## Repository layout
+
+```text
+app/
+  src/main/       Electron lifecycle, core client, hotkeys, library, storage, export
+  src/renderer/   Capture, games, library, viewer, editor, and settings UI
+  src/shared/     TypeScript settings, RPC, event, and hotkey contracts
+core/
+  src/            C++20 capture engine, replay ring, recorder, game system, JSON-RPC
+  tests/          Detection tests and animated D3D11/D3D12 capture fixtures
+patches/          Reproducible Shard patch applied to the pinned OBS checkout
+scripts/          Build, development, selftest/E2E, and capture diagnostics
+vendor/
+  obs-studio/     Pinned OBS Studio 32.2.1 submodule
+  ffmpeg/         Pinned FFmpeg runtime fetched locally; not committed
+```
+
+`app/src/shared/contracts.ts` is the cross-language contract. Changes to its RPC methods, events, or settings must be mirrored by the handlers in `core/src/jsonrpc.cpp`.
+
+## Requirements
+
+- Windows 10 version 2004 or newer; Windows 11 recommended
+- Visual Studio 2022 Build Tools
+  - Desktop development with C++
+  - MSVC v143
+  - Windows 11 SDK `10.0.26100.0`
+- CMake 3.28 or newer
+- Git with submodule support
+- Node.js 22 or newer and npm
+- A Direct3D 11-capable GPU
+
+NVIDIA NVENC is optional. Shard falls back to x264 when a supported hardware encoder is unavailable.
+
+## Clone and build
+
+Clone with the OBS submodule:
 
 ```powershell
-powershell -File scripts/build.ps1        # core build + stage app/resources/core-bin
+git clone --recurse-submodules <repository-url> Shard
+cd Shard
+```
+
+If the repository was cloned without submodules:
+
+```powershell
+git submodule update --init --recursive
+```
+
+Fetch the pinned FFmpeg build:
+
+```powershell
+powershell -File scripts/fetch-ffmpeg.ps1
+```
+
+Build the C++ core, OBS plugins, compatibility helpers/hooks, and staged runtime:
+
+```powershell
+powershell -File scripts/build.ps1
+```
+
+The build script applies `patches/obs-game-capture.patch` idempotently to the pinned OBS checkout before compiling. Release runtime files are staged under `app/resources/core-bin/`.
+
+Install and build the desktop app:
+
+```powershell
 cd app
-npm install                               # postinstall runs electron-rebuild (better-sqlite3)
-npm run build                             # tsc renderer → vite build → tsc main (CJS)
-npm run package                           # electron-builder: release\Shard Setup 0.1.0.exe + portable
+npm install
+npm run build
 ```
 
-`scripts/build.ps1` vendors obs-deps (auto-downloaded with pinned SHA-256
-during CMake configure), builds the core, and stages
-`app/resources/core-bin/`. The app icon lives in `app/build/` (icon.ico for
-electron-builder, icon-256.png packaged as `resources/icon.png` for the tray).
-
-Staged runtime layout:
-
-```
-app/resources/core-bin/
-  clipcore.exe          obs.dll  libobs-d3d11.dll  obs-ffmpeg-mux.exe
-  avcodec-62.dll ...    zlib.dll  libx264-164.dll  ffmpeg.exe  ffprobe.exe
-  obs-plugins/64bit/*.dll      data/obs-plugins/<plugin>/...
-  data/libobs/  (effects, locales)
-```
-
-FFmpeg/ffprobe are fetched by `scripts/fetch-ffmpeg.ps1` (pinned SHA-256).
-
-## Running
+Create the installer and portable build:
 
 ```powershell
-# Core selftest: boots WGC capture, warms the ring 10 s, saves 3 s
-app\resources\core-bin\clipcore.exe --selftest --out $env:TMP\cf-selftest `
-  --config-dir $env:TMP\cf-selftest\cfg --core-bin C:\Ai\Recording\app\resources\core-bin
-# Expect stdout: SELFTEST {"ok":true,"path":"...","durationSec":3.x}
-
-# E2E contract test (Node >= 22, no deps): 70 s warm, 60 s save, RPC assertions
-powershell -File scripts/e2e.ps1
-$env:CF_LONG='1'; powershell -File scripts/e2e.ps1 -KeepTemp   # long variant
+npm run package
 ```
 
-Core CLI: `--config-dir <dir>` (required), `--core-bin <dir>`, `--port <n>`
-(0 = pick free), `--games <games.json>`, `--selftest`, `--out <dir>`.
-Exit codes: 2 = args/config/init, 3 = ring start, 4 = RPC bind.
+Packaged artifacts are written under `app/release/`.
+
+## Development
+
+Run the integrated development workflow from the repository root:
+
+```powershell
+powershell -File scripts/dev.ps1
+```
+
+This uses the Debug core in `app/resources/core-bin-dev/`, starts the Vite renderer, watches Electron main-process TypeScript, and restarts Electron when required.
+
+Useful build variants:
+
+```powershell
+powershell -File scripts/build.ps1 -SkipApp
+powershell -File scripts/build.ps1 -Config Debug
+powershell -File scripts/build.ps1 -Clean
+```
+
+## Verification
+
+### Core selftest
+
+Boot capture, warm the replay ring, save a short clip, and verify that muxing succeeds:
+
+```powershell
+$coreBin = (Resolve-Path app/resources/core-bin).Path
+$out = Join-Path $env:TMP 'shard-selftest'
+& "$coreBin/clipcore.exe" --selftest --out $out `
+  --config-dir "$out/cfg" --core-bin $coreBin
+```
+
+Successful output contains one line beginning with:
+
+```text
+SELFTEST {"ok":true,...}
+```
+
+### JSON-RPC end-to-end test
+
+```powershell
+powershell -File scripts/e2e.ps1
+$env:CF_LONG = '1'
+powershell -File scripts/e2e.ps1 -KeepTemp
+```
+
+The short test exercises startup, settings, the replay ring, a 60-second save, ffprobe duration, capture-mode changes, audio enumeration, game persistence, events, and clean shutdown.
+
+### Detection unit tests
+
+```powershell
+cmake --build build_x64 --config Debug --target shard_tests --parallel
+build_x64\Debug\shard_tests.exe
+```
+
+### Game Capture compatibility test
+
+```powershell
+node scripts/game-capture-test.mjs
+$env:CF_GC_API = 'D3D12'
+node scripts/game-capture-test.mjs
+```
+
+The test records focused, unfocused, covered, and genuinely minimized states and compares decoded frame hashes to detect frozen output.
+
+## Runtime contract
+
+`clipcore.exe` accepts:
+
+```text
+--config-dir <dir>   Required configuration directory
+--core-bin <dir>     Staged OBS/runtime directory
+--port <n>           JSON-RPC port; 0 selects a free port
+--games <file>       Optional games.json path
+--selftest           Run the capture/mux selftest
+--out <dir>          Selftest output directory
+```
+
+For normal server startup, `PORT <n>` is always the first stdout line. Diagnostics are written to stderr so the Electron launcher can safely parse the port.
+
+## Data and privacy
+
+- Capture, indexing, editing, and export run locally.
+- The core listens only on `127.0.0.1`.
+- Settings and the game registry are stored in the app configuration directory.
+- Clip metadata is stored in a local SQLite database.
+- Shard does not upload clips or telemetry.
 
 ## License
 
-GPL-2.0 (see `LICENSE`). This project links and embeds OBS Studio's libobs;
-see `NOTICE` for attribution required by GPL section 5.
+Shard is licensed under **GPL-2.0**. See [`LICENSE`](LICENSE).
+
+Shard embeds and modifies OBS Studio components under GPL-2.0. Attribution and related notices are in [`NOTICE`](NOTICE). FFmpeg and other staged runtime components retain their respective upstream licenses.

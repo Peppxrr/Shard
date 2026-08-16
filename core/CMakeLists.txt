@@ -59,7 +59,12 @@ add_executable(clipcore
   src/mux.cpp
   src/replay_ring.cpp
   src/recorder.cpp
-  src/game_detect.cpp
+  src/game_registry.cpp
+  src/launchers.cpp
+  src/process_monitor.cpp
+  src/detector.cpp
+  src/game_session.cpp
+  src/game_system.cpp
   src/jsonrpc.cpp
   src/server.cpp
 )
@@ -72,5 +77,34 @@ target_compile_definitions(clipcore PRIVATE CLIPFORGE_VERSION="${PROJECT_VERSION
 
 if(WIN32)
   target_compile_definitions(clipcore PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_link_libraries(clipcore PRIVATE d3d11.lib dxgi.lib uuid.lib ole32.lib)
+  target_link_libraries(clipcore PRIVATE d3d11.lib dxgi.lib uuid.lib ole32.lib wbemuuid.lib)
+endif()
+
+if(WIN32)
+  # Animated target for the real Game Capture minimized/freshness smoke test.
+  add_executable(shard_gc_d3d11_fixture WIN32 EXCLUDE_FROM_ALL tests/gc_d3d11_fixture.cpp)
+  target_compile_definitions(shard_gc_d3d11_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(shard_gc_d3d11_fixture PRIVATE d3d11.lib dxgi.lib)
+  add_executable(shard_gc_d3d12_fixture WIN32 EXCLUDE_FROM_ALL tests/gc_d3d12_fixture.cpp)
+  target_compile_definitions(shard_gc_d3d12_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(shard_gc_d3d12_fixture PRIVATE d3d12.lib dxgi.lib)
+endif()
+
+# ---------------------------------------------------------------------------
+# Unit tests (detection subsystem — pure logic, no OBS dependency)
+# ---------------------------------------------------------------------------
+add_executable(shard_tests
+  tests/test_main.cpp
+  src/game_registry.cpp
+  src/launchers.cpp
+  src/detector.cpp
+  src/game_session.cpp
+)
+
+target_include_directories(shard_tests PRIVATE src)
+
+target_link_libraries(shard_tests PRIVATE nlohmann_json::nlohmann_json)
+
+if(WIN32)
+  target_compile_definitions(shard_tests PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()

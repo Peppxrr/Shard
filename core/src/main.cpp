@@ -6,7 +6,7 @@
 #include "app.h"
 #include "config.h"
 #include "encoders.h"
-#include "game_detect.h"
+#include "game_system.h"
 #include "recorder.h"
 #include "replay_ring.h"
 #include "jsonrpc.h"
@@ -15,10 +15,17 @@
 
 #include <obs.h>
 #include <util/platform.h>
+#include <util/base.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -31,6 +38,46 @@ namespace fs = std::filesystem;
 using namespace std::chrono;
 
 namespace {
+
+// The process must be DPI-aware for WGC window capture to work: from an
+// unaware process on a scaled monitor, GetClientRect returns the *virtualized*
+// (logical) client size while the WGC frame surface is physical, so the
+// captured texture comes out 1/scale too small and the fit transform upscales
+// it — window capture looks "zoomed in". Desktop (monitor) capture is
+// unaffected because it has no per-window DPI involvement. OBS Studio ships
+// DPI-aware; the core (no manifest) must opt in at startup, before any
+// window is created. Per-monitor-aware-v2 (physical pixels on every monitor),
+// falling back to system-aware on older systems.
+void setProcessDpiAware()
+{
+#ifdef _WIN32
+  typedef BOOL(WINAPI * PFN_SetProcessDpiAwarenessContext)(HANDLE);
+  HMODULE user32 = GetModuleHandleW(L"user32.dll");
+  if (user32) {
+    PFN_SetProcessDpiAwarenessContext setCtx =
+        (PFN_SetProcessDpiAwarenessContext)GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+    if (setCtx && setCtx((HANDLE)-4)) // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+      return;
+  }
+  SetProcessDPIAware();
+#endif
+}
+
+void gameCaptureDiagnosticLog(int, const char* format, va_list args, void*)
+{
+  char message[4096];
+  const int written = std::vsnprintf(message, sizeof(message), format, args);
+  if (written > 0 && std::strstr(message, "[GC]")) {
+    std::fprintf(stderr, "%s\n", message);
+    std::fflush(stderr);
+  }
+}
+
+bool gameCaptureDiagnosticsEnabled()
+{
+  const char* value = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
+  return value && *value && std::strcmp(value, "0") != 0;
+}
 
 struct CliOptions {
   std::string configDir;
@@ -162,7 +209,10 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
 
 int main(int argc, char** argv)
 {
+  setProcessDpiAware(); // before any window/obs_startup: WGC needs DPI awareness
   CliOptions opt = parseArgs(argc, argv);
+  if (gameCaptureDiagnosticsEnabled())
+    base_set_log_handler(gameCaptureDiagnosticLog, nullptr);
   if (opt.configDir.empty()) {
     std::fprintf(stderr, "clipcore: --config-dir is required\n");
     return 2;
@@ -196,7 +246,7 @@ int main(int argc, char** argv)
   SourceManager sources(app, config, events);
   ReplayRing ring(app, config, events, encoders);
   Recorder recorder(app, config, events, encoders);
-  GameDetect games(config, events, sources, recorder);
+  GameSystem games(config, events, sources, recorder);
 
   // Buffer only while something is being captured; the watchdog's activity
   // signal drives the ring's start/stop (15 s grace) lifecycle.

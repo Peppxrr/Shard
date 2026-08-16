@@ -10,6 +10,7 @@ build_x64/
 build_x86/
 **/build/
 *.user
+*.obj
 *.suo
 .vs/
 
@@ -22,12 +23,17 @@ vendor/obs-studio/.deps/
 # App runtime data
 app/release/
 app/resources/core-bin/
+app/resources/core-bin-dev/
 app/resources/bin/
 
 # Logs & temp
 *.log
 *.tmp
 .DS_Store
+/backups/
+/core/tests/scratch_*.cpp
+/Todo.md
+/todo.md
 Thumbs.db
 
 # Local toolchains

@@ -67,7 +67,11 @@ void ReplaySettings::applyPartial(const nlohmann::json& j)
 
 nlohmann::json GameSettings::toJson() const
 {
-  return {{"autoRecord", autoRecord}, {"gamesPath", gamesPath}, {"graceSeconds", graceSeconds}};
+  return {{"autoRecord", autoRecord},
+          {"gamesPath", gamesPath},
+          {"graceSeconds", graceSeconds},
+          {"verboseDetection", verboseDetection},
+          {"launchers", launcherEnabled}};
 }
 
 void GameSettings::applyPartial(const nlohmann::json& j)
@@ -75,6 +79,10 @@ void GameSettings::applyPartial(const nlohmann::json& j)
   if (j.contains("autoRecord")) autoRecord = j.value("autoRecord", autoRecord);
   if (j.contains("gamesPath")) gamesPath = j.value("gamesPath", gamesPath);
   if (j.contains("graceSeconds")) graceSeconds = j.value("graceSeconds", graceSeconds);
+  if (j.contains("verboseDetection")) verboseDetection = j.value("verboseDetection", verboseDetection);
+  if (j.contains("launchers") && j["launchers"].is_object())
+    for (auto it = j["launchers"].begin(); it != j["launchers"].end(); ++it)
+      launcherEnabled[it.key()] = it.value().get<bool>();
 }
 
 void Config::updateDirs()

@@ -244,7 +244,7 @@ function onCoreEvent(type: string, params: Record<string, unknown>): void {
     case "game.changed": {
       const p = params as { known: boolean; name: string | null; exe: string };
       lastGame = p.known ? p.name : null;
-      if (p.known && p.name) toast(`🎮 Detected: ${p.name}`);
+      if (p.known && p.name) toastDetected(p.name);
       break;
     }
     case "error": {
@@ -256,6 +256,19 @@ function onCoreEvent(type: string, params: Record<string, unknown>): void {
 }
 
 let lastGame: string | null = null;
+let lastToastGame: string | null = null;
+let lastToastAt = 0;
+
+// One toast per game: per-game sessions already collapse multi-process games
+// into a single detection; this also swallows immediate repeats (same game
+// re-detected within 60 s, e.g. after a session reshuffle).
+function toastDetected(name: string): void {
+  const now = Date.now();
+  if (name === lastToastGame && now - lastToastAt < 60000) return;
+  lastToastGame = name;
+  lastToastAt = now;
+  toast(`🎮 Detected: ${name}`);
+}
 
 function importClip(file: string): void {
   // Core produces mp4 directly (verify with ffprobe; remux if it somehow is

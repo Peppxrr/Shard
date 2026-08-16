@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -55,8 +56,11 @@ struct ReplaySettings {
 
 struct GameSettings {
   bool autoRecord = false;
-  std::string gamesPath; // path to games.json
-  int graceSeconds = 30; // auto-record grace after the game loses foreground
+  std::string gamesPath; // path to games.json (registry)
+  int graceSeconds = 30; // auto-record grace after the last game session ends
+  bool verboseDetection = false; // structured [GameDetection] logs on stderr
+  // Per-launcher discovery toggles (steam/epic/gog/ubisoft/ea/battlenet/riot/msstore).
+  std::map<std::string, bool> launcherEnabled;
 
   nlohmann::json toJson() const;
   void applyPartial(const nlohmann::json& j);

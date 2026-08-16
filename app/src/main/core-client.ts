@@ -28,6 +28,9 @@ export class CoreClient extends EventEmitter {
   ready = false;
 
   get coreBinDir(): string {
+    // Dev runner override (scripts/dev.ps1 stages the Debug core here); the
+    // packaged app and the e2e/selftest runners never set it.
+    if (process.env.CF_CORE_BIN) return process.env.CF_CORE_BIN;
     // Packaged: resources/core-bin; dev: app/resources/core-bin
     const packaged = path.join(process.resourcesPath ?? "", "core-bin");
     const dev = path.join(app.getAppPath(), "resources", "core-bin");

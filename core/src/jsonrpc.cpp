@@ -5,7 +5,7 @@
 namespace clipforge {
 
 Rpc::Rpc(App& app, Config& config, Events& events, SourceManager& sources, EncoderManager& encoders,
-         ReplayRing& ring, Recorder& recorder, GameDetect& games)
+         ReplayRing& ring, Recorder& recorder, GameSystem& games)
     : app_(app), config_(config), events_(events), sources_(sources), encoders_(encoders), ring_(ring),
       recorder_(recorder), games_(games)
 {
@@ -38,7 +38,12 @@ nlohmann::json Rpc::buildState() const
                   }()}}},
       {"ring", {{"active", ring_.active()}, {"secondsBuffered", secs}, {"mbUsed", mb}}},
       {"recording", {{"active", recorder_.active()}, {"path", recorder_.currentPath()}}},
-      {"foreground", {{"exe", games_.currentExe()}, {"name", games_.currentName()}, {"known", games_.currentKnown()}}},
+      {"foreground",
+       {{"exe", games_.currentExe()},
+        {"name", games_.currentKnown() ? nlohmann::json(games_.currentName()) : nlohmann::json(nullptr)},
+        {"known", games_.currentKnown()},
+        {"pid", games_.currentPid()}}},
+      {"sessions", games_.sessionsJson()},
       {"storage", {{"limitGb", config_.storageLimitGb}, {"clipsDir", config_.clipsBaseDir}}},
       {"dirs", {{"clips", config_.clipsDir}, {"recordings", config_.recordingsDir}}},
       {"version", CLIPFORGE_VERSION},
@@ -102,6 +107,7 @@ nlohmann::json Rpc::dispatch(const nlohmann::json& req)
   }
   if (method == "audio.listDevices")
     return {{"result", sources_.listDevices()}};
+  // ---- game registry / detection ----
   if (method == "game.listKnown")
     return {{"result", games_.listKnown()}};
   if (method == "game.addKnown") {
@@ -113,6 +119,56 @@ nlohmann::json Rpc::dispatch(const nlohmann::json& req)
     if (!params.contains("exe"))
       return {{"error", {{"code", -32602}, {"message", "game.removeKnown requires exe"}}}};
     return {{"result", games_.removeKnown(params["exe"])}};
+  }
+  if (method == "game.listGames")
+    return {{"result", games_.listGames()}};
+  if (method == "game.addUserGame")
+    return {{"result", games_.addUserGame(params)}};
+  if (method == "game.removeUserGame") {
+    if (!params.contains("id"))
+      return {{"error", {{"code", -32602}, {"message", "game.removeUserGame requires id"}}}};
+    return {{"result", games_.removeUserGame(params["id"])}};
+  }
+  if (method == "game.removeDiscovered") {
+    if (!params.contains("id"))
+      return {{"error", {{"code", -32602}, {"message", "game.removeDiscovered requires id"}}}};
+    return {{"result", games_.removeDiscovered(params["id"])}};
+  }
+  if (method == "game.updateUserGame")
+    return {{"result", games_.updateUserGame(params)}};
+  if (method == "game.ignoreExe") {
+    if (!params.contains("exe"))
+      return {{"error", {{"code", -32602}, {"message", "game.ignoreExe requires exe"}}}};
+    return {{"result", games_.ignoreExe(params["exe"])}};
+  }
+  if (method == "game.unignoreExe") {
+    if (!params.contains("exe"))
+      return {{"error", {{"code", -32602}, {"message", "game.unignoreExe requires exe"}}}};
+    return {{"result", games_.unignoreExe(params["exe"])}};
+  }
+  if (method == "game.listIgnored")
+    return {{"result", games_.listIgnored()}};
+  if (method == "game.listLaunchers")
+    return {{"result", games_.listLaunchers()}};
+  if (method == "game.setLauncherEnabled") {
+    if (!params.contains("type") || !params.contains("enabled"))
+      return {{"error", {{"code", -32602}, {"message", "game.setLauncherEnabled requires type and enabled"}}}};
+    return {{"result", games_.setLauncherEnabled(params["type"], params["enabled"])}};
+  }
+  if (method == "game.refreshDiscovery")
+    return {{"result", games_.refreshDiscovery()}};
+  if (method == "game.sessions")
+    return {{"result", games_.sessions()}};
+  if (method == "game.detectExplain")
+    return {{"result", games_.detectExplain(params)}};
+  if (method == "game.listCustomFolders")
+    return {{"result", games_.listCustomFolders()}};
+  if (method == "game.addCustomFolder")
+    return {{"result", games_.addCustomFolder(params)}};
+  if (method == "game.removeCustomFolder") {
+    if (!params.contains("id"))
+      return {{"error", {{"code", -32602}, {"message", "game.removeCustomFolder requires id"}}}};
+    return {{"result", games_.removeCustomFolder(params["id"])}};
   }
   if (method == "shutdown") {
     markShutdown();
@@ -133,8 +189,10 @@ nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
     EncoderManager(config_).effectiveVideoParams(app_.baseWidth(), app_.baseHeight(), oldW, oldH, oldFps, oldBr);
     VideoSettings next = cur;
     next.applyPartial(v);
+    Config nextConfig = config_;
+    nextConfig.video = next;
     int newW = 0, newH = 0, newFps = 0, newBr = 0;
-    EncoderManager(config_).effectiveVideoParams(app_.baseWidth(), app_.baseHeight(), newW, newH, newFps, newBr);
+    EncoderManager(nextConfig).effectiveVideoParams(app_.baseWidth(), app_.baseHeight(), newW, newH, newFps, newBr);
     (void)oldBr;
     (void)newBr;
     resChanged = (oldW != newW) || (oldH != newH) || (oldFps != newFps);
@@ -156,7 +214,7 @@ nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
     } else if (key == "replay")
       ring_.updateCaps();
     else if (key == "game")
-      games_.reload();
+      games_.onConfigChanged();
   }
 
   return {{"applied", touched}, {"state", buildState()}};

@@ -45,7 +45,10 @@ export interface ReplaySettings {
 export interface GameSettings {
   autoRecord: boolean;
   gamesPath: string;
-  graceSeconds: number;
+  graceSeconds: number; // auto-record grace after the last game session ends
+  verboseDetection: boolean; // structured [GameDetection] logs on core stderr
+  // Per-launcher discovery toggles (steam/epic/gog/ubisoft/ea/battlenet/riot/msstore).
+  launchers: Record<string, boolean>;
 }
 
 export interface HotkeyEntry {
@@ -95,7 +98,13 @@ export const DEFAULT_SETTINGS: Settings = {
   capture: { mode: "auto", monitor: 0 },
   video: { encoder: "auto", preset: "medium", custom: false, bitrateKbps: 0, fps: 60, width: 1920, height: 1080, x264Preset: "veryfast" },
   replay: { maxSeconds: 600, maxMb: 2048 },
-  game: { autoRecord: false, gamesPath: "", graceSeconds: 30 },
+  game: {
+    autoRecord: false,
+    gamesPath: "",
+    graceSeconds: 30,
+    verboseDetection: false,
+    launchers: { steam: true, epic: true, gog: true, ubisoft: true, ea: true, battlenet: true, riot: true, msstore: true },
+  },
   audio: { sources: [] },
   storage: { limitGb: 20, clipsDir: "" },
   app: { notificationStyle: "overlay", startWithWindows: false },
@@ -121,7 +130,88 @@ export type RpcMethod =
   | "game.listKnown"
   | "game.addKnown"
   | "game.removeKnown"
+  | "game.listGames"
+  | "game.addUserGame"
+  | "game.removeUserGame"
+  | "game.removeDiscovered"
+  | "game.updateUserGame"
+  | "game.ignoreExe"
+  | "game.unignoreExe"
+  | "game.listIgnored"
+  | "game.listLaunchers"
+  | "game.setLauncherEnabled"
+  | "game.refreshDiscovery"
+  | "game.sessions"
+  | "game.detectExplain"
+  | "game.listCustomFolders"
+  | "game.addCustomFolder"
+  | "game.removeCustomFolder"
   | "shutdown";
+
+// Where a game definition comes from.
+export type GameSource = "discovered" | "user";
+
+export interface LauncherRef {
+  type: string; // steam | epic | gog | ubisoft | ea | battlenet | riot | msstore
+  id: string; // launcher-specific id (steam appid, epic appname, ...)
+}
+
+export interface GameInfo {
+  id: string;
+  name: string;
+  source: GameSource;
+  executables: string[];
+  installPaths: string[];
+  launchers: LauncherRef[];
+  enabled: boolean;
+  stale: boolean;
+  emulator: boolean;
+}
+
+export interface CustomFolderInfo {
+  id: string;
+  name: string;
+  path: string;
+  emulator: boolean;
+}
+
+export interface LauncherInfo {
+  type: string;
+  label: string;
+  enabled: boolean;
+  installed: boolean; // launcher present on this machine
+  lastScanMs: number | null;
+  gameCount: number;
+}
+
+export interface GameSessionInfo {
+  gameId: string;
+  name: string;
+  exe: string;
+  pid: number;
+  pids: number[];
+  startMs: number;
+  confidence: number;
+  launcher: string | null;
+  emulator: boolean;
+  primary: boolean;
+}
+
+export interface DetectionReason {
+  signal: string;
+  delta: number;
+  note: string;
+}
+
+export interface DetectionExplain {
+  exe: string;
+  pid: number;
+  score: number;
+  decision: "DETECTED" | "CANDIDATE" | "IGNORED";
+  gameId: string | null;
+  gameName: string | null;
+  reasons: DetectionReason[];
+}
 
 export interface CoreState {
   capture: CaptureSettings & {
@@ -135,14 +225,15 @@ export interface CoreState {
   audio: { sources: AudioSourceConfig[] };
   ring: { active: boolean; secondsBuffered: number; mbUsed: number };
   recording: { active: boolean; path: string };
-  foreground: { exe: string; name: string | null; known: boolean };
+  foreground: { exe: string; name: string | null; known: boolean; pid: number };
+  sessions: GameSessionInfo[];
   storage: { limitGb: number; clipsDir: string };
   dirs: { clips: string; recordings: string };
   version: string;
 }
 
 export interface CoreEvent {
-  type: "ready" | "game.changed" | "clip.saved" | "recording.state" | "ring.stats" | "error" | "capture.subject";
+  type: "ready" | "game.changed" | "game.session" | "clip.saved" | "recording.state" | "ring.stats" | "error" | "capture.subject";
   params: Record<string, unknown>;
 }
 

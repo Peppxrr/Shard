@@ -1,17 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AudioTrackInfo, ClipRecord, ExportProgress } from "../../shared/contracts";
 import { fmtDuration } from "./LibraryPage";
+import { Modal, Button, Icon, Checkbox } from "./ui";
 
-interface Segment {
-  start: number;
-  end: number;
-}
-
-interface Props {
-  clip: ClipRecord;
-  onClose: () => void;
-  onExport: () => void;
-}
+interface Segment { start: number; end: number; }
+interface Props { clip: ClipRecord; onClose: () => void; onExport: () => void; }
 
 // Editor: trim (in/out) minus zero-or-more cuts. The preview plays the
 // *result* — the source file is seeked over cut regions and outside the
@@ -27,14 +20,10 @@ export function Editor({ clip, onClose, onExport }: Props) {
   const [exportDone, setExportDone] = useState<ExportProgress | null>(null);
   const [exporting, setExporting] = useState(false);
   const [resultTime, setResultTime] = useState(0);
+  const [sourceTime, setSourceTime] = useState(0);
   const videoRef = useRef<HTMLVideoElement>(null);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
+  const timelineRef = useRef<HTMLDivElement>(null);
+  // Probe audio tracks + subscribe to export progress (drives the result UI).
   useEffect(() => {
     window.clipforge.probeTracks(clip.path).then((ts) => {
       setTracks(ts);
@@ -45,6 +34,28 @@ export function Editor({ clip, onClose, onExport }: Props) {
       if (p.done) setExporting(false);
     });
   }, [clip.path]);
+
+  const snapStep = Math.min(0.1, Math.max(0.01, duration / 20));
+  const minimumTrim = Math.min(0.25, duration);
+  const clampTime = (time: number) => Math.max(0, Math.min(duration, time));
+  const snapTime = (time: number) => clampTime(Math.round(time / snapStep) * snapStep);
+
+  const sourceTimeAtPointer = (clientX: number) => {
+    const rect = timelineRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0) return 0;
+    return snapTime(((clientX - rect.left) / rect.width) * duration);
+  };
+  const setTrimAtPointer = (edge: "in" | "out", clientX: number) => {
+    const time = sourceTimeAtPointer(clientX);
+    if (edge === "in") setInPoint(Math.min(time, outPoint - minimumTrim));
+    else setOutPoint(Math.max(time, inPoint + minimumTrim));
+  };
+  const beginTrimDrag = (edge: "in" | "out", e: React.PointerEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setTrimAtPointer(edge, e.clientX);
+  };
 
   // Retained segments: [in,out] minus cuts.
   const retained = useMemo<Segment[]>(() => {
@@ -63,7 +74,6 @@ export function Editor({ clip, onClose, onExport }: Props) {
     }
     return segs.filter((s) => s.end - s.start > 0.05);
   }, [inPoint, outPoint, cuts]);
-
   const totalRetained = retained.reduce((s, x) => s + (x.end - x.start), 0);
 
   // Map a source time to the position within the edited result.
@@ -77,22 +87,27 @@ export function Editor({ clip, onClose, onExport }: Props) {
     return acc;
   };
 
+  const seekAtPointer = (clientX: number) => {
+    const time = Math.max(inPoint, Math.min(outPoint, sourceTimeAtPointer(clientX)));
+    const video = videoRef.current;
+    if (video) video.currentTime = time;
+    setSourceTime(time);
+    setResultTime(sourceToResult(time));
+  };
+
   // The preview plays the result: skip cuts, stay inside in/out.
   const onTimeUpdate = () => {
     const v = videoRef.current;
     if (!v || v.paused || v.seeking) return;
     let jumped = false;
     for (const cut of cuts) {
-      if (v.currentTime > cut.start && v.currentTime < cut.end) {
-        v.currentTime = cut.end + 0.01;
-        jumped = true;
-        break;
-      }
+      if (v.currentTime > cut.start && v.currentTime < cut.end) { v.currentTime = cut.end + 0.01; jumped = true; break; }
     }
     if (!jumped) {
       if (v.currentTime < inPoint) { v.currentTime = inPoint; jumped = true; }
       else if (v.currentTime > outPoint) { v.currentTime = inPoint; jumped = true; }
     }
+    setSourceTime(v.currentTime);
     setResultTime(sourceToResult(v.currentTime));
   };
 
@@ -112,105 +127,109 @@ export function Editor({ clip, onClose, onExport }: Props) {
     onExport();
   };
 
-  const step = Math.max(0.01, duration / 2000);
+  const dur = Math.max(duration, 0.001);
+  const pct = (time: number) => `${(clampTime(time) / dur) * 100}%`;
 
   return (
-    <div className="modal editor-modal">
-      <div className="modal-body editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <strong>Edit — {clip.game ?? "Untagged"}</strong>
-          <button onClick={onClose}>×</button>
-        </div>
-
-        <div className="editor-preview">
+    <Modal open onClose={onClose} closeOnBackdrop={false} size="lg" title="Edit clip"
+      sub={<>{clip.game ?? "Untagged"} · {fmtDuration(clip.durationMs)}</>}>
+      <div className="editor">
+        <div className="editor__preview">
           <video
             ref={videoRef}
+            className="editor__player player"
             src={`file://${clip.path}`}
             controls
-            className="player"
             onTimeUpdate={onTimeUpdate}
-            onSeeked={() => setResultTime(sourceToResult(videoRef.current?.currentTime ?? 0))}
+            onSeeked={() => {
+              const time = videoRef.current?.currentTime ?? 0;
+              setSourceTime(time);
+              setResultTime(sourceToResult(time));
+            }}
           />
-          <div className="preview-info">
-            <span>Result {fmtDuration(resultTime * 1000)} / {fmtDuration(totalRetained * 1000)}</span>
-            <span className="dim">({retained.length} segment{retained.length === 1 ? "" : "s"})</span>
+          <div className="editor__info">
+            <span className="editor__result">Edited result <strong className="num">{fmtDuration(resultTime * 1000)}</strong> / {fmtDuration(totalRetained * 1000)}</span>
+            <span className="dim">{retained.length} kept segment{retained.length === 1 ? "" : "s"}</span>
           </div>
         </div>
 
-        <div className="timeline">
-          <div className="timeline-bar">
-            <div className="in-out" style={{ left: `${(inPoint / duration) * 100}%`, width: `${((outPoint - inPoint) / duration) * 100}%` }} />
-            {cuts.map((c, i) => (
-              <div
-                key={i}
-                className="cut-region"
-                style={{ left: `${(c.start / duration) * 100}%`, width: `${((c.end - c.start) / duration) * 100}%` }}
-                title={`Cut ${c.start.toFixed(1)}–${c.end.toFixed(1)}`}
-              />
-            ))}
-            <input
-              type="range" min={0} max={duration} step={step} value={inPoint}
-              onChange={(e) => setInPoint(Math.min(Number(e.target.value), outPoint - 0.1))}
-              className="handle left"
-            />
-            <input
-              type="range" min={0} max={duration} step={step} value={outPoint}
-              onChange={(e) => setOutPoint(Math.max(Number(e.target.value), inPoint + 0.1))}
-              className="handle right"
-            />
+        <div className="tlpad">
+          <div className="tl__head">
+            <div>
+              <strong>Trim</strong>
+              <span>Drag a handle, or click the timeline to preview.</span>
+            </div>
+            <span className="chip num">Snap {snapStep < 0.1 ? `${Math.round(snapStep * 1000)} ms` : "0.1 s"}</span>
           </div>
-          <div className="timeline-labels">
-            <span>In {fmtDuration(inPoint * 1000)}</span>
-            <span>Out {fmtDuration(outPoint * 1000)}</span>
-            <span>Retained {fmtDuration(totalRetained * 1000)}</span>
+          <div className="tl" ref={timelineRef} onPointerDown={(e) => seekAtPointer(e.clientX)}>
+            <div className="tl__bar">
+              <div className="tl__inout" style={{ left: pct(inPoint), width: `${((outPoint - inPoint) / dur) * 100}%` }} />
+              {cuts.map((c, i) => (
+                <div key={i} className="tl__cut" style={{ left: pct(c.start), width: `${((c.end - c.start) / dur) * 100}%` }}
+                  title={`Cut ${c.start.toFixed(1)}–${c.end.toFixed(1)}`} />
+              ))}
+              <div className="tl__playhead" style={{ left: pct(sourceTime) }} />
+              <button type="button" className="tl__handle tl__in" style={{ left: pct(inPoint) }}
+                aria-label="Trim start" title={`Trim start: ${inPoint.toFixed(1)}s`}
+                onPointerDown={(e) => beginTrimDrag("in", e)}
+                onPointerMove={(e) => e.currentTarget.hasPointerCapture(e.pointerId) && setTrimAtPointer("in", e.clientX)}>
+                <span>IN</span>
+              </button>
+              <button type="button" className="tl__handle tl__out" style={{ left: pct(outPoint) }}
+                aria-label="Trim end" title={`Trim end: ${outPoint.toFixed(1)}s`}
+                onPointerDown={(e) => beginTrimDrag("out", e)}
+                onPointerMove={(e) => e.currentTarget.hasPointerCapture(e.pointerId) && setTrimAtPointer("out", e.clientX)}>
+                <span>OUT</span>
+              </button>
+            </div>
+          </div>
+          <div className="tl__summary num">
+            <span><b>Start</b> {fmtDuration(inPoint * 1000)}</span>
+            <span><b>End</b> {fmtDuration(outPoint * 1000)}</span>
+            <span><b>Keeping</b> {fmtDuration(totalRetained * 1000)}</span>
           </div>
         </div>
 
         {tracks.length > 0 && (
-          <div className="track-select">
-            <span className="track-title">Audio tracks</span>
-            {tracks.map((t) => (
-              <label key={t.index} className="track-chip">
-                <input
-                  type="checkbox"
-                  checked={selectedTracks.includes(t.index)}
-                  onChange={(e) => {
-                    setSelectedTracks((prev) =>
-                      e.target.checked ? [...prev, t.index] : prev.filter((i) => i !== t.index)
-                    );
-                  }}
-                />
-                Track {t.index} <span className="dim mono">({t.codec})</span>
-              </label>
-            ))}
-            {selectedTracks.length === 0 && <span className="hint">No audio will be exported.</span>}
+          <div className="tracks">
+            <span className="tracks__title">Audio tracks</span>
+            <div className="tracks__list">
+              {tracks.map((t) => (
+                <label key={t.index} className="track-chip">
+                  <Checkbox checked={selectedTracks.includes(t.index)}
+                    onChange={(chk) => setSelectedTracks((prev) => chk ? [...prev, t.index] : prev.filter((i) => i !== t.index))} />
+                  Track {t.index} <span className="faint mono">({t.codec})</span>
+                </label>
+              ))}
+              {selectedTracks.length === 0 && <span className="field__hint">No audio will be exported.</span>}
+            </div>
           </div>
         )}
 
-        <div className="editor-actions">
-          <button onClick={addCutAtPlayhead}>Add cut at playhead</button>
-          <button onClick={() => setCuts([])}>Remove all cuts</button>
-          <button onClick={() => { setInPoint(0); setOutPoint(duration); setCuts([]); }}>Reset</button>
+        <div className="editor__actions">
+          <Button icon={<Icon name="scissor" size={15} />} onClick={addCutAtPlayhead}>Cut at playhead</Button>
+          <Button onClick={() => setCuts([])} disabled={cuts.length === 0}>Clear cuts</Button>
+          <Button onClick={() => { setInPoint(0); setOutPoint(duration); setCuts([]); }}>Reset</Button>
           <span className="spacer" />
-          <button className="primary" onClick={doExport} disabled={exporting || retained.length === 0}>
+          <Button variant="primary" icon={<Icon name="aperture" size={15} />} onClick={doExport} disabled={exporting || retained.length === 0}>
             {exporting ? "Exporting…" : "Export (Discord size)"}
-          </button>
+          </Button>
         </div>
 
         {exportDone?.done && (
-          <div className="export-result">
+          <div className={`export-result ${exportDone.error ? "is-error" : "is-ok"}`}>
             {exportDone.result ? (
-              <>
-                Export ready: {exportDone.result.path} ({exportDone.result.sizeMb} MB)
-                {exportDone.result.overTarget && " — over target, Discord may reject"}
-                <button onClick={() => window.clipforge.revealInExplorer(exportDone.result!.path)}>Reveal</button>
-              </>
+              <div className="export-result__line">
+                <Icon name="check" size={16} />
+                <span>Export ready ({exportDone.result.sizeMb} MB){exportDone.result.overTarget ? " — over target, Discord may reject" : ""}</span>
+                <Button size="sm" icon={<Icon name="folderOpen" size={14} />} onClick={() => window.clipforge.revealInExplorer(exportDone.result!.path)}>Reveal</Button>
+              </div>
             ) : (
-              <span className="error">{exportDone.error ?? "Export failed"}</span>
+              <span className="is-error">{exportDone.error ?? "Export failed"}</span>
             )}
           </div>
         )}
       </div>
-    </div>
+    </Modal>
   );
 }

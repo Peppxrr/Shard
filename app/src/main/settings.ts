@@ -55,8 +55,9 @@ export function coreStoragePayload(s: Settings) {
   return { storage: { limitGb: s.storage.limitGb, clipsDir: s.storage.clipsDir } };
 }
 
-// Shipped starter games list; user edits persist into the same file (the core
-// owns the file at runtime — see game.addKnown/removeKnown).
+// The game registry lives in games.json and is owned by the core (which
+// migrates legacy v1 lists and writes v2). The app only guarantees the file
+// exists so the core has a writable target.
 export function gamesJsonPath(): string {
   return path.join(app.getPath("userData"), "games.json");
 }
@@ -69,19 +70,9 @@ export async function seedGamesJson(): Promise<void> {
   } catch {
     /* not present yet */
   }
-  const shipped = path.join(process.resourcesPath ?? "", "games.json");
-  // dev: resources live in app/resources; packaged: extraResources
-  const candidates = [shipped, path.join(app.getAppPath(), "resources", "games.json")];
-  for (const c of candidates) {
-    try {
-      await fs.copyFile(c, dest);
-      return;
-    } catch {
-      /* try next */
-    }
-  }
-  // No shipped list: write an empty list so the core has a writable file.
-  await fs.writeFile(dest, "[]", "utf8");
+  // v2 registry schema; built-in games ship inside the core, so an empty
+  // registry is complete.
+  await fs.writeFile(dest, JSON.stringify({ version: 2, user: [], discovered: [], ignoredExes: [] }), "utf8");
 }
 
 function deepMerge<T>(base: T, patch: Partial<T>): T {

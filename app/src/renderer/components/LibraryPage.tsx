@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ClipRecord } from "../../shared/contracts";
+import { Icon, IconButton, Button, EmptyState, Modal } from "./ui";
 
 interface Props {
   clips: ClipRecord[];
@@ -7,6 +8,15 @@ interface Props {
 }
 
 type SortKey = "newest" | "oldest" | "duration" | "size" | "game" | "favorites";
+
+const SORTS: { value: SortKey; label: string }[] = [
+  { value: "newest", label: "Newest first" },
+  { value: "oldest", label: "Oldest first" },
+  { value: "favorites", label: "Favorites first" },
+  { value: "duration", label: "Longest first" },
+  { value: "size", label: "Largest first" },
+  { value: "game", label: "By game" },
+];
 
 export function LibraryPage({ clips, onOpenEditor }: Props) {
   const [gameFilter, setGameFilter] = useState<string>("all");
@@ -50,42 +60,39 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
 
   return (
     <div className="library">
-      <div className="filters">
-        <input
-          className="search"
-          type="search"
-          placeholder="Search clips…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        <select value={gameFilter} onChange={(e) => setGameFilter(e.target.value)}>
+      <div className="toolbar">
+        <label className="search">
+          <Icon name="search" size={15} />
+          <input type="search" placeholder="Search clips…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </label>
+        <select className="select" value={gameFilter} onChange={(e) => setGameFilter(e.target.value)}>
           <option value="all">All games</option>
           {games.map((g) => (
             <option key={g} value={g}>{g}</option>
           ))}
         </select>
-        <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+        <select className="select" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
           <option value="all">All sources</option>
           <option value="clip">Clips</option>
           <option value="recording">Recordings</option>
           <option value="edited">Edited</option>
         </select>
-        <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-          <option value="favorites">Favorites first</option>
-          <option value="duration">Longest first</option>
-          <option value="size">Largest first</option>
-          <option value="game">By game</option>
+        <select className="select" value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
+          {SORTS.map((s) => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
         </select>
-        <span className="count">{filtered.length} clips</span>
+        <span className="spacer" />
+        <span className="chip num">{filtered.length} {filtered.length === 1 ? "clip" : "clips"}</span>
       </div>
 
       {filtered.length === 0 ? (
-        <div className="empty">
-          <h2>No clips yet</h2>
-          <p>Press F8 to save the last minute, or F9 for the last 5 minutes.</p>
-        </div>
+        <EmptyState
+          icon={<Icon name="aperture" size={30} />}
+          title="No clips yet"
+        >
+          Hit your <strong>Save clip</strong> hotkey to pull a replay from the buffer.
+        </EmptyState>
       ) : (
         <div className="grid">
           {filtered.map((c) => (
@@ -94,7 +101,7 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
         </div>
       )}
 
-      {selected && <Viewer clip={selected} onClose={() => setSelected(null)} />}
+      {selected && <Viewer clip={selected} onClose={() => setSelected(null)} onEdit={() => { const c = selected; setSelected(null); onOpenEditor(c); }} />}
     </div>
   );
 }
@@ -108,45 +115,42 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
   const [confirming, setConfirming] = useState(false);
   const isFav = clip.protected === 1;
   return (
-    <div className="card" onClick={onOpen}>
+    <div className="clip card--hover" onClick={onOpen}>
       <div
-        className="thumb"
+        className="clip__thumb"
         draggable
-        title="Click to play · drag to share (Discord/Explorer)"
+        title="Click to play · drag to share"
         onDragStart={(e) => {
           e.preventDefault();
           window.clipforge.startDrag(clip.path, clip.thumb || undefined);
         }}
       >
-        {clip.thumb ? <img src={`file://${clip.thumb}`} alt="" /> : <div className="no-thumb" />}
-        {isFav && <span className="badge protected">★</span>}
-        {clip.source === "edited" && <span className="badge edited">✂ Edited</span>}
-        <span className="badge source">{clip.source}</span>
-        <span className="badge dur">{fmtDuration(clip.durationMs)}</span>
-      </div>
-      <div className="card-meta">
-        <div className="card-title">{clip.game ?? "Untagged"}</div>
-        <div className="card-sub">
-          {relativeDate(clip.createdAt)} · {fmtSize(clip.sizeBytes)}
+        {clip.thumb ? <img className="clip__img" src={`file://${clip.thumb}`} alt="" /> : <div className="clip__nothumb"><Icon name="aperture" size={26} /></div>}
+        <div className="clip__tags">
+          {isFav && <span className="badge badge--fav"><Icon name="star" size={11} /></span>}
+          {clip.source === "edited" && <span className="badge badge--edited">Edited</span>}
         </div>
-        <div className="card-time">{fmtDateTime(clip.createdAt)}</div>
-        <div className="card-actions" onClick={(e) => e.stopPropagation()}>
-          <button title="Edit" onClick={onEdit}>✂</button>
-          <button
-            title={isFav ? "Unfavorite" : "Favorite (keep from auto-delete)"}
-            className={isFav ? "fav active" : "fav"}
-            onClick={() => void window.clipforge.setProtected(clip.id, !isFav)}
-          >
-            {isFav ? "★" : "☆"}
-          </button>
-          <button title="Reveal in Explorer" onClick={() => window.clipforge.revealInExplorer(clip.path)}>📁</button>
+        <span className="badge badge--type">{clip.source}</span>
+        <span className="badge badge--dur num">{fmtDuration(clip.durationMs)}</span>
+      </div>
+      <div className="clip__meta">
+        <div className="clip__title">{clip.game ?? "Untagged"}</div>
+        <div className="clip__sub">{relativeDate(clip.createdAt)} · {fmtSize(clip.sizeBytes)}</div>
+        <div className="clip__time mono">{fmtDateTime(clip.createdAt)}</div>
+        <div className="clip__actions" onClick={(e) => e.stopPropagation()}>
+          <IconButton size="sm" label="Edit" onClick={onEdit}><Icon name="scissor" size={15} /></IconButton>
+          <IconButton size="sm" label={isFav ? "Unfavorite" : "Favorite — keep from auto-delete"} active={isFav}
+            className={isFav ? "is-fav" : ""} onClick={() => void window.clipforge.setProtected(clip.id, !isFav)}>
+            <Icon name="star" size={15} />
+          </IconButton>
+          <IconButton size="sm" label="Reveal in Explorer" onClick={() => window.clipforge.revealInExplorer(clip.path)}><Icon name="folderOpen" size={15} /></IconButton>
           {confirming ? (
-            <>
-              <button className="danger" onClick={() => void window.clipforge.deleteClip(clip.id)}>Yes</button>
-              <button onClick={() => setConfirming(false)}>No</button>
-            </>
+            <span className="confirm-inline">
+              <Button size="sm" variant="danger" onClick={() => void window.clipforge.deleteClip(clip.id)}>Delete</Button>
+              <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>Cancel</Button>
+            </span>
           ) : (
-            <button title="Delete" onClick={() => setConfirming(true)}>🗑</button>
+            <IconButton size="sm" label="Delete" variant="danger" onClick={() => setConfirming(true)}><Icon name="trash" size={15} /></IconButton>
           )}
         </div>
       </div>
@@ -154,31 +158,23 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
   );
 }
 
-export function Viewer({ clip, onClose }: { clip: ClipRecord; onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
+// Viewer modal — reuses the shared Modal. Preserves reveal + one-click export; Edit opens the trim editor.
+export function Viewer({ clip, onClose, onEdit }: { clip: ClipRecord; onClose: () => void; onEdit?: () => void }) {
   return (
-    <div className="modal" onClick={onClose}>
-      <div className="modal-body viewer" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <strong>{clip.game ?? "Untagged"}</strong>
-          <button onClick={onClose}>×</button>
-        </div>
-        <VideoPlayer src={`file://${clip.path}`} loop />
-        <div className="modal-foot">
-          <button onClick={() => window.clipforge.revealInExplorer(clip.path)}>Reveal in Explorer</button>
-          <button onClick={() => void window.clipforge.startExport(clip.id)}>Export…</button>
-        </div>
-      </div>
-    </div>
+    <Modal open onClose={onClose} size="lg" title={clip.game ?? "Untagged"}
+      sub={<>{relativeDate(clip.createdAt)} · {fmtSize(clip.sizeBytes)} · {fmtDuration(clip.durationMs)}</>}
+      foot={<>
+        <Button icon={<Icon name="folderOpen" size={15} />} onClick={() => window.clipforge.revealInExplorer(clip.path)}>Reveal in Explorer</Button>
+        <span className="spacer" />
+        {onEdit && <Button icon={<Icon name="scissor" size={15} />} onClick={onEdit}>Edit</Button>}
+        <Button variant="primary" icon={<Icon name="link" size={15} />} onClick={() => { void window.clipforge.startExport(clip.id); onClose(); }}>Export</Button>
+      </>}>
+      <VideoPlayer src={`file://${clip.path}`} loop />
+    </Modal>
   );
 }
 
-// Plain <video> with space/arrows/fullscreen — Chromium plays our mp4s natively.
+// Plain <video> with space/arrows — Chromium plays our mp4s natively.
 export function VideoPlayer({ src, loop = false }: { src: string; loop?: boolean }) {
   return (
     <video
