@@ -1,4 +1,7 @@
 # Shard
+**IMPORTANT**
+This is entirely Ai coded I am not an actual developer there will be plenty of bugs and ui issues. Create an issue and let me know about any bugs and why they happen or commit a fix yourself.
+
 
 **A local-first Windows game clipper built on OBS.**
 
