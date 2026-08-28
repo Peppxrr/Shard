@@ -8,14 +8,14 @@ obs-outputs, obs-filters, image-source, text-freetype2).
 OBS Studio — Copyright (C) 2012-2025 Lain Bailey and contributors
 https://obsproject.com/  |  GNU GPL v2.0 (see LICENSE)
 
-This distribution includes a copy of the OBS Studio source tree pinned at tag
-32.2.1 in `vendor/obs-studio`, per the requirements of GPL section 5
-(conveying corresponding source for the GPL-licensed libraries we link).
-Modifications to the vendored OBS source, if any, are listed in
-`vendor/obs-studio` commit history.
+This distribution includes the corresponding OBS Studio source tree pinned at
+tag 32.2.1 in `vendor/obs-studio`, together with Shard's reproducible patches
+and build scripts, consistent with the source-code distribution requirements
+of GNU GPL v2 Section 3. Modifications to the vendored OBS source, if any,
+are represented by the pinned source state and Shard's patch/build history.
 
-OBS is a trademark of Lain Bailey. Shard is not affiliated with or
-endorsed by the OBS Project.
+OBS is a trademark of Lain Bailey. Shard is an independent project and is not
+affiliated with or endorsed by the OBS Project.
 
 UI icons are based on Feather Icons:
 https://github.com/feathericons/feather
