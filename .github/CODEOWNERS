@@ -1,0 +1,10 @@
+# Shard code ownership
+# The repository owner reviews changes across the project.
+* @Peppxrr
+
+# Keep repository policy and contribution configuration owner-reviewed.
+/.github/ @Peppxrr
+/SECURITY.md @Peppxrr
+/CONTRIBUTING.md @Peppxrr
+/LICENSE @Peppxrr
+/NOTICE @Peppxrr
