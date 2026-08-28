@@ -114,7 +114,7 @@ CliOptions parseArgs(int argc, char** argv)
       o.selftestOut = need("--out");
     else if (a == "--help" || a == "-h") {
       std::printf(
-          "clipcore [--config-dir <dir>] [--core-bin <dir>] [--port <n>] [--games <games.json>] [--selftest --out "
+          "shardcore [--config-dir <dir>] [--core-bin <dir>] [--port <n>] [--games <games.json>] [--selftest --out "
           "<dir>]\n");
       std::exit(0);
     }
@@ -187,8 +187,8 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
 
   if (!st.done.load() || !st.ok) {
     std::fprintf(stderr, "SELFTEST {\"ok\":false,\"reason\":\"no clip.saved within timeout\"}\n");
-    ring.stop();
     sources.stopWatchdog();
+    ring.stop();
     return 1;
   }
 
@@ -198,8 +198,8 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
   // Order matters: stop the watchdog before the ring so the capture-activity
   // callback can never touch the ring during teardown, then release sources
   // before obs_shutdown.
-  ring.stop();
   sources.stopWatchdog();
+  ring.stop();
   sources.releaseAll();
   app.shutdown();
   return 0;
@@ -214,7 +214,7 @@ int main(int argc, char** argv)
   if (gameCaptureDiagnosticsEnabled())
     base_set_log_handler(gameCaptureDiagnosticLog, nullptr);
   if (opt.configDir.empty()) {
-    std::fprintf(stderr, "clipcore: --config-dir is required\n");
+    std::fprintf(stderr, "shardcore: --config-dir is required\n");
     return 2;
   }
   if (opt.coreBinDir.empty())
@@ -238,7 +238,7 @@ int main(int argc, char** argv)
   Events events;
   App app(config, events);
   if (!app.init()) {
-    std::fprintf(stderr, "clipcore: %s\n", app.lastError().c_str());
+    std::fprintf(stderr, "shardcore: %s\n", app.lastError().c_str());
     return 2;
   }
 
@@ -260,7 +260,7 @@ int main(int argc, char** argv)
   sources.startWatchdog();
 
   if (!ring.start()) {
-    std::fprintf(stderr, "clipcore: replay ring failed to start\n");
+    std::fprintf(stderr, "shardcore: replay ring failed to start\n");
     sources.stopWatchdog();
     return 3;
   }
@@ -278,7 +278,7 @@ int main(int argc, char** argv)
   g_server = &server;
 
   if (!server.start()) {
-    std::fprintf(stderr, "clipcore: failed to start RPC server\n");
+    std::fprintf(stderr, "shardcore: failed to start RPC server\n");
     sources.stopWatchdog();
     return 4;
   }
@@ -302,7 +302,7 @@ int main(int argc, char** argv)
     std::this_thread::sleep_for(milliseconds(100));
 
   // Ordered shutdown.
-  std::fprintf(stderr, "clipcore: shutdown requested\n");
+  std::fprintf(stderr, "shardcore: shutdown requested\n");
   games.stop();
   statsRun.store(false);
   statsThread.join();

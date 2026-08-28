@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace clipforge {
 
@@ -22,6 +23,15 @@ struct Events {
   }
 };
 
+struct MonitorInfo {
+  int index = 0;
+  std::string id;
+  std::string name;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool primary = false;
+};
+
 // Owns the libobs context: startup, video/audio reset, the main scene,
 // and ordered shutdown. Single-threaded use after startup (OBS calls the
 // various callbacks on its own threads).
@@ -35,6 +45,7 @@ public:
 
   bool init();          // obs_startup + modules + video/audio + scene
   void shutdown();      // obs_shutdown (must be called before process exit)
+  bool resetVideo();    // outputs/sources must be stopped before calling
 
   obs_scene_t* scene() const { return scene_; }
   bool ok() const { return ok_; }
@@ -42,10 +53,10 @@ public:
 
   uint32_t baseWidth() const { return baseWidth_; }
   uint32_t baseHeight() const { return baseHeight_; }
+  std::vector<MonitorInfo> monitors() const;
 
 private:
   bool startup();
-  bool resetVideo();
   bool resetAudio();
 
   Config& config_;

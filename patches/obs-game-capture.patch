@@ -1,8 +1,286 @@
+diff --git a/cmake/windows/architecture.cmake b/cmake/windows/architecture.cmake
+index 1dc2fbd59..73f20c462 100644
+--- a/cmake/windows/architecture.cmake
++++ b/cmake/windows/architecture.cmake
+@@ -104,8 +104,8 @@ else()
+ 
+   add_subdirectory(libobs)
+   add_subdirectory(plugins/win-capture/get-graphics-offsets)
+-  add_subdirectory(plugins/win-capture/graphics-hook)
+-  add_subdirectory(plugins/win-capture/inject-helper)
++  # Shard stages the official signed OBS 32.2.1 target-side payload; do not
++  # compile graphics-hook or inject-helper in the child x86 build.
+   add_subdirectory(plugins/win-dshow/virtualcam-module)
+ 
+   return()
+diff --git a/plugins/win-capture/CMakeLists.txt b/plugins/win-capture/CMakeLists.txt
+index 2214917cc..75c9b17c7 100644
+--- a/plugins/win-capture/CMakeLists.txt
++++ b/plugins/win-capture/CMakeLists.txt
+@@ -1,5 +1,82 @@
+ cmake_minimum_required(VERSION 3.28...3.30)
+ 
++# Shard packages the official signed OBS release payload instead of rebuilding
++# the target-side hook and helpers. Validate the pinned bytes at configure time
++# and embed the same manifest values in the host plugin for runtime checks.
++if(NOT SHARD_OBS_HOOK_PAYLOAD_DIR)
++  message(FATAL_ERROR "SHARD_OBS_HOOK_PAYLOAD_DIR is required")
++endif()
++
++set(_shard_hook_manifest "${SHARD_OBS_HOOK_PAYLOAD_DIR}/manifest.json")
++if(NOT EXISTS "${_shard_hook_manifest}")
++  message(FATAL_ERROR "OBS Game Capture payload manifest not found: ${_shard_hook_manifest}")
++endif()
++
++file(READ "${_shard_hook_manifest}" _shard_hook_manifest_json)
++string(JSON SHARD_OBS_HOOK_PAYLOAD_VERSION GET "${_shard_hook_manifest_json}" obsVersion)
++string(JSON SHARD_OBS_HOOK_PAYLOAD_COMMIT GET "${_shard_hook_manifest_json}" obsCommit)
++string(JSON SHARD_OBS_HOOK_SIGNER GET "${_shard_hook_manifest_json}" signer)
++string(JSON SHARD_GRAPHICS_HOOK64_SHA256 GET "${_shard_hook_manifest_json}" files graphics-hook64.dll sha256)
++string(JSON SHARD_GRAPHICS_HOOK32_SHA256 GET "${_shard_hook_manifest_json}" files graphics-hook32.dll sha256)
++string(JSON SHARD_INJECT_HELPER64_SHA256 GET "${_shard_hook_manifest_json}" files inject-helper64.exe sha256)
++string(JSON SHARD_INJECT_HELPER32_SHA256 GET "${_shard_hook_manifest_json}" files inject-helper32.exe sha256)
++string(JSON SHARD_GRAPHICS_HOOK64_SIGNER GET "${_shard_hook_manifest_json}" files graphics-hook64.dll signerThumbprint)
++string(JSON SHARD_GRAPHICS_HOOK32_SIGNER GET "${_shard_hook_manifest_json}" files graphics-hook32.dll signerThumbprint)
++string(JSON SHARD_INJECT_HELPER64_SIGNER GET "${_shard_hook_manifest_json}" files inject-helper64.exe signerThumbprint)
++string(JSON SHARD_INJECT_HELPER32_SIGNER GET "${_shard_hook_manifest_json}" files inject-helper32.exe signerThumbprint)
++
++if(NOT SHARD_OBS_HOOK_PAYLOAD_VERSION STREQUAL OBS_VERSION_CANONICAL)
++  message(FATAL_ERROR
++    "win-capture ${OBS_VERSION_CANONICAL} cannot use OBS Game Capture payload ${SHARD_OBS_HOOK_PAYLOAD_VERSION}"
++  )
++endif()
++
++foreach(
++  _payload
++  "graphics-hook64.dll;${SHARD_GRAPHICS_HOOK64_SHA256}"
++  "graphics-hook32.dll;${SHARD_GRAPHICS_HOOK32_SHA256}"
++  "inject-helper64.exe;${SHARD_INJECT_HELPER64_SHA256}"
++  "inject-helper32.exe;${SHARD_INJECT_HELPER32_SHA256}"
++)
++  list(GET _payload 0 _payload_name)
++  list(GET _payload 1 _payload_sha256)
++  set(_payload_path "${SHARD_OBS_HOOK_PAYLOAD_DIR}/${_payload_name}")
++  if(NOT EXISTS "${_payload_path}")
++    message(FATAL_ERROR "Official OBS Game Capture payload missing: ${_payload_path}")
++  endif()
++  file(SHA256 "${_payload_path}" _payload_actual_sha256)
++  if(NOT _payload_actual_sha256 STREQUAL _payload_sha256)
++    message(FATAL_ERROR
++      "Official OBS Game Capture payload hash mismatch for ${_payload_name}: "
++      "expected ${_payload_sha256}, got ${_payload_actual_sha256}"
++    )
++  endif()
++endforeach()
++
++file(
++  CONFIGURE
++  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/hook-payload-manifest.h"
++  CONTENT
++    [=[
++#pragma once
++
++#define SHARD_OBS_HOOK_PAYLOAD_VERSION "@SHARD_OBS_HOOK_PAYLOAD_VERSION@"
++#define SHARD_OBS_HOOK_PAYLOAD_COMMIT "@SHARD_OBS_HOOK_PAYLOAD_COMMIT@"
++#define SHARD_OBS_HOOK_SIGNER "@SHARD_OBS_HOOK_SIGNER@"
++
++#define SHARD_GRAPHICS_HOOK64_SHA256 "@SHARD_GRAPHICS_HOOK64_SHA256@"
++#define SHARD_GRAPHICS_HOOK32_SHA256 "@SHARD_GRAPHICS_HOOK32_SHA256@"
++#define SHARD_INJECT_HELPER64_SHA256 "@SHARD_INJECT_HELPER64_SHA256@"
++#define SHARD_INJECT_HELPER32_SHA256 "@SHARD_INJECT_HELPER32_SHA256@"
++
++#define SHARD_GRAPHICS_HOOK64_SIGNER "@SHARD_GRAPHICS_HOOK64_SIGNER@"
++#define SHARD_GRAPHICS_HOOK32_SIGNER "@SHARD_GRAPHICS_HOOK32_SIGNER@"
++#define SHARD_INJECT_HELPER64_SIGNER "@SHARD_INJECT_HELPER64_SIGNER@"
++#define SHARD_INJECT_HELPER32_SIGNER "@SHARD_INJECT_HELPER32_SIGNER@"
++]=]
++  @ONLY
++)
++
+ if(NOT TARGET OBS::obfuscate)
+   add_subdirectory("${CMAKE_SOURCE_DIR}/libobs" "${CMAKE_BINARY_DIR}/libobs")
+ endif()
+@@ -59,6 +136,8 @@ target_compile_definitions(
+     OBS_VERSION="${OBS_VERSION_CANONICAL}"
+ )
+ 
++target_include_directories(win-capture PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
++
+ target_link_libraries(
+   win-capture
+   PRIVATE
+@@ -71,6 +150,9 @@ target_link_libraries(
+     OBS::w32-pthreads
+     OBS::winrt-headers
+     jansson::jansson
++    bcrypt
++    crypt32
++    wintrust
+ )
+ 
+ # Remove once jansson has been fixed on obs-deps
+@@ -81,6 +163,4 @@ target_sources(win-capture PRIVATE win-capture.rc)
+ 
+ set_target_properties_obs(win-capture PROPERTIES FOLDER plugins/win-capture PREFIX "")
+ 
+-add_subdirectory(graphics-hook)
+ add_subdirectory(get-graphics-offsets)
+-add_subdirectory(inject-helper)
 diff --git a/plugins/win-capture/game-capture-file-init.c b/plugins/win-capture/game-capture-file-init.c
-index dc4f3c26b..e07e51606 100644
+index dc4f3c26b..c435aaff6 100644
 --- a/plugins/win-capture/game-capture-file-init.c
 +++ b/plugins/win-capture/game-capture-file-init.c
-@@ -144,22 +144,14 @@ static LSTATUS get_reg(HKEY hkey, LPCWSTR sub_key, LPCWSTR value_name, bool b64)
+@@ -1,105 +1,11 @@
+ #include <windows.h>
+ #include <strsafe.h>
+-#include <shlobj.h>
+-#include <aclapi.h>
+-#include <sddl.h>
+ #include <obs-module.h>
+-#include <util/windows/win-version.h>
+ #include <util/platform.h>
+-#include <util/c99defs.h>
+ #include <util/base.h>
+ 
+-/* ------------------------------------------------------------------------- */
+-/* helper funcs                                                              */
+-
+-static bool has_elevation_internal()
+-{
+-	SID_IDENTIFIER_AUTHORITY sia = SECURITY_NT_AUTHORITY;
+-	PSID sid = NULL;
+-	BOOL elevated = false;
+-	BOOL success;
+-
+-	success = AllocateAndInitializeSid(&sia, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0,
+-					   0, &sid);
+-	if (success && sid) {
+-		CheckTokenMembership(NULL, sid, &elevated);
+-		FreeSid(sid);
+-	}
+-
+-	return elevated;
+-}
+-
+-static bool has_elevation()
+-{
+-	static bool elevated = false;
+-	static bool initialized = false;
+-	if (!initialized) {
+-		elevated = has_elevation_internal();
+-		initialized = true;
+-	}
+-
+-	return elevated;
+-}
+-
+-static bool add_aap_perms(const wchar_t *dir)
+-{
+-	PSECURITY_DESCRIPTOR sd = NULL;
+-	SID *aap_sid = NULL;
+-	SID *bu_sid = NULL;
+-	PACL new_dacl1 = NULL;
+-	PACL new_dacl2 = NULL;
+-	bool success = false;
+-
+-	PACL dacl;
+-	if (GetNamedSecurityInfoW(dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &sd) !=
+-	    ERROR_SUCCESS) {
+-		goto fail;
+-	}
+-
+-	EXPLICIT_ACCESSW ea = {0};
+-	ea.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
+-	ea.grfAccessMode = GRANT_ACCESS;
+-	ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+-	ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+-
+-	/* ALL_APP_PACKAGES */
+-	ConvertStringSidToSidW(L"S-1-15-2-1", &aap_sid);
+-	ea.Trustee.ptstrName = (wchar_t *)aap_sid;
+-
+-	if (SetEntriesInAclW(1, &ea, dacl, &new_dacl1) != ERROR_SUCCESS) {
+-		goto fail;
+-	}
+-
+-	ea.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE;
+-
+-	/* BUILTIN_USERS */
+-	ConvertStringSidToSidW(L"S-1-5-32-545", &bu_sid);
+-	ea.Trustee.ptstrName = (wchar_t *)bu_sid;
+-
+-	DWORD s = SetEntriesInAclW(1, &ea, new_dacl1, &new_dacl2);
+-	if (s != ERROR_SUCCESS) {
+-		goto fail;
+-	}
+-
+-	if (SetNamedSecurityInfoW((wchar_t *)dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, new_dacl2,
+-				  NULL) != ERROR_SUCCESS) {
+-		goto fail;
+-	}
+-
+-	success = true;
+-fail:
+-	if (sd)
+-		LocalFree(sd);
+-	if (new_dacl1)
+-		LocalFree(new_dacl1);
+-	if (new_dacl2)
+-		LocalFree(new_dacl2);
+-	if (aap_sid)
+-		LocalFree(aap_sid);
+-	if (bu_sid)
+-		LocalFree(bu_sid);
+-	return success;
+-}
++/* Shard divergence: normal injection and Vulkan registration both resolve
++ * application-owned files. No machine-wide hook directory is consulted. */
+ 
+ static inline bool file_exists(const wchar_t *path)
+ {
+@@ -111,242 +17,112 @@ static inline bool file_exists(const wchar_t *path)
+ 	return true;
+ }
+ 
+-static LSTATUS get_reg(HKEY hkey, LPCWSTR sub_key, LPCWSTR value_name, bool b64)
++static char *get_private_file(const char *name)
+ {
+-	HKEY key;
+-	LSTATUS status;
+-	DWORD flags = b64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+-	DWORD size = sizeof(DWORD);
+-	DWORD val;
+-
+-	status = RegOpenKeyEx(hkey, sub_key, 0, KEY_READ | flags, &key);
+-	if (status == ERROR_SUCCESS) {
+-		status = RegQueryValueExW(key, value_name, NULL, NULL, (LPBYTE)&val, &size);
+-		RegCloseKey(key);
+-	}
+-	return status;
++	char *module_path = obs_module_file(name);
++	char *absolute_path;
++
++	if (!module_path)
++		return NULL;
++	absolute_path = os_get_abs_path_ptr(module_path);
++	bfree(module_path);
++	return absolute_path;
+ }
+ 
+-#define get_programdata_path(path, subpath)                                                   \
+-	do {                                                                                  \
+-		SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT, path); \
+-		StringCbCatW(path, sizeof(path), L"\\");                                      \
+-		StringCbCatW(path, sizeof(path), subpath);                                    \
+-	} while (false)
+-
+-#define make_filename(str, name, ext)                                \
+-	do {                                                         \
+-		StringCbCatW(str, sizeof(str), name);                \
+-		StringCbCatW(str, sizeof(str), b64 ? L"64" : L"32"); \
+-		StringCbCatW(str, sizeof(str), ext);                 \
+-	} while (false)
+-
  /* ------------------------------------------------------------------------- */
  /* function to get the path to the hook                                      */
  
@@ -23,33 +301,272 @@ index dc4f3c26b..e07e51606 100644
 -	}
 -
 +	/* Shard owns and stages its hook beside the win-capture plugin data.
-+	 * Do not inject the shared ProgramData copy: OBS only refreshes that file
-+	 * when its public version increases, so an equal-version fork can silently
-+	 * load another installation's stale or incompatible DLL. The ProgramData
-+	 * copy remains solely for OBS's Vulkan implicit-layer registration. */
++	 * Selection never consults stock OBS's machine-wide deployment. */
  	return obs_module_file(b64 ? "graphics-hook64.dll" : "graphics-hook32.dll");
  }
  
-@@ -341,12 +333,8 @@ finish:
+ /* ------------------------------------------------------------------------- */
+-/* initialization                                                            */
++/* Shard-owned Vulkan implicit layer registration                            */
+ 
+ #define IMPLICIT_LAYERS L"SOFTWARE\\Khronos\\Vulkan\\ImplicitLayers"
+ 
+ #undef warn
+-#define warn(format, ...) blog(LOG_WARNING, "update_hook_file: " format, ##__VA_ARGS__)
++#define warn(format, ...) blog(LOG_WARNING, "[Shard Vulkan Capture Init]: " format, ##__VA_ARGS__)
+ 
+-static bool update_hook_file(bool b64)
++static bool get_private_manifest_path(bool b64, wchar_t **path)
+ {
+-	wchar_t temp[MAX_PATH];
+-	wchar_t src[MAX_PATH];
+-	wchar_t dst[MAX_PATH];
+-	wchar_t src_json[MAX_PATH];
+-	wchar_t dst_json[MAX_PATH];
++	char *manifest = get_private_file(b64 ? "shard-vulkan64.json" : "shard-vulkan32.json");
++	bool success;
+ 
+-	StringCbCopyW(temp, sizeof(temp),
+-		      L"..\\..\\data\\obs-plugins\\"
+-		      L"win-capture\\");
+-	make_filename(temp, L"obs-vulkan", L".json");
+-
+-	if (_wfullpath(src_json, temp, MAX_PATH) == NULL) {
+-		warn("failed to get full path for %ls", temp);
+-		return false;
+-	}
+-
+-	StringCbCopyW(temp, sizeof(temp),
+-		      L"..\\..\\data\\obs-plugins\\"
+-		      L"win-capture\\");
+-	make_filename(temp, L"graphics-hook", L".dll");
+-
+-	if (_wfullpath(src, temp, MAX_PATH) == NULL) {
+-		warn("failed to get full path for %ls", temp);
+-		return false;
+-	}
+-
+-	get_programdata_path(temp, L"obs-studio-hook\\");
+-	StringCbCopyW(dst_json, sizeof(dst_json), temp);
+-	StringCbCopyW(dst, sizeof(dst), temp);
+-	make_filename(dst_json, L"obs-vulkan", L".json");
+-	make_filename(dst, L"graphics-hook", L".dll");
+-
+-	if (!file_exists(src)) {
+-		warn("source graphics-hook%d.dll missing", b64 ? 64 : 32);
+-		return false;
+-	}
+-	if (!file_exists(src_json)) {
+-		warn("source obs-vulkan%d.json missing", b64 ? 64 : 32);
++	if (!manifest)
+ 		return false;
+-	}
+-	if (!file_exists(dst) || !file_exists(dst_json)) {
+-		if (!CreateDirectoryW(temp, NULL)) {
+-			DWORD err = GetLastError();
+-			if (err != ERROR_ALREADY_EXISTS) {
+-				warn("failed to create directory %ls (%lu)", temp, err);
+-				return false;
+-			}
+-		}
+-		if (has_elevation())
+-			add_aap_perms(temp);
+-		if (!CopyFileW(src_json, dst_json, false)) {
+-			warn("failed to install %ls (%lu)", dst_json, GetLastError());
+-			return false;
+-		}
+-		if (!CopyFileW(src, dst, false)) {
+-			warn("failed to install %ls (%lu)", dst, GetLastError());
+-			return false;
+-		}
+-		return true;
+-	}
+-
+-	if (has_elevation())
+-		add_aap_perms(temp);
+-
+-	struct win_version_info ver_src = {0};
+-	struct win_version_info ver_dst = {0};
+-	if (!get_dll_ver(src, &ver_src)) {
+-		warn("failed to get version of source");
+-		return false;
+-	}
+-#ifndef _DEBUG
+-	if (!get_dll_ver(dst, &ver_dst)) {
+-		warn("failed to get version of %ls", dst);
+-		return false;
+-	}
+-#endif
++	success = os_utf8_to_wcs_ptr(manifest, 0, path) != 0;
++	bfree(manifest);
++	return success;
++}
+ 
+-	/* if source is greater than dst, overwrite new file  */
+-	while (win_version_compare(&ver_dst, &ver_src) < 0) {
+-		if (!CopyFileW(src_json, dst_json, false)) {
+-			warn("failed to update %ls (%lu)", dst_json, GetLastError());
+-			return false;
+-		}
+-		if (!CopyFileW(src, dst, false)) {
+-			warn("failed to update %ls (%lu)", dst, GetLastError());
+-			return false;
+-		}
++static bool private_vulkan_files_exist(bool b64, const wchar_t *manifest)
++{
++	char *hook_utf8 = get_private_file(b64 ? "graphics-hook64.dll" : "graphics-hook32.dll");
++	wchar_t *hook = NULL;
++	bool success = false;
+ 
+-		if (!get_dll_ver(dst, &ver_dst)) {
+-			warn("failed to get version of %ls", dst);
+-			return false;
+-		}
++	if (hook_utf8)
++		os_utf8_to_wcs_ptr(hook_utf8, 0, &hook);
++	if (!hook || !file_exists(hook)) {
++		warn("private graphics-hook%d.dll missing", b64 ? 64 : 32);
++		goto cleanup;
+ 	}
+-
+-	/* do not use if major version incremented in target compared to
+-	 * ours */
+-	if (ver_dst.major > ver_src.major) {
+-		warn("target %ls has major version %d, source has major version %d", dst, ver_dst.major, ver_src.major);
+-		return false;
++	if (!file_exists(manifest)) {
++		warn("private shard-vulkan%d.json missing", b64 ? 64 : 32);
++		goto cleanup;
+ 	}
++	success = true;
+ 
+-	return true;
++cleanup:
++	bfree(hook);
++	bfree(hook_utf8);
++	return success;
+ }
+ 
+-#undef warn
+-#define warn(format, ...) blog(LOG_WARNING, "[Vulkan Capture Init]: " format, ##__VA_ARGS__)
+-
+-/* Sets vulkan layer registry if it doesn't already exist */
+ static void init_vulkan_registry(bool b64)
+ {
+-	DWORD flags = b64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
++	const DWORD flags = b64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
++	wchar_t *manifest = NULL;
+ 	HKEY key = NULL;
+-	LSTATUS s;
+-
+-	wchar_t path[MAX_PATH];
+-	get_programdata_path(path, L"obs-studio-hook\\");
+-	make_filename(path, L"obs-vulkan", L".json");
+-
+-	s = get_reg(HKEY_LOCAL_MACHINE, IMPLICIT_LAYERS, path, b64);
+-
+-	if (s == ERROR_FILE_NOT_FOUND) {
+-		s = get_reg(HKEY_CURRENT_USER, IMPLICIT_LAYERS, path, b64);
+-
+-		if (s != ERROR_FILE_NOT_FOUND && s != ERROR_SUCCESS) {
+-			warn("Failed to query registry keys: %d", (int)s);
+-			goto finish;
+-		}
++	DWORD disposition;
++	DWORD value = 0;
++	DWORD size = sizeof(value);
++	LSTATUS status;
+ 
+-		if (s == ERROR_SUCCESS && has_elevation()) {
+-			s = RegOpenKeyEx(HKEY_CURRENT_USER, IMPLICIT_LAYERS, 0, KEY_WRITE | flags, &key);
+-			if (s == ERROR_SUCCESS) {
+-				RegDeleteValueW(key, path);
+-				RegCloseKey(key);
+-				s = -1;
+-				key = NULL;
+-			}
+-		}
+-	} else if (s != ERROR_SUCCESS) {
+-		warn("Failed to query registry keys: %d", (int)s);
++	if (!get_private_manifest_path(b64, &manifest) || !private_vulkan_files_exist(b64, manifest))
+ 		goto finish;
+-	}
+ 
+-	if (s == ERROR_SUCCESS) {
++	/* A per-user absolute manifest registration is sufficient for the Vulkan
++	 * loader. Its unique filename and layer name cannot collide with OBS. */
++	status = RegCreateKeyExW(HKEY_CURRENT_USER, IMPLICIT_LAYERS, 0, NULL, 0, KEY_READ | KEY_WRITE | flags, NULL,
++				 &key, &disposition);
++	if (status != ERROR_SUCCESS) {
++		warn("failed to open implicit-layer registry key: %ld", status);
+ 		goto finish;
+ 	}
+ 
+-	HKEY type = has_elevation() ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
+-	DWORD temp;
+-
+-	s = RegCreateKeyExW(type, IMPLICIT_LAYERS, 0, NULL, 0, KEY_WRITE | flags, NULL, &key, &temp);
+-	if (s != ERROR_SUCCESS) {
+-		warn("Failed to create registry key");
++	status = RegQueryValueExW(key, manifest, NULL, NULL, (LPBYTE)&value, &size);
++	if (status == ERROR_SUCCESS && value == 0)
+ 		goto finish;
+-	}
+ 
+-	DWORD zero = 0;
+-	s = RegSetValueExW(key, path, 0, REG_DWORD, (const BYTE *)&zero, sizeof(zero));
+-	if (s != ERROR_SUCCESS) {
+-		warn("Failed to set registry value");
+-	}
++	value = 0;
++	status = RegSetValueExW(key, manifest, 0, REG_DWORD, (const BYTE *)&value, sizeof(value));
++	if (status != ERROR_SUCCESS)
++		warn("failed to register private manifest %ls: %ld", manifest, status);
+ 
+ finish:
+ 	if (key)
+ 		RegCloseKey(key);
++	bfree(manifest);
+ }
  
  void init_hook_files()
  {
 -	if (update_hook_file(true)) {
 -		programdata64_hook_exists = true;
-+	if (update_hook_file(true))
- 		init_vulkan_registry(true);
+-		init_vulkan_registry(true);
 -	}
 -	if (update_hook_file(false)) {
 -		programdata32_hook_exists = true;
-+	if (update_hook_file(false))
- 		init_vulkan_registry(false);
+-		init_vulkan_registry(false);
 -	}
++	init_vulkan_registry(true);
++	init_vulkan_registry(false);
  }
 diff --git a/plugins/win-capture/game-capture.c b/plugins/win-capture/game-capture.c
-index 3bf12ef3d..5249c010e 100644
+index 3bf12ef3d..0a9d5bfed 100644
 --- a/plugins/win-capture/game-capture.c
 +++ b/plugins/win-capture/game-capture.c
-@@ -42,6 +42,7 @@
+@@ -6,7 +6,11 @@
+ #include <util/threading.h>
+ #include <util/windows/window-helpers.h>
+ #include <windows.h>
++#include <bcrypt.h>
+ #include <dxgi.h>
++#include <softpub.h>
++#include <wincrypt.h>
++#include <wintrust.h>
+ #include <util/sse-intrin.h>
+ #include <util/util_uint64.h>
+ #include <ipc-util/pipe.h>
+@@ -19,6 +23,7 @@
+ #include "app-helpers.h"
+ #include "audio-helpers.h"
+ #include "nt-stuff.h"
++#include "hook-payload-manifest.h"
+ 
+ #define do_log(level, format, ...) \
+ 	blog(level, "[game-capture: '%s'] " format, obs_source_get_name(gc->source), ##__VA_ARGS__)
+@@ -42,6 +47,7 @@
  #define SETTING_HOOK_RATE            "hook_rate"
  #define SETTING_RGBA10A2_SPACE       "rgb10a2_space"
  #define SETTINGS_COMPAT_INFO         "compat_info"
@@ -57,7 +574,15 @@ index 3bf12ef3d..5249c010e 100644
  
  /* deprecated */
  #define SETTING_ANY_FULLSCREEN   "capture_any_fullscreen"
-@@ -112,6 +113,7 @@ struct game_capture_config {
+@@ -88,6 +94,7 @@
+ 
+ #define DEFAULT_RETRY_INTERVAL 2.0f
+ #define ERROR_RETRY_INTERVAL 4.0f
++#define CAPTURE_INITIALIZATION_TIMEOUT_MS 10000ULL
+ 
+ enum capture_mode { CAPTURE_MODE_ANY, CAPTURE_MODE_WINDOW, CAPTURE_MODE_HOTKEY };
+ 
+@@ -112,6 +119,7 @@ struct game_capture_config {
  	enum hook_rate hook_rate;
  	bool is_10a2_2100pq;
  	bool capture_audio;
@@ -65,15 +590,16 @@ index 3bf12ef3d..5249c010e 100644
  };
  
  typedef DPI_AWARENESS_CONTEXT(WINAPI *PFN_SetThreadDpiAwarenessContext)(DPI_AWARENESS_CONTEXT);
-@@ -124,6 +126,7 @@ struct game_capture {
+@@ -124,6 +132,8 @@ struct game_capture {
  
  	struct cursor_data cursor_data;
  	HANDLE injector_process;
-+	HANDLE injector_log;
++	ULONGLONG injector_started_at;
++	DWORD injector_target_process_id;
  	uint32_t cx;
  	uint32_t cy;
  	uint32_t pitch;
-@@ -195,6 +198,12 @@ struct game_capture {
+@@ -195,6 +205,12 @@ struct game_capture {
  	PFN_GetWindowDpiAwarenessContext get_window_dpi_awareness_context;
  };
  
@@ -86,16 +612,15 @@ index 3bf12ef3d..5249c010e 100644
  struct graphics_offsets offsets32 = {0};
  struct graphics_offsets offsets64 = {0};
  
-@@ -388,6 +397,8 @@ static void game_capture_destroy(void *data)
+@@ -388,6 +404,7 @@ static void game_capture_destroy(void *data)
  {
  	struct game_capture *gc = data;
  	stop_capture(gc);
-+	close_handle(&gc->injector_log);
 +	close_handle(&gc->injector_process);
  
  	if (gc->audio_source)
  		destroy_audio_source(gc->source, &gc->audio_source);
-@@ -446,6 +457,7 @@ static inline void get_config(struct game_capture_config *cfg, obs_data_t *setti
+@@ -446,6 +463,7 @@ static inline void get_config(struct game_capture_config *cfg, obs_data_t *setti
  	cfg->hook_rate = (enum hook_rate)obs_data_get_int(settings, SETTING_HOOK_RATE);
  	cfg->is_10a2_2100pq = strcmp(obs_data_get_string(settings, SETTING_RGBA10A2_SPACE), "2100pq") == 0;
  	cfg->capture_audio = obs_data_get_bool(settings, SETTING_CAPTURE_AUDIO);
@@ -103,7 +628,7 @@ index 3bf12ef3d..5249c010e 100644
  }
  
  static inline int s_cmp(const char *str1, const char *str2)
-@@ -676,28 +688,43 @@ static inline bool is_64bit_windows(void)
+@@ -676,28 +694,43 @@ static inline bool is_64bit_windows(void)
  #endif
  }
  
@@ -136,16 +661,16 @@ index 3bf12ef3d..5249c010e 100644
  	if (!gc->target_process) {
 -		warn("could not open process: %s", gc->config.executable);
 +		warn("could not open process: %s (%lu)", gc->config.executable, GetLastError());
++		return false;
++	}
++
++	if (!query_process_architecture(gc->target_process, &gc->process_is_64bit)) {
++		warn("[GC] FAIL stage=TargetArchitecture pid=%lu error=%lu", (unsigned long)gc->process_id,
++		     (unsigned long)GetLastError());
  		return false;
  	}
  
 -	gc->process_is_64bit = is_64bit_process(gc->target_process);
-+	if (!query_process_architecture(gc->target_process, &gc->process_is_64bit)) {
-+		warn("[GC] FAIL stage=TargetArchitecture pid=%lu error=%lu", (unsigned long)gc->process_id,
-+		     (unsigned long)GetLastError());
-+		return false;
-+	}
-+
 +#ifdef _WIN64
 +	const char *shard_arch = "x64";
 +#else
@@ -157,7 +682,7 @@ index 3bf12ef3d..5249c010e 100644
  	gc->is_app = is_app(gc->target_process);
  	if (gc->is_app) {
  		gc->app_sid = get_app_sid(gc->target_process);
-@@ -737,6 +764,8 @@ static inline bool init_texture_mutexes(struct game_capture *gc)
+@@ -737,6 +770,8 @@ static inline bool init_texture_mutexes(struct game_capture *gc)
  		}
  		return false;
  	}
@@ -166,16 +691,15 @@ index 3bf12ef3d..5249c010e 100644
  
  	return true;
  }
-@@ -799,6 +828,8 @@ static inline bool init_hook_info(struct game_capture *gc)
+@@ -799,6 +834,7 @@ static inline bool init_hook_info(struct game_capture *gc)
  	gc->global_hook_info->UNUSED_use_scale = false;
  	gc->global_hook_info->allow_srgb_alias = true;
  	reset_frame_interval(gc);
-+	gc->global_hook_info->shard_diagnostics = gc->config.diagnostics ? 1 : 0;
 +	gc_diag("stage=HookInfo result=opened pid=%lu", (unsigned long)gc->process_id);
  
  	obs_enter_graphics();
  	if (!gs_shared_texture_available()) {
-@@ -826,6 +857,7 @@ static inline bool init_pipe(struct game_capture *gc)
+@@ -826,6 +862,7 @@ static inline bool init_pipe(struct game_capture *gc)
  		warn("init_pipe: failed to start pipe");
  		return false;
  	}
@@ -183,7 +707,7 @@ index 3bf12ef3d..5249c010e 100644
  
  	return true;
  }
-@@ -837,78 +869,169 @@ static inline int inject_library(HANDLE process, const wchar_t *dll)
+@@ -837,78 +874,425 @@ static inline int inject_library(HANDLE process, const wchar_t *dll)
  				  0x12897dd89168789a, "GbfkDaezbp~X", 0x76aff7238788f7db);
  }
  
@@ -224,7 +748,7 @@ index 3bf12ef3d..5249c010e 100644
 +	bool success = false;
 +
 +	if (!os_utf8_to_wcs_ptr(path, 0, &path_w))
-+		return false;
+ 		return false;
 +
 +	file = CreateFileW(path_w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 +	bfree(path_w);
@@ -256,8 +780,8 @@ index 3bf12ef3d..5249c010e 100644
 +	const WORD expected = gc->process_is_64bit ? IMAGE_FILE_MACHINE_AMD64 : IMAGE_FILE_MACHINE_I386;
 +	if (!get_binary_machine(path, &machine)) {
 +		warn("[GC] FAIL stage=%sArchitecture path=\"%s\" error=%lu", label, path, GetLastError());
- 		return false;
- 	}
++		return false;
++	}
 +	if (machine != expected) {
 +		warn("[GC] FAIL stage=%sArchitecture expected=%s actual=%s path=\"%s\"", label, machine_name(expected),
 +		     machine_name(machine), path);
@@ -267,17 +791,266 @@ index 3bf12ef3d..5249c010e 100644
 +	gc_diag("stage=%sArchitecture result=success arch=%s path=\"%s\"", label, machine_name(machine), path);
 +	return true;
 +}
++
++static bool get_final_path(const char *path, bool directory, wchar_t **final_path)
++{
++	wchar_t *path_w = NULL;
++	HANDLE handle = INVALID_HANDLE_VALUE;
++	DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
++	DWORD length;
++	bool success = false;
++
++	if (!os_utf8_to_wcs_ptr(path, 0, &path_w))
++		return false;
++	handle = CreateFileW(path_w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
++			     OPEN_EXISTING, directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL, NULL);
++	bfree(path_w);
++	if (handle == INVALID_HANDLE_VALUE)
++		return false;
++
++	length = GetFinalPathNameByHandleW(handle, NULL, 0, flags);
++	if (!length)
++		goto cleanup;
++	*final_path = bmalloc((length + 1) * sizeof(wchar_t));
++	if (!GetFinalPathNameByHandleW(handle, *final_path, length + 1, flags)) {
++		bfree(*final_path);
++		*final_path = NULL;
++		goto cleanup;
++	}
++	success = true;
++
++cleanup:
++	CloseHandle(handle);
++	return success;
++}
++
++static bool path_is_within(const wchar_t *root, const wchar_t *path)
++{
++	size_t root_length = wcslen(root);
++	while (root_length && (root[root_length - 1] == L'\\' || root[root_length - 1] == L'/'))
++		root_length--;
++	return root_length && _wcsnicmp(root, path, root_length) == 0 &&
++	       (path[root_length] == L'\\' || path[root_length] == L'/');
++}
++
++static bool validate_private_artifact_path(struct game_capture *gc, const char *path, const char *label)
++{
++	char *root_rel = obs_module_file(".");
++	char *root_abs = root_rel ? os_get_abs_path_ptr(root_rel) : NULL;
++	wchar_t *root_final = NULL;
++	wchar_t *path_final = NULL;
++	char *path_final_utf8 = NULL;
++	bool success = false;
++
++	bfree(root_rel);
++	if (!root_abs || !get_final_path(root_abs, true, &root_final) || !get_final_path(path, false, &path_final)) {
++		warn("[GC] FAIL stage=%sPrivatePath error=%lu path=\"%s\"", label, GetLastError(), path);
++		goto cleanup;
++	}
++	if (!path_is_within(root_final, path_final)) {
++		warn("[GC] FAIL stage=%sPrivatePath reason=outside_shard_capture_root path=\"%s\"", label, path);
++		goto cleanup;
++	}
++
++	os_wcs_to_utf8_ptr(path_final, 0, &path_final_utf8);
++	gc_diag("stage=%sPrivatePath result=success path=\"%s\"", label,
++		path_final_utf8 ? path_final_utf8 : path);
++	success = true;
++
++cleanup:
++	bfree(path_final_utf8);
++	bfree(path_final);
++	bfree(root_final);
++	bfree(root_abs);
++	return success;
++}
++
++static void bytes_to_hex(const BYTE *bytes, DWORD size, char *hex)
++{
++	static const char digits[] = "0123456789ABCDEF";
++	for (DWORD i = 0; i < size; i++) {
++		hex[i * 2] = digits[bytes[i] >> 4];
++		hex[i * 2 + 1] = digits[bytes[i] & 0x0F];
++	}
++	hex[size * 2] = '\0';
++}
++
++static bool sha256_file(const wchar_t *path, char hash_hex[65])
++{
++	BCRYPT_ALG_HANDLE algorithm = NULL;
++	BCRYPT_HASH_HANDLE hash = NULL;
++	PUCHAR hash_object = NULL;
++	HANDLE file = INVALID_HANDLE_VALUE;
++	DWORD object_size = 0;
++	DWORD result_size = 0;
++	BYTE digest[32];
++	BYTE buffer[64 * 1024];
++	bool success = false;
++
++	if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0)))
++		goto cleanup;
++	if (!BCRYPT_SUCCESS(BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, (PUCHAR)&object_size,
++					      sizeof(object_size), &result_size, 0)))
++		goto cleanup;
++	hash_object = bmalloc(object_size);
++	if (!BCRYPT_SUCCESS(BCryptCreateHash(algorithm, &hash, hash_object, object_size, NULL, 0, 0)))
++		goto cleanup;
++
++	file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++	if (file == INVALID_HANDLE_VALUE)
++		goto cleanup;
++
++	for (;;) {
++		DWORD bytes_read = 0;
++		if (!ReadFile(file, buffer, sizeof(buffer), &bytes_read, NULL))
++			goto cleanup;
++		if (!bytes_read)
++			break;
++		if (!BCRYPT_SUCCESS(BCryptHashData(hash, buffer, bytes_read, 0)))
++			goto cleanup;
++	}
++	if (!BCRYPT_SUCCESS(BCryptFinishHash(hash, digest, sizeof(digest), 0)))
++		goto cleanup;
++
++	bytes_to_hex(digest, sizeof(digest), hash_hex);
++	success = true;
++
++cleanup:
++	if (file != INVALID_HANDLE_VALUE)
++		CloseHandle(file);
++	if (hash)
++		BCryptDestroyHash(hash);
++	bfree(hash_object);
++	if (algorithm)
++		BCryptCloseAlgorithmProvider(algorithm, 0);
++	return success;
++}
++
++static bool authenticode_signer(const wchar_t *path, char signer_name[256], char thumbprint[41],
++				LONG *trust_status)
++{
++	WINTRUST_FILE_INFO file_info = {0};
++	WINTRUST_DATA trust = {0};
++	GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
++	HCERTSTORE store = NULL;
++	HCRYPTMSG message = NULL;
++	CMSG_SIGNER_INFO *signer = NULL;
++	PCCERT_CONTEXT certificate = NULL;
++	DWORD encoding = 0;
++	DWORD content_type = 0;
++	DWORD format_type = 0;
++	DWORD signer_size = 0;
++	BYTE certificate_hash[20];
++	DWORD certificate_hash_size = sizeof(certificate_hash);
++	bool success = false;
++
++	file_info.cbStruct = sizeof(file_info);
++	file_info.pcwszFilePath = path;
++	trust.cbStruct = sizeof(trust);
++	trust.dwUIChoice = WTD_UI_NONE;
++	trust.fdwRevocationChecks = WTD_REVOKE_NONE;
++	trust.dwUnionChoice = WTD_CHOICE_FILE;
++	trust.pFile = &file_info;
++	trust.dwStateAction = WTD_STATEACTION_VERIFY;
++	trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
++
++	*trust_status = WinVerifyTrust(INVALID_HANDLE_VALUE, &action, &trust);
++	if (*trust_status != ERROR_SUCCESS)
++		goto cleanup;
++
++	if (!CryptQueryObject(CERT_QUERY_OBJECT_FILE, path, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
++			      CERT_QUERY_FORMAT_FLAG_BINARY, 0, &encoding, &content_type, &format_type, &store,
++			      &message, NULL))
++		goto cleanup;
++	if (!CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, NULL, &signer_size))
++		goto cleanup;
++	signer = bmalloc(signer_size);
++	if (!CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, signer, &signer_size))
++		goto cleanup;
++
++	CERT_INFO certificate_info = {0};
++	certificate_info.Issuer = signer->Issuer;
++	certificate_info.SerialNumber = signer->SerialNumber;
++	certificate = CertFindCertificateInStore(store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0,
++						 CERT_FIND_SUBJECT_CERT, &certificate_info, NULL);
++	if (!certificate ||
++	    !CertGetCertificateContextProperty(certificate, CERT_SHA1_HASH_PROP_ID, certificate_hash,
++					       &certificate_hash_size) ||
++	    certificate_hash_size != sizeof(certificate_hash))
++		goto cleanup;
++	if (CertGetNameStringA(certificate, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, signer_name, 256) <= 1)
++		goto cleanup;
++
++	bytes_to_hex(certificate_hash, certificate_hash_size, thumbprint);
++	success = true;
++
++cleanup:
++	trust.dwStateAction = WTD_STATEACTION_CLOSE;
++	WinVerifyTrust(INVALID_HANDLE_VALUE, &action, &trust);
++	if (certificate)
++		CertFreeCertificateContext(certificate);
++	bfree(signer);
++	if (message)
++		CryptMsgClose(message);
++	if (store)
++		CertCloseStore(store, 0);
++	return success;
++}
++
++static bool validate_release_binary(struct game_capture *gc, const char *path, const char *label,
++				    const char *expected_hash, const char *expected_signer)
++{
++	wchar_t *path_w = NULL;
++	char actual_hash[65] = {0};
++	char signer_name[256] = {0};
++	char actual_signer[41] = {0};
++	LONG trust_status = TRUST_E_NOSIGNATURE;
++	bool success = false;
++
++	if (!os_utf8_to_wcs_ptr(path, 0, &path_w))
++		goto cleanup;
++	if (!sha256_file(path_w, actual_hash)) {
++		warn("[GC] FAIL stage=%sPayloadHash reason=read_failed path=\"%s\" error=%lu", label, path,
++		     GetLastError());
++		goto cleanup;
++	}
++	if (_stricmp(actual_hash, expected_hash) != 0) {
++		warn("[GC] FAIL stage=%sPayloadHash expected=%s actual=%s path=\"%s\"; refusing injection", label,
++		     expected_hash, actual_hash, path);
++		goto cleanup;
++	}
++	if (!authenticode_signer(path_w, signer_name, actual_signer, &trust_status)) {
++		warn("[GC] FAIL stage=%sAuthenticode status=0x%08lX path=\"%s\"; refusing injection", label,
++		     (unsigned long)trust_status, path);
++		goto cleanup;
++	}
++	if (strcmp(signer_name, SHARD_OBS_HOOK_SIGNER) != 0 || _stricmp(actual_signer, expected_signer) != 0) {
++		warn("[GC] FAIL stage=%sSigner expected=\"%s\"/%s actual=\"%s\"/%s path=\"%s\"; refusing injection",
++		     label, SHARD_OBS_HOOK_SIGNER, expected_signer, signer_name, actual_signer, path);
++		goto cleanup;
+ 	}
  
 -	path_ret = _wfullpath(hook_path_abs_w, hook_path_rel_w, MAX_PATH);
 -	bfree(hook_path_rel_w);
++	gc_diag("stage=%sPayloadVerification result=success obs=%s sha256=%s signer=\"%s\" thumbprint=%s",
++		label, SHARD_OBS_HOOK_PAYLOAD_VERSION, actual_hash, signer_name, actual_signer);
++	success = true;
+ 
+-	if (path_ret == NULL) {
+-		warn("hook_direct: could not make absolute path");
++cleanup:
++	if (!success)
++		gc->error_acquiring = true;
++	bfree(path_w);
++	return success;
++}
++
 +static inline bool hook_direct(struct game_capture *gc, const char *hook_path_abs)
 +{
 +	wchar_t *hook_path_abs_w = NULL;
 +	HANDLE process;
 +	int ret;
- 
--	if (path_ret == NULL) {
--		warn("hook_direct: could not make absolute path");
++
 +	os_utf8_to_wcs_ptr(hook_path_abs, 0, &hook_path_abs_w);
 +	if (!hook_path_abs_w) {
 +		warn("hook_direct: could not convert string");
@@ -307,21 +1080,40 @@ index 3bf12ef3d..5249c010e 100644
  }
  
 -static inline bool create_inject_process(struct game_capture *gc, const char *inject_path, const char *hook_dll)
-+static inline bool create_inject_process(struct game_capture *gc, const char *inject_path_abs,
-+					 const char *hook_dll_abs)
++static bool helper_attempt_blocked(struct game_capture *gc)
  {
- 	wchar_t *command_line_w = malloc(4096 * sizeof(wchar_t));
+-	wchar_t *command_line_w = malloc(4096 * sizeof(wchar_t));
 -	wchar_t *inject_path_w;
 -	wchar_t *hook_dll_w;
++	if (!gc->injector_target_process_id)
++		return false;
++
++	const ULONGLONG elapsed = GetTickCount64() - gc->injector_started_at;
++	const bool helper_running = gc->injector_process && !object_signalled(gc->injector_process);
++	if (helper_running || elapsed < CAPTURE_INITIALIZATION_TIMEOUT_MS) {
++		gc_diag("stage=HelperLaunch result=deferred previous_target_pid=%lu helper=%s elapsed_ms=%llu "
++			"initialization_timeout_ms=%llu",
++			(unsigned long)gc->injector_target_process_id, helper_running ? "running" : "completed",
++			(unsigned long long)elapsed, (unsigned long long)CAPTURE_INITIALIZATION_TIMEOUT_MS);
++		return true;
++	}
++
++	if (gc->injector_process)
++		close_handle(&gc->injector_process);
++	gc->injector_target_process_id = 0;
++	gc->injector_started_at = 0;
++	return false;
++}
++
++static inline bool create_inject_process(struct game_capture *gc, const char *inject_path_abs,
++					 const char *hook_dll_abs)
++{
++	wchar_t *command_line_w = NULL;
 +	wchar_t *inject_path_w = NULL;
 +	wchar_t *hook_dll_w = NULL;
  	bool anti_cheat = use_anticheat(gc);
  	PROCESS_INFORMATION pi = {0};
  	STARTUPINFO si = {0};
-+	SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
-+	HANDLE log_read = NULL;
-+	HANDLE log_write = NULL;
-+	bool helper_diagnostics = false;
  	bool success = false;
  
 -	char *abs_inject_path = os_get_abs_path_ptr(inject_path);
@@ -329,7 +1121,12 @@ index 3bf12ef3d..5249c010e 100644
 -
 -	os_utf8_to_wcs_ptr(abs_inject_path, 0, &inject_path_w);
 -	os_utf8_to_wcs_ptr(abs_hook_dll, 0, &hook_dll_w);
--
++	if (helper_attempt_blocked(gc))
++		goto cleanup;
++	command_line_w = malloc(4096 * sizeof(wchar_t));
++	if (!command_line_w)
++		goto cleanup;
+ 
 -	bfree(abs_inject_path);
 -	bfree(abs_hook_dll);
 +	os_utf8_to_wcs_ptr(inject_path_abs, 0, &inject_path_w);
@@ -338,52 +1135,34 @@ index 3bf12ef3d..5249c010e 100644
 +		goto cleanup;
  
  	si.cb = sizeof(si);
-+	if (gc->config.diagnostics) {
-+		if (CreatePipe(&log_read, &log_write, &sa, 0) &&
-+		    SetHandleInformation(log_read, HANDLE_FLAG_INHERIT, 0)) {
-+			helper_diagnostics = true;
-+			si.dwFlags = STARTF_USESTDHANDLES;
-+			si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-+			si.hStdOutput = log_write;
-+			si.hStdError = log_write;
-+		} else {
-+			warn("[GC] FAIL stage=HelperDiagnosticPipe error=%lu", GetLastError());
-+			close_handle(&log_read);
-+			close_handle(&log_write);
-+		}
-+	}
- 
+-
 -	swprintf(command_line_w, 4096, L"\"%s\" \"%s\" %lu %lu", inject_path_w, hook_dll_w, (unsigned long)anti_cheat,
 -		 anti_cheat ? gc->thread_id : gc->process_id);
-+	swprintf(command_line_w, 4096, L"\"%s\" \"%s\" %lu %lu %lu", inject_path_w, hook_dll_w,
-+		 (unsigned long)anti_cheat, anti_cheat ? gc->thread_id : gc->process_id,
-+		 (unsigned long)helper_diagnostics);
++	swprintf(command_line_w, 4096, L"\"%s\" \"%s\" %lu %lu", inject_path_w, hook_dll_w,
++		 (unsigned long)anti_cheat, anti_cheat ? gc->thread_id : gc->process_id);
  
--	success = !!CreateProcessW(inject_path_w, command_line_w, NULL, NULL, false, CREATE_NO_WINDOW, NULL, NULL, &si,
--				   &pi);
-+	success = !!CreateProcessW(inject_path_w, command_line_w, NULL, NULL, helper_diagnostics, CREATE_NO_WINDOW, NULL,
-+				   NULL, &si, &pi);
-+	close_handle(&log_write);
+ 	success = !!CreateProcessW(inject_path_w, command_line_w, NULL, NULL, false, CREATE_NO_WINDOW, NULL, NULL, &si,
+ 				   &pi);
  	if (success) {
  		CloseHandle(pi.hThread);
  		gc->injector_process = pi.hProcess;
-+		gc->injector_log = log_read;
-+		log_read = NULL;
-+		gc_diag("stage=HelperLaunch result=success helper_pid=%lu mode=%s target_tid=%lu",
++		gc->injector_started_at = GetTickCount64();
++		gc->injector_target_process_id = gc->process_id;
++		gc_diag("stage=HelperLaunch result=success helper_pid=%lu mode=%s target_pid=%lu target_tid=%lu "
++			"initialization_timeout_ms=%llu",
 +			(unsigned long)pi.dwProcessId, anti_cheat ? "compatibility" : "direct",
-+			(unsigned long)gc->thread_id);
++			(unsigned long)gc->process_id, (unsigned long)gc->thread_id,
++			(unsigned long long)CAPTURE_INITIALIZATION_TIMEOUT_MS);
  	} else {
 -		warn("Failed to create inject helper process: %lu", GetLastError());
 +		warn("[GC] FAIL stage=HelperLaunch error=%lu", GetLastError());
  	}
  
 +cleanup:
-+	close_handle(&log_read);
-+	close_handle(&log_write);
  	free(command_line_w);
  	bfree(inject_path_w);
  	bfree(hook_dll_w);
-@@ -921,21 +1044,32 @@ static inline bool inject_hook(struct game_capture *gc)
+@@ -921,23 +1305,49 @@ static inline bool inject_hook(struct game_capture *gc)
  {
  	bool matching_architecture;
  	bool success = false;
@@ -393,6 +1172,13 @@ index 3bf12ef3d..5249c010e 100644
 +	char *hook_path_rel;
 +	char *inject_path = NULL;
 +	char *hook_path = NULL;
++	const char *hook_hash = gc->process_is_64bit ? SHARD_GRAPHICS_HOOK64_SHA256 : SHARD_GRAPHICS_HOOK32_SHA256;
++	const char *hook_signer =
++		gc->process_is_64bit ? SHARD_GRAPHICS_HOOK64_SIGNER : SHARD_GRAPHICS_HOOK32_SIGNER;
++	const char *helper_hash =
++		gc->process_is_64bit ? SHARD_INJECT_HELPER64_SHA256 : SHARD_INJECT_HELPER32_SHA256;
++	const char *helper_signer =
++		gc->process_is_64bit ? SHARD_INJECT_HELPER64_SIGNER : SHARD_INJECT_HELPER32_SIGNER;
  
  	if (gc->process_is_64bit) {
 -		inject_path = obs_module_file("inject-helper64.exe");
@@ -419,12 +1205,22 @@ index 3bf12ef3d..5249c010e 100644
 +	gc_diag("stage=ResolvedPaths helper=\"%s\" hook=\"%s\"", inject_path, hook_path);
 +	if (!check_file_integrity(gc, inject_path, "inject helper") ||
 +	    !check_file_integrity(gc, hook_path, "graphics hook") ||
++	    !validate_private_artifact_path(gc, inject_path, "Helper") ||
++	    !validate_private_artifact_path(gc, hook_path, "HookDll") ||
 +	    !validate_binary_architecture(gc, inject_path, "Helper") ||
-+	    !validate_binary_architecture(gc, hook_path, "HookDll")) {
++	    !validate_binary_architecture(gc, hook_path, "HookDll") ||
++	    !validate_release_binary(gc, inject_path, "Helper", helper_hash, helper_signer) ||
++	    !validate_release_binary(gc, hook_path, "HookDll", hook_hash, hook_signer)) {
  		goto cleanup;
  	}
++	gc_diag("injection_hook_source=shard_private_official_obs obs=%s commit=%s", SHARD_OBS_HOOK_PAYLOAD_VERSION,
++		SHARD_OBS_HOOK_PAYLOAD_COMMIT);
++	gc_diag("injection_hook_path=\"%s\" target_pid=%lu target=\"%s\"", hook_path,
++		(unsigned long)gc->process_id, gc->config.executable);
  
-@@ -1047,6 +1181,8 @@ static bool init_hook(struct game_capture *gc)
+ #ifdef _WIN64
+ 	matching_architecture = gc->process_is_64bit;
+@@ -1047,6 +1457,8 @@ static bool init_hook(struct game_capture *gc)
  		if (!inject_hook(gc)) {
  			return false;
  		}
@@ -433,7 +1229,7 @@ index 3bf12ef3d..5249c010e 100644
  	}
  	if (!init_texture_mutexes(gc)) {
  		return false;
-@@ -1057,8 +1193,13 @@ static bool init_hook(struct game_capture *gc)
+@@ -1057,8 +1469,13 @@ static bool init_hook(struct game_capture *gc)
  	if (!init_events(gc)) {
  		return false;
  	}
@@ -448,7 +1244,7 @@ index 3bf12ef3d..5249c010e 100644
  
  	gc->window = gc->next_window;
  	gc->next_window = NULL;
-@@ -1175,17 +1316,18 @@ static void try_hook(struct game_capture *gc)
+@@ -1175,17 +1592,18 @@ static void try_hook(struct game_capture *gc)
  
  	if (gc->next_window) {
  		gc->thread_id = GetWindowThreadProcessId(gc->next_window, &gc->process_id);
@@ -473,74 +1269,49 @@ index 3bf12ef3d..5249c010e 100644
  			gc->error_acquiring = true;
  			return;
  		}
-@@ -1688,11 +1830,37 @@ static void check_foreground_window(struct game_capture *gc, float seconds)
+@@ -1688,6 +2106,7 @@ static void check_foreground_window(struct game_capture *gc, float seconds)
  	}
  }
  
-+static void drain_injector_log(struct game_capture *gc)
-+{
-+	if (!gc->injector_log)
-+		return;
-+
-+	for (;;) {
-+		DWORD available = 0;
-+		if (!PeekNamedPipe(gc->injector_log, NULL, 0, NULL, &available, NULL)) {
-+			if (GetLastError() == ERROR_BROKEN_PIPE)
-+				close_handle(&gc->injector_log);
-+			return;
-+		}
-+		if (!available)
-+			return;
-+
-+		char buffer[2049];
-+		DWORD bytes_read = 0;
-+		const DWORD requested = available < sizeof(buffer) - 1 ? available : (DWORD)sizeof(buffer) - 1;
-+		if (!ReadFile(gc->injector_log, buffer, requested, &bytes_read, NULL) || !bytes_read)
-+			return;
-+		buffer[bytes_read] = '\0';
-+		info("%s", buffer);
-+	}
-+}
 +
  static void game_capture_tick(void *data, float seconds)
  {
  	struct game_capture *gc = data;
- 	bool deactivate = os_atomic_set_bool(&gc->deactivate_hook, false);
- 	bool activate_now = os_atomic_set_bool(&gc->activate_hook_now, false);
-+	drain_injector_log(gc);
+@@ -1744,19 +2163,27 @@ static void game_capture_tick(void *data, float seconds)
  
- 	if (activate_now) {
- 		HWND hwnd = (HWND)(uintptr_t)os_atomic_load_long(&gc->hotkey_window);
-@@ -1742,21 +1910,27 @@ static void game_capture_tick(void *data, float seconds)
- 	if (gc->injector_process && object_signalled(gc->injector_process)) {
- 		DWORD exit_code = 0;
- 
-+		drain_injector_log(gc);
  		GetExitCodeProcess(gc->injector_process, &exit_code);
  		close_handle(&gc->injector_process);
-+		close_handle(&gc->injector_log);
- 
+-
  		if (exit_code != 0) {
 -			warn("inject process failed: %ld", (long)exit_code);
-+			warn("[GC] FAIL stage=HelperExit result=%ld", (long)exit_code);
- 			gc->error_acquiring = true;
- 
- 		} else if (!gc->capturing) {
-+			gc_diag("stage=HelperExit result=success capture_ready=false");
+-			gc->error_acquiring = true;
+-
+-		} else if (!gc->capturing) {
++			warn("[GC] FAIL stage=HelperExit result=%ld; retry remains deferred until initialization timeout",
++			     (long)exit_code);
  			gc->retry_interval = ERROR_RETRY_INTERVAL * hook_rate_to_float(gc->config.hook_rate);
- 			stop_capture(gc);
+-			stop_capture(gc);
 +		} else {
-+			gc_diag("stage=HelperExit result=success capture_ready=true");
++			gc_diag("stage=HelperExit result=success capture_ready=%s", gc->capturing ? "true" : "false");
  		}
  	}
  
++	if (gc->active && !gc->capturing && gc->injector_target_process_id && !gc->injector_process &&
++	    GetTickCount64() - gc->injector_started_at >= CAPTURE_INITIALIZATION_TIMEOUT_MS) {
++		warn("[GC] FAIL stage=CaptureInitialization reason=timeout target_pid=%lu timeout_ms=%llu; retrying",
++		     (unsigned long)gc->injector_target_process_id,
++		     (unsigned long long)CAPTURE_INITIALIZATION_TIMEOUT_MS);
++		gc->retry_interval = ERROR_RETRY_INTERVAL * hook_rate_to_float(gc->config.hook_rate);
++		stop_capture(gc);
++	}
++
  	if (gc->hook_ready && object_signalled(gc->hook_ready)) {
  		debug("capture initializing!");
 +		gc_diag("stage=HookReady result=signaled pid=%lu", (unsigned long)gc->process_id);
  		enum capture_result result = init_capture_data(gc);
  
  		if (result == CAPTURE_SUCCESS)
-@@ -1785,6 +1959,9 @@ static void game_capture_tick(void *data, float seconds)
+@@ -1785,6 +2212,9 @@ static void game_capture_tick(void *data, float seconds)
  			if (gc->audio_source) {
  				reconfigure_audio_source(gc->audio_source, gc->window);
  			}
@@ -550,391 +1321,3 @@ index 3bf12ef3d..5249c010e 100644
  		}
  		if (result != CAPTURE_RETRY && !gc->capturing) {
  			gc->retry_interval = ERROR_RETRY_INTERVAL * hook_rate_to_float(gc->config.hook_rate);
-diff --git a/plugins/win-capture/graphics-hook/d3d11-capture.cpp b/plugins/win-capture/graphics-hook/d3d11-capture.cpp
-index 5e796d964..3cf78867e 100644
---- a/plugins/win-capture/graphics-hook/d3d11-capture.cpp
-+++ b/plugins/win-capture/graphics-hook/d3d11-capture.cpp
-@@ -223,6 +223,9 @@ static void d3d11_init(IDXGISwapChain *swap)
- 		hlog_hr("d3d11_init: failed to get device from swap", hr);
- 		return;
- 	}
-+	if (global_hook_info->shard_diagnostics)
-+		hlog("[GC] ts_ms=%llu stage=GraphicsApiDetected api=D3D11 swapchain=%p",
-+		     (unsigned long long)GetTickCount64(), swap);
- 
- 	data.device->Release();
- 
-@@ -241,11 +244,17 @@ static void d3d11_init(IDXGISwapChain *swap)
- 
- static inline void d3d11_copy_texture(ID3D11Resource *dst, ID3D11Resource *src)
- {
-+	static bool first_frame_logged = false;
- 	if (data.multisampled) {
- 		data.context->ResolveSubresource(dst, 0, src, 0, data.format);
- 	} else {
- 		data.context->CopyResource(dst, src);
- 	}
-+	if (!first_frame_logged && global_hook_info->shard_diagnostics) {
-+		hlog("[GC] ts_ms=%llu stage=FirstFrameCopied api=D3D11",
-+		     (unsigned long long)GetTickCount64());
-+		first_frame_logged = true;
-+	}
- }
- 
- static inline void d3d11_shtex_capture(ID3D11Resource *backbuffer)
-diff --git a/plugins/win-capture/graphics-hook/d3d12-capture.cpp b/plugins/win-capture/graphics-hook/d3d12-capture.cpp
-index 991c4c6a2..5a7307da7 100644
---- a/plugins/win-capture/graphics-hook/d3d12-capture.cpp
-+++ b/plugins/win-capture/graphics-hook/d3d12-capture.cpp
-@@ -247,6 +247,9 @@ static void d3d12_init(IDXGISwapChain *swap)
- 	const HRESULT hr = swap->GetDevice(IID_PPV_ARGS(&device));
- 	if (SUCCEEDED(hr)) {
- 		hlog("d3d12_init: device=0x%" PRIX64, (uint64_t)(uintptr_t)device);
-+		if (global_hook_info->shard_diagnostics)
-+			hlog("[GC] ts_ms=%llu stage=GraphicsApiDetected api=D3D12 swapchain=%p",
-+			     (unsigned long long)GetTickCount64(), swap);
- 
- 		HWND window;
- 		UINT count = d3d12_init_format(swap, window);
-@@ -269,11 +272,17 @@ static void d3d12_init(IDXGISwapChain *swap)
- 
- static inline void d3d12_copy_texture(ID3D11Resource *dst, ID3D11Resource *src)
- {
-+	static bool first_frame_logged = false;
- 	if (data.multisampled) {
- 		data.context11->ResolveSubresource(dst, 0, src, 0, data.format);
- 	} else {
- 		data.context11->CopyResource(dst, src);
- 	}
-+	if (!first_frame_logged && global_hook_info->shard_diagnostics) {
-+		hlog("[GC] ts_ms=%llu stage=FirstFrameCopied api=D3D12",
-+		     (unsigned long long)GetTickCount64());
-+		first_frame_logged = true;
-+	}
- }
- 
- static inline void d3d12_shtex_capture(IDXGISwapChain *swap)
-diff --git a/plugins/win-capture/graphics-hook/graphics-hook.c b/plugins/win-capture/graphics-hook/graphics-hook.c
-index b6b3e9ec1..915ce0115 100644
---- a/plugins/win-capture/graphics-hook/graphics-hook.c
-+++ b/plugins/win-capture/graphics-hook/graphics-hook.c
-@@ -59,6 +59,11 @@ static struct thread_data thread_data = {0};
- volatile bool active = false;
- struct hook_info *global_hook_info = NULL;
- 
-+static inline bool shard_diagnostics_enabled(void)
-+{
-+	return global_hook_info && global_hook_info->shard_diagnostics != 0;
-+}
-+
- static inline void wait_for_dll_main_finish(HANDLE thread_handle)
- {
- 	if (thread_handle) {
-@@ -313,6 +318,9 @@ static inline bool attempt_hook(void)
- 	if (!vulkan_hooked) {
- 		vulkan_hooked = hook_vulkan();
- 		if (vulkan_hooked) {
-+			if (shard_diagnostics_enabled())
-+				hlog("[GC] ts_ms=%llu stage=GraphicsHookInstalled api=Vulkan",
-+				     (unsigned long long)GetTickCount64());
- 			return true;
- 		}
- 	}
-@@ -321,6 +329,9 @@ static inline bool attempt_hook(void)
- #ifdef COMPILE_D3D12_HOOK
- 	if (!d3d12_hooked) {
- 		d3d12_hooked = hook_d3d12();
-+		if (d3d12_hooked && shard_diagnostics_enabled())
-+			hlog("[GC] ts_ms=%llu stage=GraphicsHookInstalled api=D3D12",
-+			     (unsigned long long)GetTickCount64());
- 	}
- #endif
- 
-@@ -331,6 +342,9 @@ static inline bool attempt_hook(void)
- 		} else {
- 			d3d9_hooked = hook_d3d9();
- 			if (d3d9_hooked) {
-+				if (shard_diagnostics_enabled())
-+					hlog("[GC] ts_ms=%llu stage=GraphicsHookInstalled api=D3D9",
-+					     (unsigned long long)GetTickCount64());
- 				return true;
- 			}
- 		}
-@@ -343,6 +357,9 @@ static inline bool attempt_hook(void)
- 		} else {
- 			dxgi_hooked = hook_dxgi();
- 			if (dxgi_hooked) {
-+				if (shard_diagnostics_enabled())
-+					hlog("[GC] ts_ms=%llu stage=GraphicsHookInstalled api=DXGI",
-+					     (unsigned long long)GetTickCount64());
- 				return true;
- 			}
- 		}
-@@ -351,6 +368,9 @@ static inline bool attempt_hook(void)
- 	if (!gl_hooked) {
- 		gl_hooked = hook_gl();
- 		if (gl_hooked) {
-+			if (shard_diagnostics_enabled())
-+				hlog("[GC] ts_ms=%llu stage=GraphicsHookInstalled api=OpenGL",
-+				     (unsigned long long)GetTickCount64());
- 			return true;
- 		}
- 		/*} else {
-@@ -363,6 +383,9 @@ static inline bool attempt_hook(void)
- 		} else {
- 			d3d8_hooked = hook_d3d8();
- 			if (d3d8_hooked) {
-+				if (shard_diagnostics_enabled())
-+					hlog("[GC] ts_ms=%llu stage=GraphicsHookInstalled api=D3D8",
-+					     (unsigned long long)GetTickCount64());
- 				return true;
- 			}
- 		}
-@@ -404,6 +427,14 @@ static inline void capture_loop(void)
- {
- 	WaitForSingleObject(signal_init, INFINITE);
- 
-+	if (init_pipe()) {
-+		if (shard_diagnostics_enabled())
-+			hlog("[GC] ts_ms=%llu target_pid=%lu stage=TargetHookInitialized pipe=connected",
-+			     (unsigned long long)GetTickCount64(), (unsigned long)GetCurrentProcessId());
-+	} else {
-+		DbgOut("[OBS] Failed to connect hook pipe\n");
-+	}
-+
- 	while (!attempt_hook())
- 		Sleep(40);
- 
-@@ -562,11 +593,17 @@ bool capture_init_shtex(struct shtex_data **data, HWND window, uint32_t cx, uint
- 	global_hook_info->cy = cy;
- 	global_hook_info->UNUSED_base_cx = cx;
- 	global_hook_info->UNUSED_base_cy = cy;
-+	if (shard_diagnostics_enabled())
-+		hlog("[GC] ts_ms=%llu stage=SharedTextureCreated transport=shared_texture size=%ux%u handle=%" PRIuPTR,
-+		     (unsigned long long)GetTickCount64(), cx, cy, handle);
- 
- 	if (!SetEvent(signal_ready)) {
- 		hlog("capture_init_shtex: Failed to signal ready: %d", GetLastError());
- 		return false;
- 	}
-+	if (shard_diagnostics_enabled())
-+		hlog("[GC] ts_ms=%llu stage=HookReadySignal result=success",
-+		     (unsigned long long)GetTickCount64());
- 
- 	active = true;
- 	return true;
-@@ -752,11 +789,17 @@ bool capture_init_shmem(struct shmem_data **data, HWND window, uint32_t cx, uint
- 	if (!init_shmem_thread(pitch, cy)) {
- 		return false;
- 	}
-+	if (shard_diagnostics_enabled())
-+		hlog("[GC] ts_ms=%llu stage=SharedTextureCreated transport=shared_memory size=%ux%u",
-+		     (unsigned long long)GetTickCount64(), cx, cy);
- 
- 	if (!SetEvent(signal_ready)) {
- 		hlog("capture_init_shmem: Failed to signal ready: %d", GetLastError());
- 		return false;
- 	}
-+	if (shard_diagnostics_enabled())
-+		hlog("[GC] ts_ms=%llu stage=HookReadySignal result=success",
-+		     (unsigned long long)GetTickCount64());
- 
- 	active = true;
- 	return true;
-diff --git a/plugins/win-capture/inject-helper/inject-helper.c b/plugins/win-capture/inject-helper/inject-helper.c
-index c14fa9423..c79f1a059 100644
---- a/plugins/win-capture/inject-helper/inject-helper.c
-+++ b/plugins/win-capture/inject-helper/inject-helper.c
-@@ -73,19 +73,46 @@ static inline int inject_library_full(DWORD process_id, const wchar_t *dll)
- 	return ret;
- }
- 
--static int inject_helper(wchar_t *argv[], const wchar_t *dll)
-+static int inject_helper(wchar_t *argv[], int argc, const wchar_t *dll)
- {
- 	DWORD id;
- 	DWORD use_safe_inject;
-+	bool diagnostics;
-+	int ret;
- 
- 	use_safe_inject = wcstol(argv[2], NULL, 10);
-+	diagnostics = argc >= 5 && wcstol(argv[4], NULL, 10) != 0;
-+	inject_library_set_diagnostics(diagnostics);
- 
- 	id = wcstol(argv[3], NULL, 10);
- 	if (id == 0) {
- 		return INJECT_ERROR_INVALID_PARAMS;
- 	}
- 
--	return use_safe_inject ? inject_library_safe(id, dll) : inject_library_full(id, dll);
-+	if (diagnostics) {
-+#ifdef _WIN64
-+		const char *helper_arch = "x64";
-+#else
-+		const char *helper_arch = "x86";
-+#endif
-+		fprintf(stderr, "[GC] ts_ms=%llu helper_pid=%lu stage=HelperStarted arch=%s mode=%s target_id=%lu\n",
-+			(unsigned long long)GetTickCount64(), (unsigned long)GetCurrentProcessId(), helper_arch,
-+			use_safe_inject ? "compatibility" : "direct", (unsigned long)id);
-+		fflush(stderr);
-+	}
-+
-+	/* The WH_GETMESSAGE compatibility route never opens the target process.
-+	 * Request debug privilege only for the separate direct-injection route. */
-+	if (!use_safe_inject)
-+		load_debug_privilege();
-+
-+	ret = use_safe_inject ? inject_library_safe(id, dll) : inject_library_full(id, dll);
-+	if (diagnostics) {
-+		fprintf(stderr, "[GC] ts_ms=%llu helper_pid=%lu stage=HelperExit result=%d\n",
-+			(unsigned long long)GetTickCount64(), (unsigned long)GetCurrentProcessId(), ret);
-+		fflush(stderr);
-+	}
-+	return ret;
- }
- 
- int main(void)
-@@ -105,14 +132,13 @@ int main(void)
- 	policy.PreferSystem32Images = 1;
- 	SetProcessMitigationPolicy(ProcessImageLoadPolicy, &policy, sizeof(policy));
- 
--	load_debug_privilege();
- 
- 	pCommandLineW = GetCommandLineW();
- 	argv = CommandLineToArgvW(pCommandLineW, &argc);
- 	if (argv) {
--		if (argc == 4) {
-+		if (argc == 4 || argc == 5) {
- 			if (GetModuleFileNameW(NULL, dll_path, MAX_PATH))
--				ret = inject_helper(argv, argv[1]);
-+				ret = inject_helper(argv, argc, argv[1]);
- 		}
- 
- 		LocalFree(argv);
-diff --git a/shared/obs-hook-config/graphics-hook-info.h b/shared/obs-hook-config/graphics-hook-info.h
-index b936b830a..b3f82f2dd 100644
---- a/shared/obs-hook-config/graphics-hook-info.h
-+++ b/shared/obs-hook-config/graphics-hook-info.h
-@@ -115,10 +115,13 @@ struct hook_info {
- 	bool capture_overlay;
- 	bool allow_srgb_alias;
- 
-+	/* Shard extension: enables concise hook-side compatibility diagnostics. */
-+	uint32_t shard_diagnostics;
-+
- 	/* hook addresses */
- 	struct graphics_offsets offsets;
- 
--	uint32_t reserved[126];
-+	uint32_t reserved[125];
- };
- static_assert(sizeof(struct hook_info) == 648, "ABI compatibility");
- 
-diff --git a/shared/obs-inject-library/inject-library.c b/shared/obs-inject-library/inject-library.c
-index 16f82c7e6..09de04fe7 100644
---- a/shared/obs-inject-library/inject-library.c
-+++ b/shared/obs-inject-library/inject-library.c
-@@ -1,8 +1,27 @@
- #include <windows.h>
- #include <stdbool.h>
-+#include <stdio.h>
- #include <util/windows/obfuscate.h>
- #include "inject-library.h"
- 
-+static bool diagnostics_enabled = false;
-+
-+void inject_library_set_diagnostics(bool enabled)
-+{
-+	diagnostics_enabled = enabled;
-+}
-+
-+static void diagnostic_log(const char *stage, DWORD result, DWORD error)
-+{
-+	if (!diagnostics_enabled)
-+		return;
-+
-+	fprintf(stderr, "[GC] ts_ms=%llu helper_pid=%lu stage=%s result=%lu error=%lu\n",
-+		(unsigned long long)GetTickCount64(), (unsigned long)GetCurrentProcessId(), stage, (unsigned long)result,
-+		(unsigned long)error);
-+	fflush(stderr);
-+}
-+
- typedef HANDLE(WINAPI *create_remote_thread_t)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID,
- 					       DWORD, LPDWORD);
- typedef BOOL(WINAPI *write_process_memory_t)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T *);
-@@ -94,10 +113,14 @@ int inject_library_safe_obf(DWORD thread_id, const wchar_t *dll, const char *set
- 	HMODULE user32 = GetModuleHandleW(L"USER32");
- 	set_windows_hook_ex_t set_windows_hook_ex;
- 	HMODULE lib = LoadLibraryW(dll);
-+	DWORD error = lib ? ERROR_SUCCESS : GetLastError();
- 	HOOKPROC proc;
- 	HHOOK hook;
-+	DWORD last_post_error = ERROR_SUCCESS;
-+	size_t posts_accepted = 0;
- 	size_t i;
- 
-+	diagnostic_log("HelperHookDllLoad", lib != NULL, error);
- 	if (!lib || !user32) {
- 		return INJECT_ERROR_UNLIKELY_FAIL;
- 	}
-@@ -108,6 +131,7 @@ int inject_library_safe_obf(DWORD thread_id, const wchar_t *dll, const char *set
- 	proc = (HOOKPROC)GetProcAddress(lib, "_dummy_debug_proc@12");
- #endif
- 
-+	diagnostic_log("HelperHookCallbackResolve", proc != NULL, proc ? ERROR_SUCCESS : GetLastError());
- 	if (!proc) {
- 		return INJECT_ERROR_UNLIKELY_FAIL;
- 	}
-@@ -115,8 +139,10 @@ int inject_library_safe_obf(DWORD thread_id, const wchar_t *dll, const char *set
- 	set_windows_hook_ex = (set_windows_hook_ex_t)ms_get_obfuscated_func(user32, set_windows_hook_ex_obf, obf1);
- 
- 	hook = set_windows_hook_ex(WH_GETMESSAGE, proc, lib, thread_id);
-+	error = hook ? ERROR_SUCCESS : GetLastError();
-+	diagnostic_log("SetWindowsHookEx", hook != NULL, error);
- 	if (!hook) {
--		return GetLastError();
-+		return error;
- 	}
- 
- 	/* SetWindowsHookEx does not inject the library in to the target
-@@ -128,7 +154,19 @@ int inject_library_safe_obf(DWORD thread_id, const wchar_t *dll, const char *set
- 
- 	for (i = 0; i < RETRY_COUNT; i++) {
- 		Sleep(RETRY_INTERVAL_MS);
--		PostThreadMessage(thread_id, WM_USER + 432, 0, (LPARAM)hook);
-+		BOOL posted = PostThreadMessage(thread_id, WM_USER + 432, 0, (LPARAM)hook);
-+		last_post_error = posted ? ERROR_SUCCESS : GetLastError();
-+		if (posted)
-+			posts_accepted++;
-+		if (diagnostics_enabled) {
-+			fprintf(stderr,
-+				"[GC] ts_ms=%llu helper_pid=%lu stage=PostThreadMessage attempt=%zu result=%d error=%lu\n",
-+				(unsigned long long)GetTickCount64(), (unsigned long)GetCurrentProcessId(), i + 1,
-+				posted ? 1 : 0, (unsigned long)last_post_error);
-+			fflush(stderr);
-+		}
- 	}
--	return 0;
-+
-+	diagnostic_log("PostThreadMessageComplete", (DWORD)posts_accepted, last_post_error);
-+	return posts_accepted ? 0 : (last_post_error ? (int)last_post_error : (int)ERROR_INVALID_THREAD_ID);
- }
-diff --git a/shared/obs-inject-library/inject-library.h b/shared/obs-inject-library/inject-library.h
-index d2003ee34..3ed7eca9a 100644
---- a/shared/obs-inject-library/inject-library.h
-+++ b/shared/obs-inject-library/inject-library.h
-@@ -1,5 +1,6 @@
- #include <windows.h>
- #include <stdint.h>
-+#include <stdbool.h>
- 
- #define INJECT_ERROR_INJECT_FAILED -1
- #define INJECT_ERROR_INVALID_PARAMS -2
-@@ -13,3 +14,7 @@ extern int inject_library_obf(HANDLE process, const wchar_t *dll, const char *cr
- 
- extern int inject_library_safe_obf(DWORD thread_id, const wchar_t *dll, const char *set_windows_hook_ex_obf,
- 				   uint64_t obf1);
-+
-+/* Shard diagnostic extension. Output is written to stderr so the parent
-+ * capture plugin can relay helper-stage details without changing injection. */
-+extern void inject_library_set_diagnostics(bool enabled);

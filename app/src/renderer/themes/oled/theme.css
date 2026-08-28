@@ -1,0 +1,48 @@
+/**
+ * @name OLED
+ * @author Shard
+ * @version 1.0.0
+ * @description True-black OLED variant — near-black surfaces for deep contrast, retains Shard blue accent.
+ */
+
+:root {
+  --bg-0: #000000;
+  --bg-1: #040404;
+  --bg-2: #090909;
+  --bg-3: #101010;
+  --bg-4: #181818;
+
+  --stroke: #1a1a1a;
+  --stroke-2: #252525;
+  --stroke-3: #333333;
+
+  --fg: #f0f2f8;
+  --fg-2: #b8becf;
+  --fg-3: #7a8195;
+  --fg-4: #525866;
+
+  /* Keep signature blue accent on black */
+  --accent: #5b9dff;
+  --accent-2: #7c83ff;
+  --accent-ink: #000000;
+  --accent-soft: rgba(102, 157, 255, 0.14);
+  --accent-softer: rgba(102, 157, 255, 0.07);
+  --accent-grad: linear-gradient(135deg, #4f9cff 0%, #7c83ff 100%);
+  --accent-grad-soft: linear-gradient(135deg, rgba(79, 156, 255, 0.15), rgba(124, 131, 255, 0.08));
+
+  color-scheme: dark;
+}
+
+/* OLED: deepen app chrome, no washed gradients */
+.app {
+  background: var(--bg-0);
+}
+.app__bar {
+  background: linear-gradient(180deg, rgba(12, 12, 12, 0.96), var(--bg-1));
+}
+.capture__hero {
+  background:
+    radial-gradient(120% 140% at 100% 0%, rgba(124, 131, 255, 0.08), transparent 55%),
+    radial-gradient(90% 120% at 0% 100%, rgba(79, 156, 255, 0.05), transparent 60%),
+    linear-gradient(160deg, var(--bg-2), var(--bg-1) 62%);
+}

@@ -1,7 +1,7 @@
 NOTICE
 ======
 
-ClipForge embeds and links OBS Studio's libobs and ships OBS Studio plugins
+Shard embeds and links OBS Studio's libobs and ships OBS Studio plugins
 (win-capture, win-wasapi, obs-x264, obs-nvenc, obs-qsv11, obs-ffmpeg,
 obs-outputs, obs-filters, image-source, text-freetype2).
 
@@ -14,5 +14,31 @@ This distribution includes a copy of the OBS Studio source tree pinned at tag
 Modifications to the vendored OBS source, if any, are listed in
 `vendor/obs-studio` commit history.
 
-OBS is a trademark of Lain Bailey. ClipForge is not affiliated with or
+OBS is a trademark of Lain Bailey. Shard is not affiliated with or
 endorsed by the OBS Project.
+
+UI icons are based on Feather Icons:
+https://github.com/feathericons/feather
+
+Feather Icons are licensed under the MIT License.
+Copyright (c) 2013-2023 Cole Bemis.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.

@@ -35,7 +35,7 @@ export class StorageWatchdog extends EventEmitter {
     const target = limitBytes * 0.9;
 
     while (used > target) {
-      const oldest = this.library.oldestUnprotected();
+      const oldest = this.library.oldestUnprotected(getSettings().storage.deleteEdited);
       if (!oldest) break;
       if (this.locked.has(oldest.path)) break; // tried this cycle, still locked
 

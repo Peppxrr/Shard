@@ -1,10 +1,13 @@
 #include "app.h"
 
 #include "encoders.h"
+#include "x265_encoder.h"
 
 #include <obs-module.h>
+#include <algorithm>
 
 #include <filesystem>
+#include <unordered_map>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -13,6 +16,70 @@
 namespace clipforge {
 
 namespace fs = std::filesystem;
+
+#ifdef _WIN32
+namespace {
+
+std::string utf8FromWide(const wchar_t* value)
+{
+  if (!value || !*value)
+    return {};
+  const int size = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+  if (size <= 1)
+    return {};
+  std::string result(static_cast<size_t>(size), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), size, nullptr, nullptr);
+  result.pop_back();
+  return result;
+}
+
+std::unordered_map<std::string, std::string> activeMonitorNames()
+{
+  UINT32 pathCount = 0;
+  UINT32 modeCount = 0;
+  if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS)
+    return {};
+
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+  if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) !=
+      ERROR_SUCCESS)
+    return {};
+
+  std::unordered_map<std::string, std::string> names;
+  for (UINT32 index = 0; index < pathCount; index++) {
+    const auto& path = paths[index];
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
+    source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    source.header.size = sizeof(source);
+    source.header.adapterId = path.sourceInfo.adapterId;
+    source.header.id = path.sourceInfo.id;
+    if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS)
+      continue;
+
+    DISPLAYCONFIG_TARGET_DEVICE_NAME target = {};
+    target.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    target.header.size = sizeof(target);
+    target.header.adapterId = path.targetInfo.adapterId;
+    target.header.id = path.targetInfo.id;
+    if (DisplayConfigGetDeviceInfo(&target.header) != ERROR_SUCCESS)
+      continue;
+
+    const std::string device = utf8FromWide(source.viewGdiDeviceName);
+    const std::string friendly = utf8FromWide(target.monitorFriendlyDeviceName);
+    if (!device.empty() && !friendly.empty())
+      names.emplace(device, friendly);
+  }
+  return names;
+}
+
+struct MonitorEnumerationContext {
+  std::vector<MonitorInfo>& displays;
+  const std::unordered_map<std::string, std::string>& names;
+};
+
+} // namespace
+#endif
 
 App::App(Config& config, Events& events) : config_(config), events_(events) {}
 
@@ -37,6 +104,7 @@ bool App::init()
   // support at module load via gs_get_device_type() == D3D11, and without a
   // context it falls back to BitBlt (black captures for GPU-rendered windows).
   obs_load_all_modules();
+  registerX265Encoder();
 
   scene_ = obs_scene_create("main");
   if (!scene_) {
@@ -79,6 +147,52 @@ bool App::startup()
   return true;
 }
 
+std::vector<MonitorInfo> App::monitors() const
+{
+  std::vector<MonitorInfo> result;
+#ifdef _WIN32
+  const auto names = activeMonitorNames();
+  MonitorEnumerationContext context{result, names};
+  EnumDisplayMonitors(
+      nullptr, nullptr,
+      [](HMONITOR monitor, HDC, LPRECT rect, LPARAM param) -> BOOL {
+        auto& context = *reinterpret_cast<MonitorEnumerationContext*>(param);
+        auto& displays = context.displays;
+        const auto& names = context.names;
+        MONITORINFOEXA monitorInfo = {};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        if (!GetMonitorInfoA(monitor, &monitorInfo))
+          return TRUE;
+
+        DISPLAY_DEVICEA device = {};
+        device.cb = sizeof(device);
+        EnumDisplayDevicesA(monitorInfo.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME);
+
+        DEVMODEA mode = {};
+        mode.dmSize = sizeof(mode);
+        const bool haveMode = EnumDisplaySettingsA(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &mode) != FALSE;
+
+        MonitorInfo info;
+        info.index = static_cast<int>(displays.size());
+        info.id = device.DeviceID;
+        const auto named = names.find(monitorInfo.szDevice);
+        const std::string friendly =
+            named != names.end() ? named->second : (device.DeviceString[0] ? device.DeviceString : "Monitor");
+        info.name = friendly + " (" + monitorInfo.szDevice + ")";
+        info.width = haveMode && mode.dmPelsWidth ? mode.dmPelsWidth : static_cast<uint32_t>(rect->right - rect->left);
+        info.height =
+            haveMode && mode.dmPelsHeight ? mode.dmPelsHeight : static_cast<uint32_t>(rect->bottom - rect->top);
+        info.primary = (monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
+        displays.push_back(std::move(info));
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&context));
+#endif
+  if (result.empty())
+    result.push_back(MonitorInfo{0, "", "Display 1", baseWidth_, baseHeight_, true});
+  return result;
+}
+
 bool App::resetVideo()
 {
   struct obs_video_info ovi = {};
@@ -86,16 +200,18 @@ bool App::resetVideo()
   ovi.adapter = 0;
   ovi.fps_den = 1;
 
-  // Base resolution = primary display, so monitor_capture and game capture
-  // never scale on the way in; the output resolution is the recorded one.
-#ifdef _WIN32
-  DEVMODEW dm = {};
-  dm.dmSize = sizeof(dm);
-  if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm)) {
-    baseWidth_ = dm.dmPelsWidth ? dm.dmPelsWidth : 1920;
-    baseHeight_ = dm.dmPelsHeight ? dm.dmPelsHeight : 1080;
+  // Match the OBS canvas to the configured desktop monitor. This avoids a
+  // full-frame GPU scale on multi-monitor systems with different resolutions.
+  const auto displays = monitors();
+  auto selected = std::find_if(displays.begin(), displays.end(),
+                               [this](const MonitorInfo& display) { return display.index == config_.capture.monitor; });
+  if (selected == displays.end())
+    selected = std::find_if(displays.begin(), displays.end(),
+                            [](const MonitorInfo& display) { return display.primary; });
+  if (selected != displays.end()) {
+    baseWidth_ = selected->width ? selected->width : 1920;
+    baseHeight_ = selected->height ? selected->height : 1080;
   }
-#endif
   ovi.base_width = baseWidth_;
   ovi.base_height = baseHeight_;
 

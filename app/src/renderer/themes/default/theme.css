@@ -1,0 +1,36 @@
+/**
+ * @name Default
+ * @author Shard
+ * @version 1.0.0
+ * @description Shard default dark theme — layered surfaces, blue accent, hairline borders.
+ */
+
+:root {
+  /* Surfaces (layered: 0 deepest → 2 raised) */
+  --bg-0: #07090f;
+  --bg-1: #0e121a;
+  --bg-2: #151b27;
+  --bg-3: #1c2332;
+  --bg-4: #252e40;
+
+  --stroke: #1f2735;
+  --stroke-2: #2a3346;
+  --stroke-3: #39445a;
+
+  /* Text */
+  --fg: #eaeefb;
+  --fg-2: #b1bacf;
+  --fg-3: #79839c;
+  --fg-4: #565f78;
+
+  /* Brand + semantic — blue signature */
+  --accent: #5b9dff;
+  --accent-2: #7c83ff;
+  --accent-ink: #070a12;
+  --accent-soft: rgba(102, 157, 255, 0.16);
+  --accent-softer: rgba(102, 157, 255, 0.08);
+  --accent-grad: linear-gradient(135deg, #4f9cff 0%, #7c83ff 100%);
+  --accent-grad-soft: linear-gradient(135deg, rgba(79, 156, 255, 0.18), rgba(124, 131, 255, 0.10));
+
+  color-scheme: dark;
+}

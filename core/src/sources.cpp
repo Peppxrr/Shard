@@ -1,10 +1,16 @@
 #include "sources.h"
+#include "capture_resilience.h"
 
 #include <obs-module.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <dwmapi.h>
+// Callback-mode display and suspend/resume notifications. No message window
+// is required, so recovery remains active in this headless core process.
+#include <powersetting.h>
+#include <powrprof.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
@@ -13,8 +19,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <iterator>
+#include <set>
 
 namespace clipforge {
 
@@ -86,9 +94,9 @@ std::string monitorDeviceId(int index)
   return ctx.id;
 }
 
-bool subjectWindowMinimized(const SourceManager::Subject& subject)
-{
 #ifdef _WIN32
+HWND findSubjectWindow(const SourceManager::Subject& subject)
+{
   struct Candidate {
     const SourceManager::Subject* subject;
     HWND window = nullptr;
@@ -129,11 +137,54 @@ bool subjectWindowMinimized(const SourceManager::Subject& subject)
       },
       reinterpret_cast<LPARAM>(&candidate));
 
-  return candidate.window && IsIconic(candidate.window);
+  return candidate.window;
+}
+#endif
+
+bool subjectWindowMinimized(const SourceManager::Subject& subject)
+{
+#ifdef _WIN32
+  const HWND window = findSubjectWindow(subject);
+  return window && IsIconic(window);
 #else
   (void)subject;
   return false;
 #endif
+}
+
+#ifdef _WIN32
+ULONG CALLBACK capturePowerCallback(PVOID context, ULONG type, PVOID setting)
+{
+  auto* state = static_cast<CaptureRecoveryState*>(context);
+  if (!state)
+    return ERROR_SUCCESS;
+
+  if (type == PBT_APMRESUMEAUTOMATIC || type == PBT_APMRESUMECRITICAL || type == PBT_APMRESUMESUSPEND) {
+    state->onResume();
+  } else if (type == PBT_POWERSETTINGCHANGE && setting) {
+    const auto* change = static_cast<const POWERBROADCAST_SETTING*>(setting);
+    if (IsEqualGUID(change->PowerSetting, GUID_CONSOLE_DISPLAY_STATE) && change->DataLength >= sizeof(DWORD)) {
+      DWORD displayState = 0;
+      std::memcpy(&displayState, change->Data, sizeof(displayState));
+      state->onDisplayState(static_cast<int>(displayState));
+    }
+  }
+  return ERROR_SUCCESS;
+}
+#endif
+
+// OBS compatibility: hook-only games where WGC must not be used as fallback.
+// Derived from vendor/obs-studio/plugins/win-capture/data/compatibility.json
+// entries with game_capture=true && window_capture=false && window_capture_wgc=false.
+static bool isHookOnlyGame(const std::string& exeLower)
+{
+  static const std::set<std::string> kHookOnly = {
+      "csgo.exe",       "cs2.exe",        "javaw.exe",    "cod.exe",
+      "genshinimpact.exe", "destiny2.exe", "gta-sa.exe", "leagueclientux.exe",
+      "samp.exe",       "terraria.exe",   "starrail.exe", "zenlesszonezero.exe",
+      "marvel-win64-shipping.exe", "thebazaar.exe", "fragpunk.exe", "robloxplayerbeta.exe",
+      "client-win64-shipping.exe", "hearthstonedecktracker.exe", "cod.exe"};
+  return kHookOnly.count(exeLower) != 0;
 }
 
 } // namespace
@@ -252,9 +303,9 @@ void SourceManager::applyVideoSource()
     obs_data_set_int(s, "method", 2);
     obs_data_set_int(s, "priority", 2);
     obs_data_set_bool(s, "cursor", true);
-    // Capture the complete WGC surface. Client-area cropping depends on a
-    // Win32 client rect matching the compositor texture; borderless games can
-    // report an unusable rect and otherwise never produce a texture.
+    // Keep WGC's complete surface alive. The scene item is cropped to the
+    // Win32 client rect only when that geometry is valid; failed geometry
+    // therefore falls back to a live full-window frame instead of black.
     obs_data_set_bool(s, "client_area", false);
     obs_data_set_string(s, "window", "::");
     windowSource_ = obs_source_create("window_capture", "game-window", s, nullptr);
@@ -263,17 +314,30 @@ void SourceManager::applyVideoSource()
 
   if (monitorSource_)
     monitorItem_ = obs_scene_add(app_.scene(), monitorSource_);
-  // Scene rendering is bottom-to-top: the game hook sits below WGC. When a
-  // minimized WGC source draws nothing, the hooked texture remains visible.
-  if (gameSource_)
-    gameItem_ = obs_scene_add(app_.scene(), gameSource_);
+  // Scene rendering is bottom-to-top: WGC window_capture is the fallback
+  // below the injected hook. Hook-primary means the game hook sits on top;
+  // when it produces frames it covers the fallback, otherwise the fallback's
+  // WGC frames show. This survives minimization: WGC draws nothing while
+  // iconic, the hook underneath keeps updating.
   if (windowSource_)
     windowItem_ = obs_scene_add(app_.scene(), windowSource_);
+  if (gameSource_)
+    gameItem_ = obs_scene_add(app_.scene(), gameSource_);
 
   if (!monitorSource_ && !windowSource_ && !gameSource_) {
     events_.emit("error", {{"code", "CAPTURE_INIT_FAILED"}, {"message", "Could not create capture sources"}});
     return;
   }
+
+  const auto now = std::chrono::steady_clock::now();
+  captureHealthyAt_ = now;
+  lastWindowRetry_ = now;
+  lastHookRetry_ = now;
+  hookRetryCount_ = 0;
+  wgcRetryCount_ = 0;
+  windowNoFramesReported_ = false;
+  windowSuppressedForMinimize_ = false;
+  activeBackend_ = ActiveBackend::None;
 
   // Re-evaluate the subject for the current mode.
   const std::string mode = config_.capture.mode;
@@ -321,29 +385,42 @@ void SourceManager::applySubjectLocked()
   }
   if (windowItem_) {
     obs_sceneitem_set_visible(windowItem_, showGame);
-    fillFrame(windowItem_);
+    fillWindowFrameLocked();
   }
 }
 
-// Fit a capture to the canvas without cropping it. Bounds-based transforms
-// work for desktop capture, but a WGC window source begins life at 0x0 and can
-// retain its unscaled transform until its first frame arrives. Set an explicit
-// source-size-based transform once dimensions are available instead.
-void SourceManager::fillFrame(obs_sceneitem_t* item)
+// Fit a capture to the canvas without cropping its visible content. Window
+// fallback capture passes a validated scene crop that removes only the
+// non-client frame.
+void SourceManager::fillFrame(obs_sceneitem_t* item, const struct obs_sceneitem_crop* crop)
 {
   if (!item)
     return;
 
+  struct obs_sceneitem_crop appliedCrop = {};
+  if (crop)
+    appliedCrop = *crop;
+
   obs_source_t* source = obs_sceneitem_get_source(item);
   const uint32_t sourceWidth = source ? obs_source_get_width(source) : 0;
   const uint32_t sourceHeight = source ? obs_source_get_height(source) : 0;
+  const int horizontalCrop = appliedCrop.left + appliedCrop.right;
+  const int verticalCrop = appliedCrop.top + appliedCrop.bottom;
+  if (horizontalCrop < 0 || verticalCrop < 0 || static_cast<uint32_t>(horizontalCrop) >= sourceWidth ||
+      static_cast<uint32_t>(verticalCrop) >= sourceHeight) {
+    appliedCrop = {};
+  }
+  obs_sceneitem_set_crop(item, &appliedCrop);
+
   if (sourceWidth && sourceHeight) {
+    const uint32_t visibleWidth = sourceWidth - static_cast<uint32_t>(appliedCrop.left + appliedCrop.right);
+    const uint32_t visibleHeight = sourceHeight - static_cast<uint32_t>(appliedCrop.top + appliedCrop.bottom);
     const float canvasWidth = (float)app_.baseWidth();
     const float canvasHeight = (float)app_.baseHeight();
-    const float scale = std::min(canvasWidth / (float)sourceWidth, canvasHeight / (float)sourceHeight);
+    const float scale = std::min(canvasWidth / (float)visibleWidth, canvasHeight / (float)visibleHeight);
     struct vec2 itemScale = {scale, scale};
-    struct vec2 pos = {(canvasWidth - (float)sourceWidth * scale) / 2.0f,
-                       (canvasHeight - (float)sourceHeight * scale) / 2.0f};
+    struct vec2 pos = {(canvasWidth - (float)visibleWidth * scale) / 2.0f,
+                       (canvasHeight - (float)visibleHeight * scale) / 2.0f};
 
     obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_NONE);
     obs_sceneitem_set_bounds_crop(item, false);
@@ -359,6 +436,42 @@ void SourceManager::fillFrame(obs_sceneitem_t* item)
   obs_sceneitem_set_bounds(item, &bounds);
   obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_INNER);
   obs_sceneitem_set_bounds_crop(item, false);
+}
+
+void SourceManager::fillWindowFrameLocked()
+{
+  struct obs_sceneitem_crop sceneCrop = {};
+#ifdef _WIN32
+  if (windowItem_ && windowSource_ && subject_.kind == Subject::Kind::Window) {
+    const uint32_t sourceWidth = obs_source_get_width(windowSource_);
+    const uint32_t sourceHeight = obs_source_get_height(windowSource_);
+    const HWND window = findSubjectWindow(subject_);
+    RECT client = {};
+    RECT frame = {};
+    POINT clientOrigin = {};
+    if (sourceWidth && sourceHeight && window && !IsIconic(window) && GetClientRect(window, &client) &&
+        ClientToScreen(window, &clientOrigin) &&
+        SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))) {
+      const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+      const int64_t clientHeight = client.bottom - client.top;
+      const uint32_t captionInset =
+          (style & WS_CAPTION) == WS_CAPTION && clientOrigin.y > frame.top
+              ? captionBoundaryInset(GetDpiForWindow(window))
+              : 0;
+      const ClientAreaCrop crop =
+          computeClientAreaCrop(sourceWidth, sourceHeight, frame.left, frame.top, clientOrigin.x,
+                                clientOrigin.y + captionInset, client.right - client.left,
+                                clientHeight - captionInset);
+      if (crop.valid) {
+        sceneCrop.left = static_cast<int>(crop.left);
+        sceneCrop.top = static_cast<int>(crop.top);
+        sceneCrop.right = static_cast<int>(crop.right);
+        sceneCrop.bottom = static_cast<int>(crop.bottom);
+      }
+    }
+  }
+#endif
+  fillFrame(windowItem_, &sceneCrop);
 }
 
 void SourceManager::setWindowTargetLocked(const Subject& s)
@@ -377,8 +490,27 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
   const auto now = std::chrono::steady_clock::now();
   captureHealthyAt_ = now;
   lastWindowRetry_ = now;
+  lastHookRetry_ = now;
+  hookRetryCount_ = 0;
+  wgcRetryCount_ = 0;
   windowNoFramesReported_ = false;
   windowSuppressedForMinimize_ = false;
+  activeBackend_ = ActiveBackend::None;
+}
+
+void SourceManager::retryMonitorCaptureLocked()
+{
+  if (!monitorSource_ || subject_.kind != Subject::Kind::Monitor)
+    return;
+  obs_data_t* settings = obs_data_create();
+  const std::string devId = monitorDeviceId(config_.capture.monitor);
+  if (!devId.empty())
+    obs_data_set_string(settings, "monitor_id", devId.c_str());
+  obs_data_set_int(settings, "monitor", config_.capture.monitor);
+  obs_data_set_int(settings, "method", 2);
+  obs_data_set_bool(settings, "capture_cursor", true);
+  obs_source_update(monitorSource_, settings);
+  obs_data_release(settings);
 }
 
 void SourceManager::retryWindowCaptureLocked()
@@ -391,6 +523,26 @@ void SourceManager::retryWindowCaptureLocked()
   obs_data_set_string(d, "window", desc.c_str());
   obs_source_update(windowSource_, d);
   obs_data_release(d);
+}
+
+void SourceManager::retryGameCaptureLocked()
+{
+  if (!gameSource_ || subject_.kind != Subject::Kind::Window)
+    return;
+  const std::string desc = encodeWindowPart(subject_.title) + ":" + encodeWindowPart(subject_.cls) + ":" +
+                           encodeWindowPart(subject_.exe);
+  obs_data_t* d = obs_data_create();
+  obs_data_set_string(d, "window", desc.c_str());
+  obs_source_update(gameSource_, d);
+  obs_data_release(d);
+  const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
+  if (diagnostics && *diagnostics && std::string(diagnostics) != "0") {
+    std::fprintf(stderr,
+                 "[GC] ts_ms=%llu stage=HookRetry pid=%lu attempt=%d desc=\"%s\"\n",
+                 static_cast<unsigned long long>(duration_ms_now()),
+                 static_cast<unsigned long>(subject_.pid), hookRetryCount_ + 1, desc.c_str());
+    std::fflush(stderr);
+  }
 }
 
 void SourceManager::emitSubjectChanged()
@@ -455,19 +607,47 @@ void SourceManager::stopWatchdog()
   if (watchdogThread_.joinable())
     watchdogThread_.join();
 }
-
 void SourceManager::watchdogLoop()
 {
-  constexpr auto kWindowRetryDelay = std::chrono::seconds(3);
-  constexpr auto kWindowNoFramesDelay = std::chrono::seconds(10);
+  constexpr auto kRetryDelay = std::chrono::seconds(3);
+  constexpr auto kNoFramesDelay = std::chrono::seconds(10);
+  constexpr int kHookMaxRetries = 20;
+  constexpr int kHookAttemptsBeforeFallback = 3;
+  CaptureRecoveryState recoveryState;
+#ifdef _WIN32
+  DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS powerSubscription = {};
+  powerSubscription.Callback = capturePowerCallback;
+  powerSubscription.Context = &recoveryState;
+  HPOWERNOTIFY displayNotification = nullptr;
+  HPOWERNOTIFY suspendNotification = nullptr;
+  if (PowerSettingRegisterNotification(&GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_CALLBACK,
+                                       reinterpret_cast<HANDLE>(&powerSubscription),
+                                       &displayNotification) != ERROR_SUCCESS) {
+    displayNotification = nullptr;
+  }
+  if (PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK,
+                                             reinterpret_cast<HANDLE>(&powerSubscription),
+                                             &suspendNotification) != ERROR_SUCCESS) {
+    suspendNotification = nullptr;
+  }
+#endif
+  auto lastWatchdogTick = std::chrono::steady_clock::now();
 
   while (watchdogRun_.load()) {
+    const auto tickNow = std::chrono::steady_clock::now();
+    const bool resumedAfterLongPause = tickNow - lastWatchdogTick >= std::chrono::seconds(5);
+    lastWatchdogTick = tickNow;
+    if (resumedAfterLongPause || recoveryState.consumeRecovery()) {
+      std::fprintf(stderr, "capture: display or system resumed; rebuilding video capture sources\n");
+      std::fflush(stderr);
+      // Recreate only video sources. Audio capture remains continuous, while
+      // fresh WGC sessions and a fresh hook source replace stale black textures.
+      applyVideoSource();
+    }
     const std::string mode = config_.capture.mode;
     bool active = false;
     {
       std::lock_guard<std::mutex> lock(sourceMutex_);
-      // Safety net: the game process died without a clearGameSubject
-      // (missed exit event) — fall back to desktop (auto) or nothing.
       if (subject_.kind == Subject::Kind::Window && !pidAlive(subject_.pid)) {
         if (mode == "auto") {
           subject_ = Subject{Subject::Kind::Monitor, "", "", "", "Desktop", 0};
@@ -479,11 +659,36 @@ void SourceManager::watchdogLoop()
       }
 
       if (subject_.kind == Subject::Kind::Monitor) {
-        active = monitorSource_ != nullptr;
+        const auto now = std::chrono::steady_clock::now();
+        const uint32_t monitorWidth = monitorSource_ ? obs_source_get_width(monitorSource_) : 0;
+        const uint32_t monitorHeight = monitorSource_ ? obs_source_get_height(monitorSource_) : 0;
+        const bool monitorReady = monitorWidth && monitorHeight;
+        active = monitorReady;
+        activeBackend_ = ActiveBackend::None;
+        if (monitorReady) {
+          captureHealthyAt_ = now;
+          lastWindowRetry_ = now;
+          windowNoFramesReported_ = false;
+          fillFrame(monitorItem_);
+        } else {
+          if (now - lastWindowRetry_ >= kRetryDelay) {
+            retryMonitorCaptureLocked();
+            lastWindowRetry_ = now;
+          }
+          if (now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
+            events_.emit("error",
+                         {{"code", "CAPTURE_NO_FRAMES"},
+                          {"message", "Desktop capture is not producing frames; recovery is still retrying"}});
+            windowNoFramesReported_ = true;
+          }
+        }
       } else if (subject_.kind == Subject::Kind::Window && pidAlive(subject_.pid)) {
         const bool minimized = subjectWindowMinimized(subject_);
         if (windowSuppressedForMinimize_ != minimized) {
           windowSuppressedForMinimize_ = minimized;
+          // WGC retains its last compositor frame for some minimized games.
+          // Hide that opaque layer so the still-running graphics hook is the
+          // only game surface rendered until the window is restored.
           if (windowItem_)
             obs_sceneitem_set_visible(windowItem_, !minimized);
           const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
@@ -502,51 +707,96 @@ void SourceManager::watchdogLoop()
         const bool usableWindowReady = windowReady && !minimized;
         const bool gameReady = gameWidth && gameHeight;
         const auto now = std::chrono::steady_clock::now();
+        // A minimized live game is an expected WGC outage, not a dead capture
+        // subject. Keep the replay lifecycle active so its existing packets
+        // are never discarded; WGC retries resume after restore. Do not emit
+        // CAPTURE_NO_FRAMES while minimized.
+        if (minimized) {
+          active = true;
+          captureHealthyAt_ = now;
+          windowNoFramesReported_ = false;
+        }
 
         if (usableWindowReady || gameReady) {
-          // WGC normally supplies the visible window. On true minimization it
-          // retains an opaque final texture, so hide that scene item and expose
-          // the still-updating injected Game Capture source underneath.
           active = true;
           captureHealthyAt_ = now;
           lastWindowRetry_ = now;
+          lastHookRetry_ = now;
+          hookRetryCount_ = 0;
+          wgcRetryCount_ = 0;
           windowNoFramesReported_ = false;
           if (gameReady)
             fillFrame(gameItem_);
           if (usableWindowReady)
-            fillFrame(windowItem_);
+            fillWindowFrameLocked();
+
+          ActiveBackend desired = ActiveBackend::None;
+          if (gameReady)
+            desired = ActiveBackend::Hook;
+          else if (usableWindowReady)
+            desired = ActiveBackend::Wgc;
+
+          if (desired != activeBackend_) {
+            activeBackend_ = desired;
+            const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
+            if (diagnostics && *diagnostics && std::string(diagnostics) != "0") {
+              const char* backendStr = desired == ActiveBackend::Hook ? "hook" : "wgc";
+              std::fprintf(stderr,
+                           "[GC] ts_ms=%llu stage=BackendSwitch backend=%s game=%ux%u wgc=%ux%u pid=%lu\n",
+                           static_cast<unsigned long long>(duration_ms_now()), backendStr, gameWidth, gameHeight,
+                           windowWidth, windowHeight, static_cast<unsigned long>(subject_.pid));
+              std::fflush(stderr);
+            }
+          }
         } else {
           if (captureHealthyAt_.time_since_epoch().count() == 0)
             captureHealthyAt_ = now;
           if (lastWindowRetry_.time_since_epoch().count() == 0)
             lastWindowRetry_ = now;
+          if (lastHookRetry_.time_since_epoch().count() == 0)
+            lastHookRetry_ = now;
 
-          // OBS's WGC source stops retrying after WinRT initialization fails
-          // once. Re-applying the target invokes its force_reset path. The
-          // game hook retries independently inside the win-capture plugin.
-          if (now - captureHealthyAt_ >= kWindowRetryDelay && now - lastWindowRetry_ >= kWindowRetryDelay) {
-            retryWindowCaptureLocked();
-            lastWindowRetry_ = now;
+          if (now - lastHookRetry_ >= kRetryDelay && hookRetryCount_ < kHookMaxRetries) {
+            retryGameCaptureLocked();
+            lastHookRetry_ = now;
+            hookRetryCount_++;
           }
 
-          if (now - captureHealthyAt_ >= kWindowNoFramesDelay && !windowNoFramesReported_) {
-            events_.emit("error",
-                         {{"code", "CAPTURE_NO_FRAMES"},
-                          {"message", "Capture for " + subject_.name +
-                                          " is not producing frames through either game capture or WGC; recovery "
-                                          "is still retrying"}});
+          const bool hookOnly = isHookOnlyGame(subject_.exe);
+          const bool wgcFallbackEnabled =
+              !hookOnly &&
+              (hookRetryCount_ >= kHookAttemptsBeforeFallback ||
+               (now - captureHealthyAt_ >= std::chrono::seconds(9)));
+          if (wgcFallbackEnabled && !minimized && now - lastWindowRetry_ >= kRetryDelay) {
+            retryWindowCaptureLocked();
+            lastWindowRetry_ = now;
+            wgcRetryCount_++;
+          }
+
+          if (now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
+            std::string msg = "Capture for " + subject_.name +
+                              " is not producing frames through either game capture or WGC; recovery "
+                              "is still retrying";
+            if (hookOnly) {
+              msg += " (hook-only title per OBS compatibility – must run on same GPU as Shard; see obsproject.com/kb/gpu-selection-guide)";
+            }
+            events_.emit("error", {{"code", "CAPTURE_NO_FRAMES"}, {"message", msg}});
             windowNoFramesReported_ = true;
           }
         }
       }
     }
 
-    // Feed only healthy capture into the ring lifecycle. A minimized game
-    // remains healthy through the injected hook even though WGC is 0x0.
     if (captureActivityCb_)
       captureActivityCb_(active);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
+#ifdef _WIN32
+  if (displayNotification)
+    PowerSettingUnregisterNotification(displayNotification);
+  if (suspendNotification)
+    PowerUnregisterSuspendResumeNotification(suspendNotification);
+#endif
 }
 
 // ---------------------------------------------------------------- audio ----
@@ -570,8 +820,13 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
   }
   audioSources_.clear();
   audioItems_.clear();
+  const bool allConfiguredSourcesDisabled =
+      !sources.empty() && std::none_of(sources.begin(), sources.end(),
+                                      [](const AudioSourceConfig& source) { return source.enabled; });
 
-  for (const auto& c : sources) {
+
+  for (size_t configuredIndex = 0; configuredIndex < sources.size(); configuredIndex++) {
+    const auto& c = sources[configuredIndex];
     if (!c.enabled)
       continue;
 
@@ -600,10 +855,11 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
       continue;
 
     obs_source_set_volume(src, c.gain);
-    // Each enabled source gets its own audio track (1-based, capped at the
-    // 6-mix limit) in addition to the master mix (track 0) so recordings can
-    // be split per source. The ring/recorder create an encoder per used mix.
-    int track = (int)audioSources_.size() + 1;
+    // Keep configured rows on stable mixes while toggled off. Ring and
+    // recorder outputs allocate tracks from the configured row count, so an
+    // enabled toggle can remove/re-add this source without restarting either
+    // output or discarding buffered packets.
+    int track = static_cast<int>(configuredIndex) + 1;
     if (track > 5)
       track = 5;
     obs_source_set_audio_mixers(src, (1u << 0) | (1u << (unsigned)track));
@@ -612,9 +868,10 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
     audioItems_.push_back(item); // item may be null; harmless
   }
 
-  // Never run silent: with no configured/enabled sources, capture the default
-  // output device so clips always have audio.
-  if (audioSources_.empty()) {
+  // An empty configuration gets the safe default output. A non-empty list
+  // with every row disabled is intentional silence and must not silently
+  // re-enable the default device behind the UI toggle.
+  if (audioSources_.empty() && !allConfiguredSourcesDisabled) {
     obs_data_t* s = obs_data_create();
     obs_data_set_string(s, "device_id", "default");
     obs_data_set_bool(s, "use_device_timing", false);
@@ -695,7 +952,20 @@ nlohmann::json SourceManager::listDevices()
   if (needUninit)
     CoUninitialize();
 #endif
+  return out;
+}
 
+nlohmann::json SourceManager::listMonitors() const
+{
+  nlohmann::json out = nlohmann::json::array();
+  for (const auto& m : app_.monitors()) {
+    out.push_back({{"index", m.index},
+                   {"id", m.id},
+                   {"name", m.name},
+                   {"width", m.width},
+                   {"height", m.height},
+                   {"primary", m.primary}});
+  }
   return out;
 }
 

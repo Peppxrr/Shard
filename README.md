@@ -6,18 +6,21 @@ Shard keeps a rolling replay buffer in RAM, detects running games, and saves the
 
 > **Status:** early development. Windows is the supported runtime today; the core keeps platform-specific capture code isolated for future Linux work.
 
+**Current release:** [Shard v0.1.2](https://github.com/Peppxrr/Shard/releases/tag/v0.1.2) — Windows installer and portable build.
+
 ## Highlights
 
 - **RAM replay buffer** — bounded by duration and memory, anchored to video keyframes, and written only when a clip is saved.
 - **Automatic game detection** — Steam and other launcher discovery, process monitoring, known-game management, session tracking, and optional automatic recording.
 - **Flexible capture** — automatic game/desktop switching, screen-only mode, or game-only mode.
-- **Minimized-game support** — Windows Graphics Capture for normal use, with an OBS-compatible Game Capture hook underneath for applications that permit it.
+- **Minimized-game resilience** — OBS Game Capture remains the primary game backend with Windows Graphics Capture as the non-injected fallback; temporary minimized-window outages keep the replay buffer intact and recover after restore.
 - **Hardware encoding** — H.264 through NVENC when available with x264 fallback; NVENC AV1 is also supported.
-- **Independent audio tracks** — master mix plus per-source tracks for editing and export.
+- **Live independent audio tracks** — master mix plus per-source tracks for editing and export; sources can be enabled or disabled without clearing the replay buffer or splitting an active recording.
 - **Crash-tolerant recording** — fragmented MP4 output avoids a separate remux step for normal recordings.
 - **Clip library** — search, sorting, favorites/protection, thumbnails, import, deletion, storage limits, and drag-out to Explorer or Discord.
-- **Editor and export** — trim ranges, remove middle sections, choose audio tracks, preview the result, and export to a target file size.
+- **Editor and export** — custom playback controls, zoomable split/trim/delete timeline, per-stream cached waveforms, undo/redo, explicit multi-track audio controls, and target-size FFmpeg exports with real progress and cancellation.
 - **Configurable hotkeys** — multiple replay durations with automatic re-registration after transient Windows shortcut failures.
+- **Native storage picker** — choose a custom clips base folder with the operating system's folder dialog or return to the displayed default location.
 
 ## How it works
 
@@ -29,7 +32,7 @@ flowchart LR
     OBS --> Recorder[Fragmented MP4 recorder]
     Ring --> Mux[obs-ffmpeg-mux]
     Mux --> Clips[Clip files]
-    Core[clipcore.exe] <-->|JSON-RPC over localhost WebSocket| Main[Electron main]
+    Core[shardcore.exe] <-->|JSON-RPC over localhost WebSocket| Main[Electron main]
     Main <-->|typed IPC| UI[React renderer]
     Main --> Library[(SQLite library)]
     Main --> Export[FFmpeg editor/export pipeline]
@@ -39,12 +42,16 @@ flowchart LR
 
 Shard layers two Windows capture backends for a detected game:
 
-1. **Windows Graphics Capture** is the normal path. It works while a game is focused, unfocused, or covered without injecting into the game.
-2. **OBS-compatible Game Capture** uses the architecture-matched OBS helper and graphics hook when in-process capture is required, primarily for genuinely minimized windows.
+1. **OBS-compatible Game Capture** is the primary path. It uses the architecture-matched OBS helper and graphics hook when the application permits in-process capture, including games that continue rendering while minimized.
+2. **Windows Graphics Capture** is the non-injected fallback for visible game windows. If neither backend can produce frames while a live game is minimized, Shard preserves the replay buffer, suppresses the expected minimized-window warning, and resumes WGC retries when the window is restored.
 
-The compatibility path is validated with x64 D3D11, x64 D3D12, and x86 D3D11 targets. Anti-cheat software may still reject an unsigned third-party capture hook. The exact implementation, safety boundaries, test matrix, and current VRChat/EAC result are documented in [`GAME_CAPTURE_AUDIT.md`](GAME_CAPTURE_AUDIT.md).
+The compatibility path is validated with x64 D3D11, x64 D3D12, and x86 D3D11 targets. Current Shard and stock OBS both captured VRChat with EAC after a stale machine-wide OBS hook was replaced; the earlier trust/allowlisting conclusion is invalidated. The exact implementation, safety boundaries, test matrix, and evidence are documented in [`GAME_CAPTURE_AUDIT.md`](GAME_CAPTURE_AUDIT.md).
 
-Shard does not bypass anti-cheat, reuse another vendor's signed binaries, install kernel components, or require reduced Windows security settings.
+Shard does not bypass anti-cheat, install kernel components, or require reduced Windows security settings. Its target-side Game Capture payload is the exact official signed OBS Studio 32.2.1 release payload.
+
+### OBS coexistence
+
+Shard never injects from or writes `%ProgramData%\obs-studio-hook`. Game Capture uses only the pinned helper/hook binaries under Shard's staged `data/obs-plugins/win-capture` directory. Build-time and runtime checks enforce their SHA-256 hashes, valid Authenticode signatures, OBS signer identity, and signer-certificate thumbprints. Vulkan discovery uses uniquely named `shard-vulkan32/64.json` manifests and `VK_LAYER_SHARD_CAPTURE`; stock OBS retains exclusive ownership of its shared hook and manifests.
 
 ## Repository layout
 
@@ -60,6 +67,7 @@ patches/          Reproducible Shard patch applied to the pinned OBS checkout
 scripts/          Build, development, selftest/E2E, and capture diagnostics
 vendor/
   obs-studio/     Pinned OBS Studio 32.2.1 submodule
+  obs-hook-payload/32.2.1/  Official signed OBS helper/hook binaries and integrity manifest
   ffmpeg/         Pinned FFmpeg runtime fetched locally; not committed
 ```
 
@@ -151,7 +159,7 @@ Boot capture, warm the replay ring, save a short clip, and verify that muxing su
 ```powershell
 $coreBin = (Resolve-Path app/resources/core-bin).Path
 $out = Join-Path $env:TMP 'shard-selftest'
-& "$coreBin/clipcore.exe" --selftest --out $out `
+& "$coreBin/shardcore.exe" --selftest --out $out `
   --config-dir "$out/cfg" --core-bin $coreBin
 ```
 
@@ -186,11 +194,11 @@ $env:CF_GC_API = 'D3D12'
 node scripts/game-capture-test.mjs
 ```
 
-The test records focused, unfocused, covered, and genuinely minimized states and compares decoded frame hashes to detect frozen output.
+The test verifies the packaged hashes and Authenticode signers, records focused, unfocused, covered, and genuinely minimized states, compares decoded frame hashes to detect frozen output, checks the selected app-owned hook path, and rejects overlapping or premature compatibility-helper launches. `CF_GC_EXPECT_BLOCK_STAGE=HookDllPayloadHash` exercises runtime fail-closed behavior against an intentionally corrupted staged copy.
 
 ## Runtime contract
 
-`clipcore.exe` accepts:
+`shardcore.exe` accepts:
 
 ```text
 --config-dir <dir>   Required configuration directory
@@ -216,3 +224,5 @@ For normal server startup, `PORT <n>` is always the first stdout line. Diagnosti
 Shard is licensed under **GPL-2.0**. See [`LICENSE`](LICENSE).
 
 Shard embeds and modifies OBS Studio components under GPL-2.0. Attribution and related notices are in [`NOTICE`](NOTICE). FFmpeg and other staged runtime components retain their respective upstream licenses.
+
+UI icons are based on [Feather Icons](https://github.com/feathericons/feather) (MIT License, Copyright (c) 2013-2023 Cole Bemis).

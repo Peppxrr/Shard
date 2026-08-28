@@ -6,8 +6,6 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <map>
-#include <set>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -23,38 +21,19 @@ using namespace std::chrono;
 namespace {
 
 constexpr int64_t kDiscoveryIntervalMs = 3600000; // rescan launchers hourly
-constexpr int64_t kUnknownPromoteMs = 30000;      // unknown candidate -> registry
-constexpr int64_t kCandidateTimeoutMs = 90000;    // stop re-scoring lost causes
-constexpr int64_t kReevalIntervalMs = 2000;
+constexpr int64_t kCandidateTimeoutMs = 15000; // renderer/window startup budget
+constexpr int64_t kReevalIntervalMs = 250;
 
 int64_t unixNowMs()
 {
   return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-// Human label per launcher type (UI + diagnostics).
-const char* launcherLabel(const std::string& type)
-{
-  static const std::map<std::string, const char*> kLabels = {
-      {"steam", "Steam"},
-      {"epic", "Epic Games"},
-      {"gog", "GOG Galaxy"},
-      {"ubisoft", "Ubisoft Connect"},
-      {"ea", "EA app"},
-      {"battlenet", "Battle.net"},
-      {"riot", "Riot"},
-      {"msstore", "Microsoft Store / Xbox"},
-      {"heroic", "Heroic"},
-      {"custom", "Game folders"},
-  };
-  auto it = kLabels.find(type);
-  return it == kLabels.end() ? type.c_str() : it->second;
-}
 
 } // namespace
 
 GameSystem::GameSystem(Config& config, Events& events, SourceManager& sources, Recorder& recorder)
-    : config_(config), events_(events), sources_(sources), recorder_(recorder), discovery_(registry_)
+    : config_(config), events_(events), sources_(sources), recorder_(recorder)
 {
 }
 
@@ -86,12 +65,6 @@ void GameSystem::start()
   // Well-known launcher/registry paths; providers are pure given this context.
   discovery_.setContext(LauncherDiscovery::defaults());
 
-  // Persist launcher toggles from settings (they may have been set before
-  // the registry file existed).
-  for (const auto& [type, enabled] : config_.game.launcherEnabled) {
-    if (registry_.launcherEnabled(type) != enabled)
-      registry_.setLauncherEnabled(type, enabled);
-  }
 
   monitor_.start([this](const ProcessEvent& e) { handleProcessEvent(e); });
   sessions_.setSink([this](const char* type, const nlohmann::json& params) {
@@ -124,8 +97,7 @@ void GameSystem::onConfigChanged()
   registry_.setPath(effectiveRegistryPath());
   registry_.load();
   registry_.setVerboseLogging(config_.game.verboseDetection);
-  for (const auto& [type, enabled] : config_.game.launcherEnabled)
-    registry_.setLauncherEnabled(type, enabled);
+  discoveryRequested_.store(true);
 }
 
 // ------------------------------------------------------------------- loop --
@@ -138,18 +110,20 @@ void GameSystem::loop()
     if (now - lastTick >= 500) {
       lastTick = now;
       monitor_.tick();
-      reEvaluateCandidates();
-      unknownGamePromotion();
-      probeSessions();
-      applyFocusPrimary();
-      updateCaptureSubject();
-
-      // Discovery: startup + hourly + explicit refresh.
-      if (lastDiscovery_ == steady_clock::time_point{} ||
+      // Product metadata must exist before live qualification, otherwise an
+      // already-running launcher game would be stored as a duplicate runtime
+      // product during the first tick.
+      if (discoveryRequested_.exchange(false) ||
+          lastDiscovery_ == steady_clock::time_point{} ||
           steady_clock::now() - lastDiscovery_ >= milliseconds(kDiscoveryIntervalMs)) {
         runDiscoveryScan();
         lastDiscovery_ = steady_clock::now();
       }
+      evaluateForegroundProcess();
+      reEvaluateCandidates();
+      applyFocusPrimary();
+      probeSessions();
+      updateCaptureSubject();
 
       // Auto-record: start when a session is active, stop after the grace
       // period once the last session ended.
@@ -171,26 +145,28 @@ void GameSystem::loop()
 void GameSystem::handleProcessEvent(const ProcessEvent& e)
 {
   if (e.type == ProcessEvent::Type::Started) {
-    // Defer evaluation to the loop tick (cheap: WMI gives us the pid early,
-    // the reconcile snapshot completes exe/parent). Uniquely-windowed games
-    // are evaluated within 500 ms.
+    // WMI usually arrives before the process has a window. Evaluate once for
+    // already-ready processes; foreground observation keeps only plausible
+    // renderer candidates hot while their window/modules finish loading.
     evaluateProcess(e.info.pid);
-  } else {
-    std::lock_guard<std::mutex> lock(stateMtx_);
-    knownPids_.erase(e.info.pid);
-    candidateSince_.erase(e.info.pid);
-    unknownSince_.erase(e.info.pid);
-    sessions_.onProcessExited(e.info.pid);
+    return;
   }
+
+  std::lock_guard<std::mutex> lock(stateMtx_);
+  knownPids_.erase(e.info.pid);
+  candidateSince_.erase(e.info.pid);
+  if (observedForegroundPid_ == e.info.pid)
+    observedForegroundPid_ = 0;
+  sessions_.onProcessExited(e.info.pid);
 }
 
 void GameSystem::evaluateProcess(uint32_t pid)
 {
   if (pid == 0)
     return;
-  ProcessInfo p = monitor_.lookup(pid);
-  if (p.exe.empty() || p.exe == "clipcore.exe")
-    return; // snapshot has not run yet; next tick picks it up
+  ProcessInfo process = monitor_.lookup(pid);
+  if (process.exe.empty() || process.exe == "shardcore.exe")
+    return;
 
   {
     std::lock_guard<std::mutex> lock(stateMtx_);
@@ -198,45 +174,97 @@ void GameSystem::evaluateProcess(uint32_t pid)
       return;
   }
 
-  // The monitor resolves path/startMs lazily (one OpenProcess per candidate).
   monitor_.resolve(pid);
-  p = monitor_.lookup(pid);
-
-  DetectContext ctx;
-  ctx.registry = &registry_;
-  ctx.chain = [this](uint32_t id) { return monitor_.ancestors(id); };
-  ctx.lookup = [this](uint32_t id) { return monitor_.lookup(id); };
-  ctx.nowMs = unixNowMs();
-
+  process = monitor_.lookup(pid);
+  const auto productHint = productHintForPath(process.path);
   const WindowProbe probe = probeWindow(pid);
-  ctx.window.hasVisibleWindow = probe.hasWindow;
-  ctx.window.fullscreen = probe.fullscreen;
-  ctx.window.foreground = probe.foreground;
+  const ProcessRuntimeFacts runtime = monitor_.probeRuntime(pid);
 
-  DetectionResult r = GameDetector::detect(p, ctx);
-  logDetection(p, r);
+  DetectContext context;
+  context.registry = &registry_;
+  context.productHint = productHint ? &*productHint : nullptr;
+  context.chain = [this](uint32_t id) { return monitor_.ancestors(id); };
+  context.lookup = [this](uint32_t id) { return monitor_.lookup(id); };
+  context.nowMs = unixNowMs();
+  context.window.hasVisibleWindow = probe.hasWindow;
+  context.window.title = probe.title;
+  context.window.captureable = probe.captureable;
+  context.window.fullscreen = probe.fullscreen;
+  context.window.foreground = probe.foreground;
+  context.window.area = probe.area;
+  context.runtime.probeSucceeded = runtime.probeSucceeded;
+  context.runtime.graphicsApi = runtime.graphicsApi;
+  context.runtime.gameRuntime = runtime.gameRuntime;
+  context.runtime.webRuntime = runtime.webRuntime;
+  context.runtime.mediaRuntime = runtime.mediaRuntime;
+  context.runtime.gameInput = runtime.gameInput;
+  context.recentProcess = process.startMs > 0 && context.nowMs >= process.startMs &&
+                          context.nowMs - process.startMs <= kCandidateTimeoutMs;
+  if (probe.foreground) {
+    std::lock_guard<std::mutex> lock(stateMtx_);
+    const auto candidate = candidateSince_.find(pid);
+    if (candidate != candidateSince_.end())
+      context.foregroundIntentMs = context.nowMs - candidate->second;
+  }
 
-  if (r.decision == DetectionResult::Decision::Detected) {
+  DetectionResult result = GameDetector::detect(process, context);
+  logDetection(process, result);
+
+  if (result.decision == DetectionResult::Decision::Detected && !result.gameId.empty() &&
+      !registry_.findById(result.gameId) && productHint && productHint->id == result.gameId) {
+    GameDefinition qualifiedProduct = *productHint;
+    qualifiedProduct.executables = {process.exe};
+    registry_.mergeDiscovered(qualifiedProduct);
+    result = GameDetector::detect(process, context);
+  }
+
+  if (result.decision == DetectionResult::Decision::Detected && result.gameId.empty()) {
+    // A qualified child may join an authoritative installed/user product.
+    // Runtime-discovered ancestors never own descendants; those get their own
+    // stable identity. Mere ancestry is never qualifying evidence.
+    std::string ancestorGameId;
     {
       std::lock_guard<std::mutex> lock(stateMtx_);
-      knownPids_[pid] = r.gameId;
-      candidateSince_.erase(pid);
-      unknownSince_.erase(pid);
-      unknownPromoted_.erase(pid);
+      const auto chain = monitor_.ancestors(pid);
+      for (size_t i = 1; i < chain.size(); i++) {
+        const auto known = knownPids_.find(chain[i]);
+        if (known == knownPids_.end())
+          continue;
+        // Runtime products represent one qualified executable, not ownership
+        // of every qualified descendant. Otherwise an application host such
+        // as CurseForge absorbs javaw.exe and the launcher becomes the game.
+        if (GameDetector::canOwnQualifiedDescendant(known->second)) {
+          ancestorGameId = known->second;
+          break;
+        }
+      }
     }
-    sessions_.onDetected(r, p);
-  } else if (r.decision == DetectionResult::Decision::Candidate) {
+    if (!ancestorGameId.empty())
+      registry_.addRuntimeExecutable(ancestorGameId, process.exe);
+    else
+      createRuntimeProduct(process, result);
+    result = GameDetector::detect(process, context);
+  }
+
+  if (result.decision == DetectionResult::Decision::Detected && !result.gameId.empty()) {
+    {
+      std::lock_guard<std::mutex> lock(stateMtx_);
+      knownPids_[pid] = result.gameId;
+      candidateSince_.erase(pid);
+    }
+    sessions_.onDetected(result, process);
+
+    // The process passed positive game qualification. Persist only this
+    // executable, never its unobserved directory siblings.
+    const GameDefinition* product = registry_.findById(result.gameId);
+    if (product && !registry_.findByExe(process.exe))
+      registry_.addRuntimeExecutable(result.gameId, process.exe);
+    return;
+  }
+
+  if (result.decision == DetectionResult::Decision::Candidate) {
     std::lock_guard<std::mutex> lock(stateMtx_);
     candidateSince_.try_emplace(pid, unixNowMs());
-  } else {
-    // Hard-ignored (known non-game / user ignore) or too weak. Only
-    // unknown-shaped processes — NOT known non-games or user-ignored exes —
-    // with launcher/install evidence enter the promotion watchlist.
-    if (!GameDetector::isKnownNonGameExe(p.exe) && !registry_.isIgnoredExe(p.exe) &&
-        (hasLauncherAncestry(pid) || pathUnderDiscoveredInstall(p.path))) {
-      std::lock_guard<std::mutex> lock(stateMtx_);
-      unknownSince_.try_emplace(pid, unixNowMs());
-    }
   }
 }
 
@@ -247,12 +275,12 @@ void GameSystem::reEvaluateCandidates()
     std::lock_guard<std::mutex> lock(stateMtx_);
     const int64_t now = unixNowMs();
     for (auto it = candidateSince_.begin(); it != candidateSince_.end();) {
-      if (now - it->second >= kReevalIntervalMs)
-        toCheck.push_back(it->first);
       if (now - it->second >= kCandidateTimeoutMs) {
         it = candidateSince_.erase(it);
         continue;
       }
+      if (now - it->second >= kReevalIntervalMs)
+        toCheck.push_back(it->first);
       ++it;
     }
   }
@@ -261,124 +289,185 @@ void GameSystem::reEvaluateCandidates()
       evaluateProcess(pid);
 }
 
-bool GameSystem::hasLauncherAncestry(uint32_t pid) const
+void GameSystem::evaluateForegroundProcess()
 {
-  const auto chain = monitor_.ancestors(pid);
-  for (size_t i = 1; i < chain.size(); i++) {
-    const ProcessInfo anc = monitor_.lookup(chain[i]);
-    if (!GameDetector::launcherTypeOfExe(anc.exe).empty())
-      return true;
-  }
-  return false;
-}
+  const uint32_t pid = foregroundPid();
+  if (pid == 0)
+    return;
 
-bool GameSystem::pathUnderDiscoveredInstall(const std::string& lowerPath) const
-{
-  if (lowerPath.empty())
-    return false;
-  for (const auto& g : registry_.discoveredGames())
-    for (const auto& ip : g.installPaths)
-      if (pathUnder(lowerPath, ip))
-        return true;
-  return false;
-}
-
-// Unknown game workflow (Todo #11): a process with strong launcher/install
-// evidence but no registry entry becomes a discovered game after it survives
-// kUnknownPromoteMs — enough evidence, no junk.
-void GameSystem::unknownGamePromotion()
-{
-  std::vector<std::pair<uint32_t, int64_t>> ready;
+  bool shouldEvaluate = false;
   {
     std::lock_guard<std::mutex> lock(stateMtx_);
-    const int64_t now = unixNowMs();
-    for (auto it = unknownSince_.begin(); it != unknownSince_.end();) {
-      if (unknownPromoted_.count(it->first)) {
-        it = unknownSince_.erase(it);
-        continue;
-      }
-      if (now - it->second >= kUnknownPromoteMs)
-        ready.push_back(*it);
-      ++it;
+    if (knownPids_.count(pid))
+      return;
+    if (pid != observedForegroundPid_) {
+      observedForegroundPid_ = pid;
+      candidateSince_[pid] = unixNowMs();
+      shouldEvaluate = true;
+    } else {
+      shouldEvaluate = candidateSince_.count(pid) != 0;
     }
   }
-  for (const auto& [pid, _] : ready) {
-    if (!monitor_.alive(pid))
-      continue;
-    ProcessInfo p = monitor_.lookup(pid);
-    monitor_.resolve(pid);
-    p = monitor_.lookup(pid);
-    if (p.exe.empty() || GameDetector::isKnownNonGameExe(p.exe) || registry_.isIgnoredExe(p.exe))
-      continue;
-
-    // Determine the launcher type from ancestry (or WindowsApps path).
-    std::string launcherType;
-    for (uint32_t anc : monitor_.ancestors(pid)) {
-      const ProcessInfo a = monitor_.lookup(anc);
-      const std::string t = GameDetector::launcherTypeOfExe(a.exe);
-      if (!t.empty()) {
-        launcherType = t;
-        break;
-      }
-    }
-    if (launcherType.empty() && p.path.find("\\windowsapps\\") != std::string::npos)
-      launcherType = "msstore";
-    if (launcherType.empty())
-      continue; // not enough evidence: never auto-classify
-    // MS Store bloat (Xbox/Store apps) must never promote: require a visible
-    // window, and let the known-non-game list keep filtering the rest.
-    if (launcherType == "msstore" && !probeWindow(pid).hasWindow)
-      continue;
-
-    GameDefinition g;
-    g.name = baseName(p.exe);
-    g.name = g.name.substr(0, g.name.size() - 4); // strip .exe
-    g.executables = {p.exe};
-    if (!p.path.empty())
-      g.installPaths = {normalizePath(p.path.substr(0, p.path.find_last_of('\\')))};
-    g.launchers = {{launcherType, p.exe}};
-    g.source = GameSource::Discovered;
-    registry_.mergeDiscovered(g);
-    std::lock_guard<std::mutex> lock(stateMtx_);
-    unknownPromoted_.insert(pid);
-    unknownSince_.erase(pid);
-    if (registry_.verboseLogging())
-      std::fprintf(stderr,
-                   "[GameDetection] unknown process %s (%u) promoted to discovered game \"%s\" via %s\n",
-                   p.exe.c_str(), pid, g.name.c_str(), launcherType.c_str());
-    // Re-evaluate immediately — the new entry gives it an exe match.
+  if (shouldEvaluate)
     evaluateProcess(pid);
-  }
 }
+
+std::string GameSystem::createRuntimeProduct(const ProcessInfo& process, const DetectionResult& result)
+{
+  const fs::path executablePath(process.path);
+  const std::string installPath = process.path.empty() ? std::string() : normalizePath(executablePath.parent_path().string());
+  const std::string identity = process.path.empty() ? process.exe : normalizePath(process.path);
+  uint64_t hash = 1469598103934665603ULL;
+  for (unsigned char c : identity) {
+    hash ^= c;
+    hash *= 1099511628211ULL;
+  }
+  char idPart[17] = {};
+  std::snprintf(idPart, sizeof(idPart), "%016llx", (unsigned long long)hash);
+
+  GameDefinition game;
+  game.id = std::string("d:runtime:") + idPart;
+  game.name = result.gameName.empty() ? process.exe : result.gameName;
+  game.executables = {process.exe};
+  if (!installPath.empty())
+    game.installPaths = {installPath};
+  game.launchers = {{"runtime", idPart}};
+  game.productType = "game";
+  game.source = GameSource::Discovered;
+
+  registry_.mergeDiscovered(game);
+  const GameDefinition* merged = registry_.findByExe(process.exe);
+  return merged ? merged->id : game.id;
+}
+
+
+
+std::optional<GameDefinition> GameSystem::productHintForPath(const std::string& lowerPath) const
+{
+  if (lowerPath.empty())
+    return std::nullopt;
+  std::lock_guard<std::mutex> lock(productHintsMtx_);
+  const GameDefinition* best = nullptr;
+  size_t bestLength = 0;
+  for (const auto& product : productHints_) {
+    if (!product.enabled)
+      continue;
+    for (const auto& installPath : product.installPaths) {
+      if (installPath.size() > bestLength && pathUnder(lowerPath, installPath)) {
+        best = &product;
+        bestLength = installPath.size();
+      }
+    }
+  }
+  return best ? std::optional<GameDefinition>(*best) : std::nullopt;
+}
+
+
 
 void GameSystem::probeSessions()
 {
-  const GameSession prim = sessions_.primary();
+  GameSession prim = sessions_.primary();
   if (prim.pid == 0)
     return;
   // Emulator/multi-window games: the probe prefers the fullscreen window or
   // the window whose title contains the game name — i.e. the actual game
   // window, not the emulator GUI.
-  const WindowProbe probe = probeWindow(prim.pid, prim.gameName);
-  sessions_.updateWindow(prim.pid, probe.title, probe.cls, probe.fullscreen, probe.hasWindow);
+  // FIX: a session aggregates multiple pids (VRChat + UnityCrashHandler).
+  // Probing only prim.pid (which may be the helper with no window, e.g.
+  // UnityCrashHandler64) made the capture descriptor empty → WGC found no
+  // window → black. Probe every pid in the session and keep the best visible
+  // window, promoting its pid to the session's primary pid if needed.
+  WindowProbe bestProbe;
+  uint32_t bestPid = 0;
+  std::string bestTitle;
+  for (uint32_t pid : prim.pids) {
+    WindowProbe probe = probeWindow(pid, prim.gameName);
+    if (!probe.hasWindow || probe.minimized || !probe.onScreen)
+      continue;
+    // Prefer: fullscreen > title contains game name > any window.
+    // The per-pid probe already prefers those internally; across pids we need
+    // the same ordering. Use fullscreen first, then hint, then first seen.
+    bool isBetter = false;
+    if (bestPid == 0)
+      isBetter = true;
+    else if (probe.fullscreen != bestProbe.fullscreen)
+      isBetter = probe.fullscreen;
+    else {
+      const std::string hint = toLower(trim(prim.gameName));
+      const bool probeHint = !hint.empty() && toLower(probe.title).find(hint) != std::string::npos;
+      const bool bestHint = !hint.empty() && toLower(bestProbe.title).find(hint) != std::string::npos;
+      if (probeHint != bestHint)
+        isBetter = probeHint;
+    }
+    if (isBetter) {
+      bestProbe = probe;
+      bestPid = pid;
+    }
+  }
+  // No on-screen window among pids: fall back to probing the session's
+  // primary pid (may be minimized/hidden) so at least we report something.
+  if (bestPid == 0) {
+    bestProbe = probeWindow(prim.pid, prim.gameName);
+    bestPid = prim.pid;
+  }
+  // If the best window lives on a different pid than prim.pid, heal the
+  // session: make the window-bearing pid the session's representative.
+  if (bestPid != prim.pid && bestProbe.hasWindow) {
+    ProcessInfo bestInfo = monitor_.lookup(bestPid);
+    if (!bestInfo.exe.empty()) {
+      sessions_.updateProcess(prim.pid, bestInfo.exe, bestInfo.path);
+      // updateWindow is keyed by pid, so also move the window info to bestPid
+      // and update primary's pid visibly: we can't change prim.pid directly
+      // without a session API, so we refresh the session via onDetected which
+      // will fold bestPid in and make it the primary pid. Simulate by
+      // re-detecting bestPid.
+      const ProcessRuntimeFacts runtime = monitor_.probeRuntime(bestPid);
+      DetectContext ctx;
+      ctx.registry = &registry_;
+      ctx.chain = [this](uint32_t id) { return monitor_.ancestors(id); };
+      ctx.lookup = [this](uint32_t id) { return monitor_.lookup(id); };
+      ctx.nowMs = unixNowMs();
+      ctx.window.hasVisibleWindow = bestProbe.hasWindow;
+      ctx.window.title = bestProbe.title;
+      ctx.window.captureable = bestProbe.captureable;
+      ctx.window.fullscreen = bestProbe.fullscreen;
+      ctx.window.foreground = bestProbe.foreground;
+      ctx.window.area = bestProbe.area;
+      ctx.runtime = {runtime.probeSucceeded, runtime.graphicsApi, runtime.gameRuntime, runtime.gameInput,
+                     runtime.webRuntime, runtime.mediaRuntime};
+      DetectionResult r = GameDetector::detect(bestInfo, ctx);
+      if (r.decision == DetectionResult::Decision::Detected) {
+        sessions_.onDetected(r, bestInfo);
+        // Re-fetch prim after healing
+        prim = sessions_.primary();
+        bestProbe = probeWindow(prim.pid, prim.gameName);
+      }
+    }
+  }
+  sessions_.updateWindow(prim.pid, bestProbe.title, bestProbe.cls, bestProbe.fullscreen, bestProbe.hasWindow);
 
-  // Re-run the detector on the active process so score changes (sustained
-  // runtime, window facts, new launcher evidence) refresh the session metadata
-  // without ever restarting it. One process per tick — negligible cost.
+  // Re-run the detector on the active process so current window/runtime
+  // evidence refreshes session metadata without restarting the session.
   if (!monitor_.alive(prim.pid))
     return;
   ProcessInfo p = monitor_.lookup(prim.pid);
   if (p.exe.empty())
     return;
   sessions_.updateProcess(prim.pid, p.exe, p.path);
+  const ProcessRuntimeFacts runtime = monitor_.probeRuntime(prim.pid);
   DetectContext ctx;
   ctx.registry = &registry_;
   ctx.chain = [this](uint32_t id) { return monitor_.ancestors(id); };
   ctx.lookup = [this](uint32_t id) { return monitor_.lookup(id); };
   ctx.nowMs = unixNowMs();
-  ctx.window.hasVisibleWindow = probe.hasWindow;
-  ctx.window.fullscreen = probe.fullscreen;
-  ctx.window.foreground = probe.foreground;
+  ctx.window.hasVisibleWindow = bestProbe.hasWindow;
+  ctx.window.title = bestProbe.title;
+  ctx.window.captureable = bestProbe.captureable;
+  ctx.window.fullscreen = bestProbe.fullscreen;
+  ctx.window.foreground = bestProbe.foreground;
+  ctx.window.area = bestProbe.area;
+  ctx.runtime = {runtime.probeSucceeded, runtime.graphicsApi, runtime.gameRuntime, runtime.gameInput,
+                 runtime.webRuntime, runtime.mediaRuntime};
   DetectionResult r = GameDetector::detect(p, ctx);
   if (r.decision != DetectionResult::Decision::Ignored)
     sessions_.onDetected(r, p); // refreshes score/launcher, never restarts
@@ -406,6 +495,9 @@ GameSystem::WindowProbe GameSystem::probeWindow(uint32_t pid, const std::string&
     std::string cls;
     long area = 0;
     bool fullscreen = false;
+    bool minimized = false;
+    bool onScreen = false;
+    bool captureable = false;
   };
   std::vector<Win> wins;
   struct Ctx {
@@ -418,6 +510,9 @@ GameSystem::WindowProbe GameSystem::probeWindow(uint32_t pid, const std::string&
         DWORD wpid = 0;
         GetWindowThreadProcessId(h, &wpid);
         if (wpid != c->pid || !IsWindowVisible(h))
+          return TRUE;
+        const LONG_PTR exStyles = GetWindowLongPtr(h, GWL_EXSTYLE);
+        if ((exStyles & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0)
           return TRUE;
         Win w;
         w.hwnd = h;
@@ -439,7 +534,14 @@ GameSystem::WindowProbe GameSystem::probeWindow(uint32_t pid, const std::string&
         }
         RECT rect;
         if (GetWindowRect(h, &rect)) {
-          w.area = (long)(rect.right - rect.left) * (long)(rect.bottom - rect.top);
+          RECT client = {};
+          if (GetClientRect(h, &client))
+            w.area = (long)(client.right - client.left) * (long)(client.bottom - client.top);
+          // Minimized windows report an off-screen icon rect — IsIconic is the
+          // reliable check. onScreen = the window rect intersects a monitor.
+          w.minimized = IsIconic(h) != 0;
+          w.onScreen = MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) != nullptr;
+          w.captureable = !w.minimized && w.onScreen && w.area >= (long)320 * 200;
           DWORD styles = (DWORD)GetWindowLongPtr(h, GWL_STYLE);
           bool maximized = (styles & WS_MAXIMIZE) != 0 && (styles & WS_BORDER) != 0;
           if (!maximized) {
@@ -481,10 +583,13 @@ GameSystem::WindowProbe GameSystem::probeWindow(uint32_t pid, const std::string&
     if (w.area > best->area)
       best = &w;
   }
-
   out.title = best->title;
   out.cls = best->cls;
+  out.captureable = best->captureable;
   out.fullscreen = best->fullscreen;
+  out.minimized = best->minimized;
+  out.onScreen = best->onScreen;
+  out.area = best->area;
 #endif
   (void)pid;
   (void)titleHint;
@@ -508,6 +613,8 @@ uint32_t GameSystem::foregroundPid() const
 // Active-game following: the game that holds focus for the debounce window
 // becomes primary, so capture switches back and forth between running games
 // like the user does. Focus on a non-game never changes the primary.
+// This is the SINGLE authority for primary selection (updateCaptureSubject
+// never mutates primary).
 void GameSystem::applyFocusPrimary()
 {
   const GameSession* fgSession = sessions_.sessionForPid(foregroundPid());
@@ -517,6 +624,13 @@ void GameSystem::applyFocusPrimary()
     if (target != focusGameId_) {
       focusGameId_ = target;
       focusSinceMs_ = target.empty() ? 0 : unixNowMs();
+      if (registry_.verboseLogging() && !target.empty()) {
+        std::fprintf(stderr, "[GameDetection] focus changed -> %s (pid %u) debounce start\n",
+                     fgSession->gameName.c_str(), fgSession->pid);
+      } else if (registry_.verboseLogging() && target.empty()) {
+        std::fprintf(stderr, "[GameDetection] focus -> non-game/desktop, keeping primary %s\n",
+                     sessions_.primary().gameName.c_str());
+      }
     }
   }
   if (focusGameId_.empty())
@@ -528,15 +642,25 @@ void GameSystem::applyFocusPrimary()
   }
   if (unixNowMs() - sinceMs >= kFocusDebounceMs) {
     const GameSession prim = sessions_.primary();
-    if (prim.gameId != focusGameId_)
+    if (prim.gameId != focusGameId_) {
+      if (registry_.verboseLogging()) {
+        std::fprintf(stderr, "[GameDetection] debounce satisfied %lldms: primary %s -> %s\n",
+                     (long long)(unixNowMs() - sinceMs),
+                     prim.gameName.empty() ? "<none>" : prim.gameName.c_str(),
+                     fgSession ? fgSession->gameName.c_str() : focusGameId_.c_str());
+      }
       sessions_.setPrimaryByGameId(focusGameId_);
+    }
   }
 }
 
 void GameSystem::updateCaptureSubject()
 {
-  const GameSession prim = sessions_.primary();
-  const bool hasSubject = prim.pid != 0 && !prim.exe.empty();
+  // SINGLE responsibility: read selected primary, push to SourceManager.
+  // Never decides who primary is — that is applyFocusPrimary's job.
+  // Re-fetch primary here so we never operate on a stale snapshot.
+  GameSession prim = sessions_.primary();
+  bool hasSubject = prim.pid != 0 && !prim.exe.empty();
 
   if (!hasSubject) {
     if (pushedSubjectPid_ != 0) {
@@ -548,7 +672,6 @@ void GameSystem::updateCaptureSubject()
     }
     return;
   }
-
   if (pushedSubjectPid_ == prim.pid && pushedSubjectTitle_ == prim.title && pushedSubjectClass_ == prim.cls &&
       pushedSubjectExe_ == prim.exe)
     return; // unchanged
@@ -575,34 +698,24 @@ void GameSystem::emitGameChanged()
 
 void GameSystem::runDiscoveryScan()
 {
-  // Custom game folders + Heroic config dir feed the providers.
   ScanContext ctx = LauncherDiscovery::defaults();
-  for (const auto& f : registry_.customFolders())
-    ctx.customFolders.push_back({f.id, f.name, f.path, f.emulator});
   discovery_.setContext(ctx);
-  const auto results = discovery_.scanAll();
-  lastScanResults_ = results;
-  lastScanAtMs_ = unixNowMs();
-
-  // Self-heal: drop discovered entries whose executables are ALL known
-  // non-games or user-ignored (leftovers from scans before the filters
-  // existed, or entries the user has since ignored). The detector ignores
-  // them anyway; this keeps the registry clean.
-  for (const auto& g : registry_.discoveredGames()) {
-    bool allNoise = !g.executables.empty();
-    for (const auto& exe : g.executables) {
-      if (!GameDetector::isKnownNonGameExe(exe) && !registry_.isIgnoredExe(exe)) {
-        allNoise = false;
-        break;
-      }
-    }
-    if (allNoise)
-      registry_.removeDiscoveredGame(g.id);
-  }
-
+  auto scan = discovery_.scanAll();
   if (registry_.verboseLogging()) {
-    for (const auto& r : results)
-      std::fprintf(stderr, "[GameDetection] discovery %s: %d game(s)\n", r.type.c_str(), r.games);
+    for (const auto& result : scan.results)
+      std::fprintf(stderr, "[GameDetection] discovery %s: %d product hint(s)\n",
+                   result.type.c_str(), result.games);
+  }
+  // Purge previously learned executables for products that Steam now
+  // authoritatively identifies as non-games. Keep them as ephemeral hints so
+  // the detector rejects their install paths without an executable denylist.
+  for (const auto& product : scan.products) {
+    if (product.productType == "software" || product.productType == "tool")
+      registry_.discardNonGameProduct(product.id);
+  }
+  {
+    std::lock_guard<std::mutex> lock(productHintsMtx_);
+    productHints_ = std::move(scan.products);
   }
 }
 
@@ -684,28 +797,6 @@ bool GameSystem::removeDiscovered(const std::string& id)
   return registry_.removeDiscoveredGame(id);
 }
 
-nlohmann::json GameSystem::listCustomFolders() const
-{
-  nlohmann::json arr = nlohmann::json::array();
-  for (const auto& f : registry_.customFolders())
-    arr.push_back(f.toJson());
-  return arr;
-}
-
-nlohmann::json GameSystem::addCustomFolder(const nlohmann::json& params)
-{
-  CustomFolder f;
-  f.name = params.value("name", std::string());
-  f.path = params.value("path", std::string());
-  f.emulator = params.value("emulator", false);
-  const std::string id = registry_.addCustomFolder(f);
-  return {{"id", id}, {"ok", !id.empty()}};
-}
-
-bool GameSystem::removeCustomFolder(const std::string& id)
-{
-  return registry_.removeCustomFolder(id);
-}
 
 nlohmann::json GameSystem::updateUserGame(const nlohmann::json& params)
 {
@@ -741,65 +832,8 @@ bool GameSystem::unignoreExe(const std::string& exe)
   return registry_.removeIgnoredExe(exe);
 }
 
-nlohmann::json GameSystem::listLaunchers() const
-{
-  nlohmann::json arr = nlohmann::json::array();
-  const ScanContext ctx = LauncherDiscovery::defaults();
-  for (const auto& [type, enabled] : registry_.launcherEnabledMap()) {
-    bool installed = false;
-    if (type == "steam")
-      installed = !ctx.steamLibraryFile.empty() && fs::exists(ctx.steamLibraryFile);
-    else if (type == "epic")
-      installed = !ctx.epicManifestsDir.empty() && fs::is_directory(ctx.epicManifestsDir);
-    else if (type == "riot")
-      installed = !ctx.riotInstallsFile.empty() && fs::exists(ctx.riotInstallsFile);
-    else if (type == "heroic")
-      installed = !ctx.heroicConfigDir.empty() &&
-                  fs::is_directory(fs::path(ctx.heroicConfigDir) / "games_config");
-    else if (type == "custom")
-      installed = true; // user-defined folders always available
-    else if (type == "msstore")
-      installed = ctx.listRegistryKeys && !ctx.listRegistryKeys("HKCU", ctx.msStorePackagesKey).empty();
-    else if (ctx.listRegistryKeys) {
-      // Registry-based launchers: the platform key exists.
-      const std::string base = type == "gog" ? "SOFTWARE\\WOW6432Node\\GOG.com\\Games"
-                               : type == "ubisoft" ? "SOFTWARE\\WOW6432Node\\Ubisoft\\Launcher\\Installs"
-                               : type == "ea" ? "SOFTWARE\\WOW6432Node\\Electronic Arts\\EA Core\\Installed Games"
-                               : type == "battlenet" ? "SOFTWARE\\WOW6432Node\\Blizzard Entertainment"
-                                                     : std::string();
-      if (!base.empty())
-        installed = !ctx.listRegistryKeys("HKLM", base).empty();
-    }
 
-    int gameCount = 0;
-    int64_t lastScanMs = 0;
-    for (const auto& r : lastScanResults_)
-      if (r.type == type) {
-        gameCount = r.games;
-        lastScanMs = r.lastScanMs;
-      }
-    nlohmann::json j = {{"type", type},
-                        {"label", launcherLabel(type)},
-                        {"enabled", enabled},
-                        {"installed", installed},
-                        {"lastScanMs", lastScanMs == 0 ? nlohmann::json(nullptr) : nlohmann::json(lastScanMs)},
-                        {"gameCount", gameCount}};
-    arr.push_back(std::move(j));
-  }
-  return arr;
-}
 
-bool GameSystem::setLauncherEnabled(const std::string& type, bool enabled)
-{
-  registry_.setLauncherEnabled(type, enabled);
-  return true;
-}
-
-nlohmann::json GameSystem::refreshDiscovery()
-{
-  runDiscoveryScan();
-  return listLaunchers();
-}
 
 nlohmann::json GameSystem::sessions() const
 {
@@ -836,14 +870,30 @@ nlohmann::json GameSystem::detectExplain(const nlohmann::json& params) const
   const_cast<ProcessMonitor&>(monitor_).resolve(pid);
   p = monitor_.lookup(pid);
   const WindowProbe probe = probeWindow(pid);
+  const ProcessRuntimeFacts runtime = monitor_.probeRuntime(pid);
+  const auto productHint = productHintForPath(p.path);
   DetectContext ctx;
   ctx.registry = &registry_;
+  ctx.productHint = productHint ? &*productHint : nullptr;
   ctx.chain = [this](uint32_t id) { return monitor_.ancestors(id); };
   ctx.lookup = [this](uint32_t id) { return monitor_.lookup(id); };
   ctx.nowMs = unixNowMs();
   ctx.window.hasVisibleWindow = probe.hasWindow;
+  ctx.window.title = probe.title;
+  ctx.window.captureable = probe.captureable;
   ctx.window.fullscreen = probe.fullscreen;
   ctx.window.foreground = probe.foreground;
+  ctx.window.area = probe.area;
+  ctx.runtime = {runtime.probeSucceeded, runtime.graphicsApi, runtime.gameRuntime, runtime.gameInput,
+                 runtime.webRuntime, runtime.mediaRuntime};
+  ctx.recentProcess = p.startMs > 0 && ctx.nowMs >= p.startMs &&
+                      ctx.nowMs - p.startMs <= kCandidateTimeoutMs;
+  if (probe.foreground) {
+    std::lock_guard<std::mutex> lock(stateMtx_);
+    const auto candidate = candidateSince_.find(pid);
+    if (candidate != candidateSince_.end())
+      ctx.foregroundIntentMs = ctx.nowMs - candidate->second;
+  }
   const DetectionResult r = GameDetector::detect(p, ctx);
 
   nlohmann::json reasons = nlohmann::json::array();

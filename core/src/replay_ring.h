@@ -94,6 +94,11 @@ private:
   // Serializes start/stop/restart/setCaptureActive (watchdog thread vs RPC).
   std::mutex lifecycleMtx_;
   std::chrono::steady_clock::time_point inactiveSince_{};
+  // True once the watchdog has reported healthy capture since the last start.
+  // The ring is started eagerly at boot (and on config restarts) before any
+  // subject exists; until real activity arrives, an inactive signal stops it
+  // immediately instead of buffering uselessly through the 15 s grace.
+  bool sawActivity_ = false;
 
   std::mutex saveMtx_;
   std::condition_variable saveCv_;

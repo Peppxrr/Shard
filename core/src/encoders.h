@@ -14,7 +14,7 @@ namespace clipforge {
 // sequential sharing of one encoder across outputs).
 class EncoderManager {
 public:
-  explicit EncoderManager(const Config& config) : config_(config) {}
+  explicit EncoderManager(const Config& config);
 
   // Resolve "auto" -> concrete encoder id ("obs_x264" unless NVENC exists).
   std::string resolveVideoEncoderId(const std::string& requested) const;

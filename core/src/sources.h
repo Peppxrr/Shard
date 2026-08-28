@@ -65,6 +65,8 @@ public:
 
   // WASAPI device enumeration: [{id,name,isInput,isVoicemeeter}]
   nlohmann::json listDevices();
+  // Desktop displays: [{index,name,width,height,primary}].
+  nlohmann::json listMonitors() const;
 
   // GameSystem session callback: the primary game session changed. Switches
   // the capture subject to that game's layered WGC + game-hook sources; a
@@ -99,10 +101,18 @@ private:
   // Requires sourceMutex_ held.
   void applySubjectLocked();
   void setWindowTargetLocked(const Subject& s);
-  void fillFrame(obs_sceneitem_t* item);
+  void fillFrame(obs_sceneitem_t* item, const struct obs_sceneitem_crop* crop = nullptr);
+  // Crop the full WGC surface at the scene layer. Invalid Win32 geometry
+  // deliberately falls back to the uncropped live surface.
+  void fillWindowFrameLocked();
+  void retryMonitorCaptureLocked();
   // Reset a stalled WGC session by re-applying the current target. OBS only
   // retries a failed WinRT initialization after a settings update.
   void retryWindowCaptureLocked();
+  // Force the game_capture source to re-try hook injection. Required because
+  // win-capture sets error_acquiring=true on validation failures and then
+  // stops its internal retry until the next settings update.
+  void retryGameCaptureLocked();
   void emitSubjectChanged();
   void removeVideoSourceItem();
 
@@ -110,25 +120,31 @@ private:
   Config& config_;
   Events& events_;
 
-  // Capture sources + scene items. For a game, gameItem_ is below windowItem_:
-  // visible WGC frames win, but WGC draws nothing when minimized and exposes
-  // the still-running game hook beneath it.
+  // Capture sources + scene items. Hook is the primary game backend (top
+  // layer); WGC window_capture is the fallback beneath it. When the hook is
+  // producing frames its texture covers the fallback; when the hook is not
+  // ready the fallback's WGC frames are exposed. This ordering survives
+  // minimization: WGC draws nothing while iconic, hook keeps updating.
   obs_source_t* monitorSource_ = nullptr;
   obs_sceneitem_t* monitorItem_ = nullptr;
-  obs_source_t* gameSource_ = nullptr; // game_capture (injected graphics hook)
+  obs_source_t* gameSource_ = nullptr; // game_capture (injected hook) - primary, top
   obs_sceneitem_t* gameItem_ = nullptr;
-  obs_source_t* windowSource_ = nullptr; // window_capture (WGC)
+  obs_source_t* windowSource_ = nullptr; // window_capture (WGC) - fallback, below hook
   obs_sceneitem_t* windowItem_ = nullptr;
 
   Subject subject_; // what is currently captured/shown
 
-  // Combined game-capture health state. Either the injected hook or WGC is
-  // usable once it reports real dimensions.
+  // Hook-primary health + retry state. WGC is only promoted after the hook
+  // has been given several injection attempts.
   std::chrono::steady_clock::time_point captureHealthyAt_{};
   std::chrono::steady_clock::time_point lastWindowRetry_{};
+  std::chrono::steady_clock::time_point lastHookRetry_{};
+  int hookRetryCount_ = 0;
+  int wgcRetryCount_ = 0;
   bool windowNoFramesReported_ = false;
   bool windowSuppressedForMinimize_ = false;
-
+  // Which backend is currently exposed (for visibility toggling). Not persisted.
+  enum class ActiveBackend { None, Hook, Wgc } activeBackend_ = ActiveBackend::None;
   std::function<void(bool)> captureActivityCb_;
 
   std::vector<obs_source_t*> audioSources_;

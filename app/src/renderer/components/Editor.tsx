@@ -1,235 +1,510 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { AudioTrackInfo, ClipRecord, ExportProgress } from "../../shared/contracts";
-import { fmtDuration } from "./LibraryPage";
-import { Modal, Button, Icon, Checkbox } from "./ui";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ExportProgress, WaveformData } from "../../shared/contracts";
+import type { ClipRecord } from "../../shared/contracts";
+import { Button, Icon, Modal } from "./ui";
+import { Timeline } from "../editor/Timeline";
+import { VideoPreview, formatEditorTime, mediaFileUrl } from "../editor/VideoPreview";
+import {
+  commitHistory,
+  createEditorState,
+  createHistory,
+  deleteAudioSegment,
+  deleteAudioTrack,
+  deleteSegment,
+  editedDuration,
+  redoHistory,
+  resetEditorState,
+  resultToSourceTime,
+  segmentAtTime,
+  sourceToResultTime,
+  splitSegment,
+  trimSegment,
+  trimSegmentToPlayhead,
+  undoHistory,
+  updateAudioTrack,
+  type EditorAudioTrack,
+  type EditorHistory,
+  type EditorState,
+} from "../editor/model";
 
-interface Segment { start: number; end: number; }
-interface Props { clip: ClipRecord; onClose: () => void; onExport: () => void; }
+interface Props {
+  clip: ClipRecord;
+  onClose: () => void;
+  onExport: () => void;
+}
 
-// Editor: trim (in/out) minus zero-or-more cuts. The preview plays the
-// *result* — the source file is seeked over cut regions and outside the
-// in/out range, and the timeline shows retained vs removed. Exports include
-// only the checked audio tracks (multi-track recordings split per source).
 export function Editor({ clip, onClose, onExport }: Props) {
-  const duration = clip.durationMs / 1000;
-  const [inPoint, setInPoint] = useState(0);
-  const [outPoint, setOutPoint] = useState(duration);
-  const [cuts, setCuts] = useState<Segment[]>([]);
-  const [tracks, setTracks] = useState<AudioTrackInfo[]>([]);
-  const [selectedTracks, setSelectedTracks] = useState<number[]>([]);
-  const [exportDone, setExportDone] = useState<ExportProgress | null>(null);
-  const [exporting, setExporting] = useState(false);
-  const [resultTime, setResultTime] = useState(0);
-  const [sourceTime, setSourceTime] = useState(0);
+  const fallbackDuration = Math.max(0, clip.durationMs / 1000);
+  const [mediaDuration, setMediaDuration] = useState(fallbackDuration);
+  const duration = mediaDuration;
   const videoRef = useRef<HTMLVideoElement>(null);
-  const timelineRef = useRef<HTMLDivElement>(null);
-  // Probe audio tracks + subscribe to export progress (drives the result UI).
+  const audioRefs = useRef<Map<number, HTMLAudioElement>>(new Map());
+  const initialState = useMemo(() => createEditorState(duration, []), [duration]);
+  const [history, setHistory] = useState<EditorHistory>(() => createHistory(initialState));
+  const [waveforms, setWaveforms] = useState<Map<number, WaveformData>>(() => new Map());
+  const [filmstrip, setFilmstrip] = useState<string[]>([]);
+  const [audioPreviewPaths, setAudioPreviewPaths] = useState<Map<number, string>>(() => new Map());
+  const [sourceTime, setSourceTime] = useState(0);
+  const [visualPlayhead, setVisualPlayhead] = useState(0);
+  const timelineScrubbingRef = useRef(false);
+  const mediaDurationAppliedRef = useRef(false);
+  const mediaDurationRef = useRef(mediaDuration);
   useEffect(() => {
-    window.clipforge.probeTracks(clip.path).then((ts) => {
-      setTracks(ts);
-      setSelectedTracks(ts.length ? ts.map((t) => t.index) : [0]);
-    }).catch(() => {});
-    return window.clipforge.onExport((p) => {
-      setExportDone(p);
-      if (p.done) setExporting(false);
+    mediaDurationRef.current = mediaDuration;
+  }, [mediaDuration]);
+  const [playing, setPlaying] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [loadingMedia, setLoadingMedia] = useState(true);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const state = history.present;
+  const outputDuration = editedDuration(state.segments);
+  const resultTime = sourceToResultTime(state.segments, sourceTime);
+  const clipName = clip.path.split(/[\\/]/).pop() ?? "Clip";
+  const externalAudioReady = state.audioTracks.length > 0
+    && state.audioTracks.every((track) => audioPreviewPaths.has(track.streamIndex));
+
+  // Reset on clip change — authoritative duration resets to fallback until media loads
+  useEffect(() => {
+    setMediaDuration(fallbackDuration);
+    mediaDurationAppliedRef.current = false;
+    setSourceTime(0);
+    setVisualPlayhead(0);
+    timelineScrubbingRef.current = false;
+  }, [clip.id, fallbackDuration]);
+
+  useEffect(() => {
+    let disposed = false;
+    setLoadingMedia(true);
+    setMediaError(null);
+    setWaveforms(new Map());
+    setFilmstrip([]);
+    setAudioPreviewPaths(new Map());
+    setSourceTime(0);
+    setVisualPlayhead(0);
+    timelineScrubbingRef.current = false;
+    setZoom(1);
+    setHistory(createHistory(createEditorState(fallbackDuration, [])));
+
+    window.shard.generateTimelineFrames(clip.id, 36).then((frames) => {
+      if (!disposed) setFilmstrip(frames);
+    }).catch(() => {
+      // The timeline remains usable when thumbnail extraction is unavailable.
     });
-  }, [clip.path]);
-
-  const snapStep = Math.min(0.1, Math.max(0.01, duration / 20));
-  const minimumTrim = Math.min(0.25, duration);
-  const clampTime = (time: number) => Math.max(0, Math.min(duration, time));
-  const snapTime = (time: number) => clampTime(Math.round(time / snapStep) * snapStep);
-
-  const sourceTimeAtPointer = (clientX: number) => {
-    const rect = timelineRef.current?.getBoundingClientRect();
-    if (!rect || rect.width === 0) return 0;
-    return snapTime(((clientX - rect.left) / rect.width) * duration);
-  };
-  const setTrimAtPointer = (edge: "in" | "out", clientX: number) => {
-    const time = sourceTimeAtPointer(clientX);
-    if (edge === "in") setInPoint(Math.min(time, outPoint - minimumTrim));
-    else setOutPoint(Math.max(time, inPoint + minimumTrim));
-  };
-  const beginTrimDrag = (edge: "in" | "out", e: React.PointerEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    e.currentTarget.setPointerCapture(e.pointerId);
-    setTrimAtPointer(edge, e.clientX);
-  };
-
-  // Retained segments: [in,out] minus cuts.
-  const retained = useMemo<Segment[]>(() => {
-    if (outPoint <= inPoint) return [];
-    const segs: Segment[] = [{ start: inPoint, end: outPoint }];
-    for (const cut of cuts) {
-      const next: Segment[] = [];
-      for (const s of segs) {
-        if (cut.start <= s.start && cut.end >= s.end) continue;
-        if (cut.end <= s.start || cut.start >= s.end) { next.push(s); continue; }
-        if (cut.start > s.start) next.push({ start: s.start, end: Math.min(cut.start, s.end) });
-        if (cut.end < s.end) next.push({ start: Math.max(cut.end, s.start), end: s.end });
+    window.shard.probeTracks(clip.id).then((tracks) => {
+      if (disposed) return;
+      const effectiveDuration = mediaDurationRef.current !== fallbackDuration ? mediaDurationRef.current : fallbackDuration;
+      if (effectiveDuration !== fallbackDuration) mediaDurationAppliedRef.current = true;
+      setHistory(createHistory(createEditorState(effectiveDuration, tracks)));
+      setLoadingMedia(false);
+      for (const track of tracks) {
+        window.shard.prepareAudioPreview(clip.id, track.streamIndex).then((previewPath) => {
+          if (disposed) return;
+          setAudioPreviewPaths((current) => {
+            const next = new Map(current);
+            next.set(track.streamIndex, previewPath);
+            return next;
+          });
+        }).catch((error: unknown) => {
+          if (!disposed) setMediaError(`Live preview for ${track.name} is unavailable: ${errorMessage(error)}`);
+        });
+        window.shard.generateWaveform(clip.id, track.streamIndex, 2400).then((waveform) => {
+          if (disposed) return;
+          setWaveforms((current) => {
+            const next = new Map(current);
+            next.set(track.streamIndex, waveform);
+            return next;
+          });
+        }).catch((error: unknown) => {
+          if (!disposed) setMediaError(`Waveform for ${track.name} is unavailable: ${errorMessage(error)}`);
+        });
       }
-      segs.length = 0;
-      segs.push(...next);
-    }
-    return segs.filter((s) => s.end - s.start > 0.05);
-  }, [inPoint, outPoint, cuts]);
-  const totalRetained = retained.reduce((s, x) => s + (x.end - x.start), 0);
+    }).catch((error: unknown) => {
+      if (disposed) return;
+      setLoadingMedia(false);
+      setMediaError(`Media inspection failed: ${errorMessage(error)}`);
+    });
 
-  // Map a source time to the position within the edited result.
-  const sourceToResult = (t: number): number => {
-    let acc = 0;
-    for (const seg of retained) {
-      if (t < seg.start) return acc;
-      if (t <= seg.end) return acc + (t - seg.start);
-      acc += seg.end - seg.start;
-    }
-    return acc;
-  };
+    const unsubscribe = window.shard.onExport((progress) => {
+      if (progress.clipId !== clip.id || disposed) return;
+      setExportProgress(progress);
+      if (progress.done) setExporting(false);
+    });
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [clip.id, fallbackDuration]);
 
-  const seekAtPointer = (clientX: number) => {
-    const time = Math.max(inPoint, Math.min(outPoint, sourceTimeAtPointer(clientX)));
+
+  // When actual video metadata arrives, upgrade the editor duration exactly once per clip
+  // before user edits begin. This keeps the single duration authority (mediaDuration)
+  // aligned with the timeline geometry.
+  useEffect(() => {
+    if (mediaDuration === fallbackDuration) return;
+    if (mediaDurationAppliedRef.current) return;
+    if (history.past.length > 0) {
+      mediaDurationAppliedRef.current = true;
+      return;
+    }
+    if (history.present.duration === mediaDuration) {
+      mediaDurationAppliedRef.current = true;
+      return;
+    }
+    // No user edits yet and duration differs — recreate initial state with authoritative duration
+    // preserving discovered audio tracks
+    const currentTracks = history.present.audioTracks;
+    // Convert EditorAudioTrack back to AudioTrackInfo shape for createEditorState
+    const trackInfos = currentTracks.map((t) => ({
+      streamIndex: t.streamIndex,
+      name: t.name,
+      codec: t.codec,
+      kind: t.kind,
+      channels: t.channels,
+    }));
+    setHistory(createHistory(createEditorState(mediaDuration, trackInfos as any)));
+    mediaDurationAppliedRef.current = true;
+  }, [mediaDuration, fallbackDuration, history]);
+
+  // Development diagnostics: durations should be approximately identical
+  useEffect(() => {
+    if (!waveforms.size) return;
+    if (videoRef.current?.duration === undefined) return;
+    // Only log when we have everything
+    const videoDuration = videoRef.current?.duration;
+    const editorDuration = state.duration;
+    // eslint-disable-next-line no-console
+    console.debug("[editor-duration]", {
+      clipRecordDuration: clip.durationMs / 1000,
+      videoDuration,
+      editorDuration,
+      waveforms: [...waveforms.entries()].map(([streamIndex, waveform]) => ({
+        streamIndex,
+        duration: waveform.duration,
+      })),
+    });
+    const durations = [videoDuration, editorDuration, ...[...waveforms.values()].map((w) => w.duration)].filter((d): d is number => typeof d === "number" && Number.isFinite(d));
+    const max = Math.max(...durations);
+    const min = Math.min(...durations);
+    if (max - min > 0.05) {
+      // eslint-disable-next-line no-console
+      console.warn("[editor-duration] duration mismatch", {
+        clipRecordDuration: clip.durationMs / 1000,
+        videoDuration,
+        editorDuration,
+        waveforms: [...waveforms.entries()].map(([streamIndex, waveform]) => ({
+          streamIndex,
+          duration: waveform.duration,
+        })),
+        delta: max - min,
+      });
+    }
+  }, [clip.durationMs, state.duration, waveforms]);
+
+  const commit = useCallback((change: (current: EditorState) => EditorState) => {
+    setHistory((current) => commitHistory(current, change(current.present)));
+  }, []);
+
+  const synchronizePreviewAudio = useCallback((forceSeek = false, shouldPlay?: boolean) => {
     const video = videoRef.current;
-    if (video) video.currentTime = time;
-    setSourceTime(time);
-    setResultTime(sourceToResult(time));
-  };
-
-  // The preview plays the result: skip cuts, stay inside in/out.
-  const onTimeUpdate = () => {
-    const v = videoRef.current;
-    if (!v || v.paused || v.seeking) return;
-    let jumped = false;
-    for (const cut of cuts) {
-      if (v.currentTime > cut.start && v.currentTime < cut.end) { v.currentTime = cut.end + 0.01; jumped = true; break; }
+    if (!video || !externalAudioReady) return;
+    for (const track of state.audioTracks) {
+      const audio = audioRefs.current.get(track.streamIndex);
+      if (!audio) continue;
+      if (forceSeek || Math.abs(audio.currentTime - video.currentTime) > 0.12) audio.currentTime = video.currentTime;
+      audio.volume = Math.min(1, Math.max(0, volume * track.volume));
+      audio.muted = muted || track.muted;
+      const play = shouldPlay ?? !video.paused;
+      if (play && audio.paused) void audio.play().catch(() => {});
+      else if (!play && !audio.paused) audio.pause();
     }
-    if (!jumped) {
-      if (v.currentTime < inPoint) { v.currentTime = inPoint; jumped = true; }
-      else if (v.currentTime > outPoint) { v.currentTime = inPoint; jumped = true; }
+  }, [externalAudioReady, muted, state.audioTracks, volume]);
+
+  const seekSource = useCallback((requestedTime: number) => {
+    const segments = history.present.segments;
+    if (!segments.length) return;
+    const clamped = Math.max(0, Math.min(duration, requestedTime));
+    const containing = segmentAtTime(segments, clamped);
+    const target = containing?.sourceStart !== undefined
+      ? clamped
+      : (segments.find((segment) => segment.sourceStart > clamped)?.sourceStart ?? segments.at(-1)!.sourceEnd);
+    if (videoRef.current) {
+      videoRef.current.currentTime = target;
+      synchronizePreviewAudio(true, !videoRef.current.paused);
     }
-    setSourceTime(v.currentTime);
-    setResultTime(sourceToResult(v.currentTime));
-  };
+    setSourceTime(target);
+    if (!timelineScrubbingRef.current) {
+      setVisualPlayhead(target);
+    }
+  }, [duration, history.present.segments, synchronizePreviewAudio]);
 
-  const addCutAtPlayhead = () => {
-    const v = videoRef.current;
-    if (!v) return;
-    const t = v.currentTime;
-    const len = Math.min(2, Math.max(0.5, duration / 50));
-    const cut: Segment = { start: Math.max(inPoint, t - len / 2), end: Math.min(outPoint, t + len / 2) };
-    setCuts((c) => [...c, cut]);
-  };
+  /** Seek by RESULT time (player seek bar, arrow keys). Converts to source. */
+  const seekResult = useCallback((time: number) => {
+    seekSource(resultToSourceTime(history.present.segments, Math.max(0, Math.min(outputDuration, time))));
+  }, [history.present.segments, outputDuration, seekSource]);
 
-  const doExport = () => {
+  const togglePlayback = useCallback(() => {
+    const video = videoRef.current;
+    const segments = history.present.segments;
+    if (!video || !segments.length) return;
+    if (!video.paused) {
+      video.pause();
+      return;
+    }
+    const active = segmentAtTime(segments, video.currentTime);
+    if (!active || video.currentTime >= segments.at(-1)!.sourceEnd - 0.01) {
+      video.currentTime = segments[0].sourceStart;
+      setSourceTime(segments[0].sourceStart);
+      if (!timelineScrubbingRef.current) setVisualPlayhead(segments[0].sourceStart);
+    }
+    video.play().catch((error: unknown) => setMediaError(`Playback failed: ${errorMessage(error)}`));
+  }, [history.present.segments]);
+
+  const synchronizePlayback = useCallback(() => {
+    const video = videoRef.current;
+    const segments = history.present.segments;
+    if (!video || !segments.length) return;
+    const time = video.currentTime;
+    const active = segmentAtTime(segments, time);
+    if (!active) {
+      const next = segments.find((segment) => segment.sourceStart > time);
+      if (next && !video.paused) {
+        video.currentTime = next.sourceStart;
+        setSourceTime(next.sourceStart);
+        if (!timelineScrubbingRef.current) setVisualPlayhead(next.sourceStart);
+        synchronizePreviewAudio(true, true);
+        return;
+      }
+      if (time >= segments.at(-1)!.sourceEnd - 0.001) {
+        video.pause();
+        video.currentTime = segments.at(-1)!.sourceEnd;
+        synchronizePreviewAudio(true, false);
+      }
+    }
+    synchronizePreviewAudio(false);
+    setSourceTime(video.currentTime);
+    if (!timelineScrubbingRef.current) {
+      setVisualPlayhead(video.currentTime);
+    }
+  }, [history.present.segments, synchronizePreviewAudio]);
+
+  const handlePlayingChange = useCallback((nextPlaying: boolean) => {
+    setPlaying(nextPlaying);
+    synchronizePreviewAudio(true, nextPlaying);
+  }, [synchronizePreviewAudio]);
+
+  const handleLoadedMetadata = useCallback(() => {
+    const actualDuration = videoRef.current?.duration;
+    if (
+      actualDuration !== undefined &&
+      Number.isFinite(actualDuration) &&
+      actualDuration > 0
+    ) {
+      setMediaDuration(actualDuration);
+    }
+  }, []);
+
+  const splitAtPlayhead = useCallback(() => {
+    commit((current) => {
+      const selected = segmentAtTime(current.segments, sourceTime)?.id ?? current.selectedSegmentId;
+      return splitSegment(current, selected, sourceTime);
+    });
+  }, [commit, sourceTime]);
+
+  const deleteSelected = useCallback(() => {
+    commit((current) => deleteSegment(current, current.selectedSegmentId));
+  }, [commit]);
+
+  const undo = useCallback(() => setHistory((current) => undoHistory(current)), []);
+  const redo = useCallback(() => setHistory((current) => redoHistory(current)), []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, select, [contenteditable=true]")) return;
+      const key = event.key.toLowerCase();
+      if (event.ctrlKey && key === "z") {
+        event.preventDefault();
+        event.shiftKey ? redo() : undo();
+      } else if (event.ctrlKey && key === "y") {
+        event.preventDefault();
+        redo();
+      } else if (event.code === "Space") {
+        event.preventDefault();
+        togglePlayback();
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        const frameStep = 1 / Math.max(1, clip.fps ?? 30);
+        const delta = (event.shiftKey ? frameStep : 5) * (event.key === "ArrowLeft" ? -1 : 1);
+        seekResult(resultTime + delta);
+      } else if (key === "s") {
+        event.preventDefault();
+        splitAtPlayhead();
+      } else if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        deleteSelected();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [clip.fps, deleteSelected, redo, resultTime, seekResult, splitAtPlayhead, togglePlayback, undo]);
+
+  const startExport = () => {
+    if (!state.segments.length || exporting) return;
     setExporting(true);
-    setExportDone(null);
-    void window.clipforge.startExport(clip.id, retained, selectedTracks);
+    setExportProgress({ clipId: clip.id, phase: "Queued", percent: 0, elapsedSec: 0, totalSec: outputDuration });
     onExport();
+    void window.shard.startExport(clip.id, {
+      segments: state.segments.map((segment) => ({ start: segment.sourceStart, end: segment.sourceEnd, id: segment.id })),
+      audioTracks: state.audioTracks.map(({ streamIndex, name, included, muted: trackMuted, volume: trackVolume, excludedSegments }) => ({
+        streamIndex,
+        name,
+        included,
+        muted: trackMuted,
+        volume: trackVolume,
+        excludedSegmentIds: excludedSegments ?? [],
+      })),
+    }).catch((error: unknown) => {
+      setExporting(false);
+      setExportProgress({ clipId: clip.id, phase: "done", percent: 100, done: true, error: errorMessage(error) });
+    });
   };
 
-  const dur = Math.max(duration, 0.001);
-  const pct = (time: number) => `${(clampTime(time) / dur) * 100}%`;
+  const changePlayerVolume = (nextVolume: number) => {
+    const safeVolume = Math.max(0, Math.min(1, nextVolume));
+    setVolume(safeVolume);
+    if (videoRef.current) videoRef.current.volume = safeVolume;
+    if (safeVolume > 0 && muted) {
+      setMuted(false);
+      if (videoRef.current) videoRef.current.muted = false;
+    }
+  };
+
+  const changePlayerMuted = (nextMuted: boolean) => {
+    setMuted(nextMuted);
+    if (videoRef.current) videoRef.current.muted = nextMuted;
+  };
 
   return (
-    <Modal open onClose={onClose} closeOnBackdrop={false} size="lg" title="Edit clip"
-      sub={<>{clip.game ?? "Untagged"} · {fmtDuration(clip.durationMs)}</>}>
-      <div className="editor">
-        <div className="editor__preview">
-          <video
-            ref={videoRef}
-            className="editor__player player"
-            src={`file://${clip.path}`}
-            controls
-            onTimeUpdate={onTimeUpdate}
-            onSeeked={() => {
-              const time = videoRef.current?.currentTime ?? 0;
-              setSourceTime(time);
-              setResultTime(sourceToResult(time));
-            }}
-          />
-          <div className="editor__info">
-            <span className="editor__result">Edited result <strong className="num">{fmtDuration(resultTime * 1000)}</strong> / {fmtDuration(totalRetained * 1000)}</span>
-            <span className="dim">{retained.length} kept segment{retained.length === 1 ? "" : "s"}</span>
+    <Modal open onClose={onClose} closeOnBackdrop={false} size="full">
+      <div className="editor-workspace">
+        <header className="editor-header">
+          <Button variant="ghost" size="sm" icon={<Icon name="back" size={15} />} onClick={onClose}>Library</Button>
+          <div className="editor-header__title">
+            <strong title={clipName}>{clipName}</strong>
+            <span>{clip.game ?? "Untagged"} · {formatEditorTime(duration)} source</span>
           </div>
-        </div>
-
-        <div className="tlpad">
-          <div className="tl__head">
-            <div>
-              <strong>Trim</strong>
-              <span>Drag a handle, or click the timeline to preview.</span>
-            </div>
-            <span className="chip num">Snap {snapStep < 0.1 ? `${Math.round(snapStep * 1000)} ms` : "0.1 s"}</span>
-          </div>
-          <div className="tl" ref={timelineRef} onPointerDown={(e) => seekAtPointer(e.clientX)}>
-            <div className="tl__bar">
-              <div className="tl__inout" style={{ left: pct(inPoint), width: `${((outPoint - inPoint) / dur) * 100}%` }} />
-              {cuts.map((c, i) => (
-                <div key={i} className="tl__cut" style={{ left: pct(c.start), width: `${((c.end - c.start) / dur) * 100}%` }}
-                  title={`Cut ${c.start.toFixed(1)}–${c.end.toFixed(1)}`} />
-              ))}
-              <div className="tl__playhead" style={{ left: pct(sourceTime) }} />
-              <button type="button" className="tl__handle tl__in" style={{ left: pct(inPoint) }}
-                aria-label="Trim start" title={`Trim start: ${inPoint.toFixed(1)}s`}
-                onPointerDown={(e) => beginTrimDrag("in", e)}
-                onPointerMove={(e) => e.currentTarget.hasPointerCapture(e.pointerId) && setTrimAtPointer("in", e.clientX)}>
-                <span>IN</span>
-              </button>
-              <button type="button" className="tl__handle tl__out" style={{ left: pct(outPoint) }}
-                aria-label="Trim end" title={`Trim end: ${outPoint.toFixed(1)}s`}
-                onPointerDown={(e) => beginTrimDrag("out", e)}
-                onPointerMove={(e) => e.currentTarget.hasPointerCapture(e.pointerId) && setTrimAtPointer("out", e.clientX)}>
-                <span>OUT</span>
-              </button>
-            </div>
-          </div>
-          <div className="tl__summary num">
-            <span><b>Start</b> {fmtDuration(inPoint * 1000)}</span>
-            <span><b>End</b> {fmtDuration(outPoint * 1000)}</span>
-            <span><b>Keeping</b> {fmtDuration(totalRetained * 1000)}</span>
-          </div>
-        </div>
-
-        {tracks.length > 0 && (
-          <div className="tracks">
-            <span className="tracks__title">Audio tracks</span>
-            <div className="tracks__list">
-              {tracks.map((t) => (
-                <label key={t.index} className="track-chip">
-                  <Checkbox checked={selectedTracks.includes(t.index)}
-                    onChange={(chk) => setSelectedTracks((prev) => chk ? [...prev, t.index] : prev.filter((i) => i !== t.index))} />
-                  Track {t.index} <span className="faint mono">({t.codec})</span>
-                </label>
-              ))}
-              {selectedTracks.length === 0 && <span className="field__hint">No audio will be exported.</span>}
-            </div>
-          </div>
-        )}
-
-        <div className="editor__actions">
-          <Button icon={<Icon name="scissor" size={15} />} onClick={addCutAtPlayhead}>Cut at playhead</Button>
-          <Button onClick={() => setCuts([])} disabled={cuts.length === 0}>Clear cuts</Button>
-          <Button onClick={() => { setInPoint(0); setOutPoint(duration); setCuts([]); }}>Reset</Button>
-          <span className="spacer" />
-          <Button variant="primary" icon={<Icon name="aperture" size={15} />} onClick={doExport} disabled={exporting || retained.length === 0}>
-            {exporting ? "Exporting…" : "Export (Discord size)"}
+          <div className="editor-header__meta num">{formatEditorTime(outputDuration, true)} output</div>
+          <Button variant="primary" size="sm" icon={<Icon name="export" size={15} />} onClick={startExport} disabled={exporting || loadingMedia || !state.segments.length}>
+            {exporting ? "Exporting…" : "Export clip"}
           </Button>
-        </div>
+        </header>
 
-        {exportDone?.done && (
-          <div className={`export-result ${exportDone.error ? "is-error" : "is-ok"}`}>
-            {exportDone.result ? (
-              <div className="export-result__line">
-                <Icon name="check" size={16} />
-                <span>Export ready ({exportDone.result.sizeMb} MB){exportDone.result.overTarget ? " — over target, Discord may reject" : ""}</span>
-                <Button size="sm" icon={<Icon name="folderOpen" size={14} />} onClick={() => window.clipforge.revealInExplorer(exportDone.result!.path)}>Reveal</Button>
-              </div>
-            ) : (
-              <span className="is-error">{exportDone.error ?? "Export failed"}</span>
-            )}
+        <main className="editor-main">
+          <VideoPreview
+            videoRef={videoRef}
+            sourcePath={clip.path}
+            playing={playing}
+            muted={muted}
+            nativeMuted={externalAudioReady}
+            volume={volume}
+            resultTime={resultTime}
+            resultDuration={outputDuration}
+            onTogglePlayback={togglePlayback}
+            onSeekResult={seekResult}
+            onMutedChange={changePlayerMuted}
+            onVolumeChange={changePlayerVolume}
+            onTimeUpdate={synchronizePlayback}
+            onSeeked={synchronizePlayback}
+            onPlayingChange={handlePlayingChange}
+            onMediaError={setMediaError}
+            onLoadedMetadata={handleLoadedMetadata}
+          />
+          <div className="editor-audio-previews" aria-hidden="true">
+            {state.audioTracks.map((track) => {
+              const previewPath = audioPreviewPaths.get(track.streamIndex);
+              return previewPath ? (
+                <audio
+                  key={track.streamIndex}
+                  ref={(element) => {
+                    if (element) audioRefs.current.set(track.streamIndex, element);
+                    else audioRefs.current.delete(track.streamIndex);
+                  }}
+                  src={mediaFileUrl(previewPath)}
+                  preload="auto"
+                />
+              ) : null;
+            })}
           </div>
+
+          {loadingMedia ? (
+            <div className="editor-loading"><span className="spin" />Inspecting media streams…</div>
+          ) : (
+            <Timeline
+              state={state}
+              waveforms={waveforms}
+              filmstrip={filmstrip}
+              playhead={visualPlayhead}
+              zoom={zoom}
+              canUndo={history.past.length > 0}
+              canRedo={history.future.length > 0}
+              onZoomChange={setZoom}
+              onScrub={(visualTime, playbackTime) => {
+                timelineScrubbingRef.current = true;
+                setVisualPlayhead(visualTime);
+                seekSource(playbackTime);
+              }}
+              onScrubEnd={(visualTime, playbackTime) => {
+                setVisualPlayhead(visualTime);
+                seekSource(playbackTime);
+                timelineScrubbingRef.current = false;
+              }}
+              onSelectSegment={(segmentId) => setHistory((current) => ({ ...current, present: { ...current.present, selectedSegmentId: segmentId } }))}
+              onSplit={splitAtPlayhead}
+              onDelete={deleteSelected}
+              onTrim={(segmentId, edge, time) => commit((current) => trimSegment(current, segmentId, edge, time))}
+              onTrimToPlayhead={() => commit((current) => current.selectedSegmentId ? trimSegmentToPlayhead(current, current.selectedSegmentId, sourceTime) : current)}
+              onReset={() => commit(resetEditorState)}
+              onUndo={undo}
+              onRedo={redo}
+              onTrackChange={(streamIndex: number, change: Partial<Pick<EditorAudioTrack, "included" | "muted" | "volume">>) => commit((current) => updateAudioTrack(current, streamIndex, change))}
+              onDeleteAudioTrack={(streamIndex: number) => commit((current) => deleteAudioTrack(current, streamIndex))}
+              onDeleteAudioSegment={(streamIndex: number, segmentId: string) => commit((current) => deleteAudioSegment(current, streamIndex, segmentId))}
+            />
+          )}
+        </main>
+
+        {(mediaError || exportProgress) && (
+          <footer className="editor-status">
+            {mediaError && <div className="editor-notice is-error"><Icon name="bell" size={15} /><span>{mediaError}</span><button onClick={() => setMediaError(null)} aria-label="Dismiss error"><Icon name="x" size={14} /></button></div>}
+            {exportProgress && (
+              <div className={`editor-export${exportProgress.error ? " is-error" : ""}${exportProgress.result ? " is-complete" : ""}`}>
+                <div className="editor-export__copy">
+                  <strong>{exportProgress.error ? "Export failed" : exportProgress.result ? "Export complete" : exportProgress.phase}</strong>
+                  <span className="num">
+                    {exportProgress.result
+                      ? `${exportProgress.result.sizeMb} MB${exportProgress.result.overTarget ? " · over target" : ""}`
+                      : exportProgress.error
+                        ? exportProgress.error
+                        : `${formatEditorTime(exportProgress.elapsedSec ?? 0)} / ${formatEditorTime(exportProgress.totalSec ?? outputDuration)}`}
+                  </span>
+                </div>
+                {!exportProgress.done && <div className="editor-export__track"><span style={{ width: `${Math.max(0, Math.min(100, exportProgress.percent))}%` }} /></div>}
+                {!exportProgress.done && <span className="editor-export__percent num">{Math.round(exportProgress.percent)}%</span>}
+                {!exportProgress.done && <Button size="sm" onClick={() => void window.shard.cancelExport()}>Cancel</Button>}
+                {exportProgress.result && <><Button size="sm" onClick={() => window.shard.openClip(exportProgress.result!.path)}>Open</Button><Button size="sm" icon={<Icon name="folderOpen" size={14} />} onClick={() => window.shard.revealInExplorer(exportProgress.result!.path)}>Reveal</Button></>}
+              </div>
+            )}
+          </footer>
         )}
       </div>
     </Modal>
   );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

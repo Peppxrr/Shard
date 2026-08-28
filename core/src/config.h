@@ -2,7 +2,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <map>
 #include <string>
 #include <vector>
 
@@ -17,7 +16,7 @@ struct AudioSourceConfig {
   std::string name;   // display name
   std::string kind;   // input | output | process
   std::string window; // "::<exe>" descriptor for kind == "process"
-  float gain = 1.0f;
+  float gain = 1.0f; // 0..2
   bool enabled = true;
 
   nlohmann::json toJson() const;
@@ -25,7 +24,7 @@ struct AudioSourceConfig {
 };
 
 struct VideoSettings {
-  std::string encoder = "auto"; // auto | obs_x264 | obs_nvenc_h264_tex | obs_nvenc_av1_tex
+  std::string encoder = "auto"; // auto | obs_x264 | obs_x265 | obs_nvenc_{h264,hevc,av1}_tex
   std::string preset = "medium"; // low | medium | high | custom
   bool custom = false;
   int bitrateKbps = 0;   // custom / explicit override (0 = preset-derived)
@@ -59,8 +58,6 @@ struct GameSettings {
   std::string gamesPath; // path to games.json (registry)
   int graceSeconds = 30; // auto-record grace after the last game session ends
   bool verboseDetection = false; // structured [GameDetection] logs on stderr
-  // Per-launcher discovery toggles (steam/epic/gog/ubisoft/ea/battlenet/riot/msstore).
-  std::map<std::string, bool> launcherEnabled;
 
   nlohmann::json toJson() const;
   void applyPartial(const nlohmann::json& j);

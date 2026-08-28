@@ -17,6 +17,8 @@ extraResources:
       - "**/*"
   - from: build/icon-256.png
     to: icon.png
+  - from: resources/clip-sound.wav
+    to: clip-sound.wav
   - from: resources/games.json
     to: games.json
 asar: true

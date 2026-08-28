@@ -1,0 +1,25 @@
+{
+  "obsVersion": "32.2.1",
+  "obsCommit": "0052d024fd6a5ff1aa04c76cbdffd3085a5dfacc",
+  "releaseUrl": "https://github.com/obsproject/obs-studio/releases/download/32.2.1/OBS-Studio-32.2.1-Windows-x64.zip",
+  "releaseSha256": "db64a2934f8261f85b1410b84be011207a0afda5400d008289f1f1e211bcc7de",
+  "signer": "OBS Project, LLC",
+  "files": {
+    "graphics-hook64.dll": {
+      "sha256": "49c0ddeac72b130d4f8ae90510219949022c1f992adb48d81a4972f2cd6c2585",
+      "signerThumbprint": "7EB9F24F6991F189D0EDBC807A14246C82F03A06"
+    },
+    "graphics-hook32.dll": {
+      "sha256": "566b095dd1de495a3f0233cb08d75ab3e7d7b184c80e2fc23f23f22ca8558632",
+      "signerThumbprint": "7EB9F24F6991F189D0EDBC807A14246C82F03A06"
+    },
+    "inject-helper64.exe": {
+      "sha256": "9640d203686c79a49283f3aa7ab6fb2f150f805f6022fa5e51d0349136c2c61e",
+      "signerThumbprint": "178EB178111547B52B3821A278653EEDC3E5B1F7"
+    },
+    "inject-helper32.exe": {
+      "sha256": "610a2b684f1afb27de0686a968c90a241bd85b5d81e7edba5a6d9a80f0be2215",
+      "signerThumbprint": "178EB178111547B52B3821A278653EEDC3E5B1F7"
+    }
+  }
+}

@@ -1,16 +1,13 @@
-// Event-driven process monitor (Todo #4).
+// Event-driven process and runtime monitor.
 //
-// Primary: WMI async notifications (Win32_ProcessStartTrace / StopTrace) —
-// the OS pushes process start/stop events; no polling. The WMI subscription
-// runs on its own thread and queues events.
+// Primary: WMI async Win32_ProcessStartTrace / StopTrace notifications.
+// Safety net: each tick reconciles a Toolhelp process snapshot, so WMI access
+// failures or missed events cannot lose process lifecycle transitions.
 //
-// Safety net: a cheap reconciliation scan (CreateToolhelp32Snapshot, ~1 ms)
-// every tick() that diffs the process table against the previous snapshot, so
-// missed WMI events (WMI unavailable, subscription hiccups) never lose a
-// process. The owner loop calls tick() at ~1 Hz.
-//
-// The monitor emits *candidates* (raw process facts: pid, exe, parent, path
-// on demand) — it never decides anything is a game (Todo #5).
+// Path/start time/command line are resolved lazily. probeRuntime combines the
+// candidate's loaded modules with structural application-host layout evidence
+// for graphics, game-engine, web, and media runtimes; classification remains
+// GameDetector's responsibility.
 #pragma once
 
 #include <atomic>
@@ -28,8 +25,18 @@ struct ProcessInfo {
   uint32_t pid = 0;
   std::string exe;      // lowercase basename, e.g. "eldenring.exe"
   std::string path;     // lowercase full path (resolved on demand)
+  std::string commandLine; // lowercase process command line when accessible
   uint32_t parentPid = 0;
   int64_t startMs = 0;  // unix ms; 0 when unknown
+};
+
+struct ProcessRuntimeFacts {
+  bool probeSucceeded = false;
+  bool graphicsApi = false;
+  bool gameRuntime = false; // recognized game engine, not generic graphics/middleware
+  bool gameInput = false; // modern gaming input plus XInput/DirectInput corroboration
+  bool webRuntime = false;
+  bool mediaRuntime = false;
 };
 
 struct ProcessEvent {
@@ -57,10 +64,15 @@ public:
   // Walk the parent chain: [pid, parent, grandparent, ...] (maxDepth hops).
   std::vector<uint32_t> ancestors(uint32_t pid, int maxDepth = 5) const;
   bool alive(uint32_t pid) const;
+  std::vector<uint32_t> allPids() const;
 
   // Fill path/startMs for a pid (OpenProcess + QueryFullProcessImageName +
   // GetProcessTimes). Called lazily by the detector for candidates only.
   void resolve(uint32_t pid);
+  // Inspect modules loaded by the process itself. Recognized game-engine
+  // modules provide identity; generic graphics/middleware modules only
+  // corroborate a launcher-classified or user-mapped game.
+  ProcessRuntimeFacts probeRuntime(uint32_t pid) const;
   bool wmiAvailable() const { return wmiOk_.load(); }
 
 private:

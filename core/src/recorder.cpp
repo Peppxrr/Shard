@@ -1,6 +1,7 @@
 #include "recorder.h"
 
 #include <obs-module.h>
+#include <algorithm>
 
 #include <chrono>
 #include <cstdio>
@@ -70,16 +71,10 @@ bool Recorder::start()
     events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Could not create recording video encoder"}});
     return false;
   }
-  // One audio encoder per used mix: track 0 (master) + one per enabled
-  // source (capped at the OBS limit of 6 mixes).
-  int audioTracks = 1;
-  {
-    int enabled = 0;
-    for (const auto& c : config_.audioSources)
-      if (c.enabled)
-        enabled++;
-    audioTracks += std::min(enabled, 5);
-  }
+  // Allocate one encoder for each configured row, even while that row is
+  // disabled. Source toggles then change the live mix without splitting the
+  // recording or restarting its output.
+  const int audioTracks = 1 + std::min(static_cast<int>(config_.audioSources.size()), 5);
   for (int track = 0; track < audioTracks; track++) {
     char name[32];
     std::snprintf(name, sizeof(name), "rec-audio-%d", track);

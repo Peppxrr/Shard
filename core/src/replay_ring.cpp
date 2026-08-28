@@ -5,6 +5,7 @@
 #include <obs-av1.h>
 #include <obs-module.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -171,12 +172,18 @@ void ReplayRing::setCaptureActive(bool active)
   std::lock_guard<std::mutex> lock(lifecycleMtx_);
   const auto now = steady_clock::now();
   if (active) {
+    sawActivity_ = true;
     inactiveSince_ = steady_clock::time_point{};
     if (!active_.load())
       startLocked();
   } else if (!active_.load()) {
     // Already idle; keep the timer clear so a later stop gets a fresh window.
     inactiveSince_ = steady_clock::time_point{};
+  } else if (!sawActivity_) {
+    // Eagerly started (boot or config restart) but the watchdog has never
+    // seen healthy capture: nothing valuable is buffered, so stop now rather
+    // than buffering dead frames through the grace period.
+    stopLocked();
   } else {
     if (inactiveSince_ == steady_clock::time_point{}) {
       inactiveSince_ = now;
@@ -191,6 +198,7 @@ bool ReplayRing::startLocked()
 {
   if (active_.load())
     return true;
+  sawActivity_ = false;
 
   static bool registered = false;
   if (!registered) {
@@ -218,18 +226,10 @@ bool ReplayRing::startLocked()
   const char* codec = obs_encoder_get_codec(videoEncoder_);
   videoCodec_ = codec ? codec : "";
 
-  // Audio encoders: one per used mix (track 0 = the master mix of all
-  // sources, plus one track per configured audio source, capped at the OBS
-  // limit of 6 mixes). Each source is assigned its track in
-  // SourceManager::setAudioSources.
-  int audioTracks = 1; // track 0 (master) always
-  {
-    int enabled = 0;
-    for (const auto& c : config_.audioSources)
-      if (c.enabled)
-        enabled++;
-    audioTracks += std::min(enabled, 5); // tracks 1..min(enabled,5)
-  }
+  // Allocate one encoder for each configured row, even while that row is
+  // disabled. Its stable mix can then be silenced/re-enabled live without
+  // restarting this output and discarding the replay buffer.
+  const int audioTracks = 1 + std::min(static_cast<int>(config_.audioSources.size()), 5);
   for (int track = 0; track < audioTracks; track++) {
     char name[32];
     std::snprintf(name, sizeof(name), "ring-audio-%d", track);
@@ -601,10 +601,19 @@ bool ReplayRing::snapshotSave(int durationSec, std::vector<encoder_packet>& out,
 
   const int64_t first_dts = r->packets[begin].dts_usec; // pre-offset
 
+  // Keep the freshest frames up to the keypress — do not drop the lead.
+  // The start is keyframe-anchored (up to ~keyint 2 s before the cut) so the
+  // saved duration is requested + 0-2 s; the exact moment of the keypress
+  // is always included. Previously we clamped to first_dts + requested and
+  // dropped the newest 0-2 s, which made clips feel 2 s behind.
+  const int64_t end_clamp = end_time; // keep freshest — was first_dts + requested (dropped 2 s)
+
   out.clear();
   out.reserve(n - begin + 1);
   for (size_t i = begin; i < n; i++) {
     const auto& pkt = r->packets[i];
+    if (pkt.dts_usec > end_clamp)
+      break;
     encoder_packet p;
     obs_encoder_packet_ref(&p, const_cast<encoder_packet*>(&pkt));
 
@@ -639,7 +648,7 @@ bool ReplayRing::snapshotSave(int durationSec, std::vector<encoder_packet>& out,
     }
   }
 
-  actualSec = (end_time - first_dts) / 1000000.0;
+  actualSec = (end_clamp - first_dts) / 1000000.0;
   if (actualSec < 0)
     actualSec = 0;
 

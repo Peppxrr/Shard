@@ -1,4 +1,4 @@
-// core-client.ts — spawns clipcore.exe from resources/core-bin, parses the
+// core-client.ts — spawns shardcore.exe from resources/core-bin, parses the
 // PORT line, and speaks WebSocket JSON-RPC with reconnect+backoff. Core crash
 // -> restart up to 5 times, then surface a fatal error state.
 import { ChildProcess, spawn } from "node:child_process";
@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import { app } from "electron";
 import type { Settings } from "../shared/contracts";
-import { coreGamePayload, getSettings, seedGamesJson } from "./settings";
+import { coreGamePayload, gamesJsonPath, getSettings, seedGamesJson } from "./settings";
 
 const MAX_RESTARTS = 5;
 
@@ -25,6 +25,7 @@ export class CoreClient extends EventEmitter {
   private restarts = 0;
   private shuttingDown = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private stderrBuf = "";
   ready = false;
 
   get coreBinDir(): string {
@@ -44,12 +45,11 @@ export class CoreClient extends EventEmitter {
 
   private spawnCore(): void {
     const bin = this.coreBinDir;
-    const exe = path.join(bin, "clipcore.exe");
+    const exe = path.join(bin, "shardcore.exe");
     const configDir = path.join(app.getPath("userData"), "core");
-    const args = ["--config-dir", configDir, "--core-bin", bin, "--port", "0"];
-
-    const games = getSettings().game.gamesPath;
-    if (games) args.push("--games", games);
+    const games = gamesJsonPath();
+    const args = ["--config-dir", configDir, "--core-bin", bin, "--games", games, "--port", "0"];
+    this.emit("log", "core", `Spawning ${exe} with registry ${games}`);
 
     this.proc = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"] });
     this.proc.stdout?.on("data", (buf: Buffer) => {
@@ -62,7 +62,16 @@ export class CoreClient extends EventEmitter {
       }
     });
     this.proc.stderr?.on("data", (buf: Buffer) => {
-      process.stderr.write(`[core] ${buf.toString("utf8")}`);
+      // Line-buffer: chunks can split mid-line. Lines are forwarded to
+      // process.stderr (as before) and re-emitted for the developer console.
+      const text = this.stderrBuf + buf.toString("utf8");
+      this.stderrBuf = "";
+      const lines = text.split(/\r?\n/);
+      this.stderrBuf = lines.pop() ?? "";
+      for (const line of lines) {
+        process.stderr.write(`[core] ${line}\n`);
+        this.emit("log", "core", line);
+      }
     });
     this.proc.on("exit", (code) => {
       this.ws?.close();
@@ -100,7 +109,10 @@ export class CoreClient extends EventEmitter {
         const p = this.pending.get(msg.id)!;
         this.pending.delete(msg.id);
         clearTimeout(p.timer);
-        if (msg.error) p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
+        if (msg.error) {
+          this.emit("log", "rpc", `RPC error ${msg.error.code}: ${msg.error.message}`);
+          p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
+        }
         else p.resolve(msg.result);
       } else if (msg.method) {
         this.emit("event", msg.method, msg.params ?? {});
@@ -124,12 +136,14 @@ export class CoreClient extends EventEmitter {
   invoke(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        this.emit("log", "rpc", `RPC rejected (core not connected): ${method}`);
         reject(new Error("core not connected"));
         return;
       }
       const id = this.nextId++;
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.emit("log", "rpc", `RPC timeout: ${method}`);
         reject(new Error(`RPC timeout: ${method}`));
       }, 20000);
       this.pending.set(id, { resolve, reject, timer });

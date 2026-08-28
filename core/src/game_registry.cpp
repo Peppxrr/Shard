@@ -54,6 +54,7 @@ nlohmann::json GameDefinition::toJson() const
              return arr;
            }()},
           {"source", sourceStr(source)},
+          {"productType", productType},
           {"enabled", enabled},
           {"stale", stale},
           {"emulator", emulator},
@@ -82,23 +83,16 @@ GameDefinition GameDefinition::fromJson(const nlohmann::json& j, GameSource sour
   g.stale = j.value("stale", false);
   g.emulator = j.value("emulator", false);
   g.discoveredAtMs = j.value("discoveredAtMs", (int64_t)0);
+  if (j.contains("productType") && j["productType"].is_string())
+    g.productType = j["productType"].get<std::string>();
+  else
+    g.productType = (source == GameSource::User ? "game" : "unknown");
+  // Normalize
+  if (g.productType != "game" && g.productType != "software" && g.productType != "tool" && g.productType != "dlc")
+    g.productType = "unknown";
   return g;
 }
 
-nlohmann::json CustomFolder::toJson() const
-{
-  return {{"id", id}, {"name", name}, {"path", path}, {"emulator", emulator}};
-}
-
-CustomFolder CustomFolder::fromJson(const nlohmann::json& j)
-{
-  CustomFolder f;
-  f.id = j.value("id", std::string());
-  f.name = j.value("name", std::string());
-  f.path = normalizePath(j.value("path", std::string()));
-  f.emulator = j.value("emulator", false);
-  return f;
-}
 
 // ------------------------------------------------------------------- load --
 
@@ -107,9 +101,10 @@ void GameRegistry::load()
   std::lock_guard<std::mutex> lock(mtx_);
   discovered_.clear();
   user_.clear();
-  customFolders_.clear();
   ignoredExes_.clear();
+  hiddenDiscoveredIds_.clear();
   migratedV1_ = 0;
+  bool rewriteMigratedFile = false;
 
   if (path_.empty())
     path_ = std::string("games.json"); // relative to configDir via cwd; overwritten by config.set
@@ -118,6 +113,9 @@ void GameRegistry::load()
     try {
       nlohmann::json j;
       in >> j;
+      int fileVersion = 0;
+      if (j.is_object() && j.contains("version") && j["version"].is_number_integer())
+        fileVersion = j["version"].get<int>();
 
       if (j.is_array()) {
         // Legacy v1: [{exe, name}, ...]. Migrate to the user layer as-is.
@@ -136,6 +134,7 @@ void GameRegistry::load()
           user_.push_back(std::move(g));
           migratedV1_++;
         }
+        rewriteMigratedFile = migratedV1_ > 0;
       } else if (j.is_object()) {
         if (j.contains("user") && j["user"].is_array())
           for (const auto& e : j["user"])
@@ -148,25 +147,33 @@ void GameRegistry::load()
           for (const auto& e : j["discovered"])
             if (e.is_object()) {
               GameDefinition g = GameDefinition::fromJson(e, GameSource::Discovered);
-              if (!g.id.empty() && !g.name.empty() && !g.executables.empty())
+              if (!g.id.empty() && !g.name.empty() &&
+                  (!g.executables.empty() || !g.installPaths.empty() || !g.launchers.empty()))
                 discovered_.push_back(std::move(g));
-            }
-        if (j.contains("customFolders") && j["customFolders"].is_array())
-          for (const auto& e : j["customFolders"])
-            if (e.is_object()) {
-              CustomFolder f = CustomFolder::fromJson(e);
-              if (!f.id.empty() && !f.name.empty() && !f.path.empty())
-                customFolders_.push_back(std::move(f));
             }
         if (j.contains("ignoredExes") && j["ignoredExes"].is_array())
           for (const auto& e : j["ignoredExes"])
             if (e.is_string())
               ignoredExes_.push_back(toLower(e.get<std::string>()));
-        if (j.contains("launchers") && j["launchers"].is_object())
-          for (auto it = j["launchers"].begin(); it != j["launchers"].end(); ++it)
-            launcherEnabled_[it.key()] = it.value().get<bool>();
+        if (j.contains("hiddenDiscoveredIds") && j["hiddenDiscoveredIds"].is_array())
+          for (const auto& e : j["hiddenDiscoveredIds"])
+            if (e.is_string())
+              hiddenDiscoveredIds_.insert(e.get<std::string>());
         if (j.contains("verboseDetection"))
           verbose_ = j.value("verboseDetection", false);
+        // v10 invalidates every executable learned by the former permissive
+        // graphics/fullscreen classifier. User mappings remain authoritative;
+        // launcher products and runtime-engine games are re-qualified live by
+        // the positive-only detector.
+        if (fileVersion > 0 && fileVersion < 10) {
+          discovered_.clear();
+          hiddenDiscoveredIds_.clear();
+          rewriteMigratedFile = true;
+        } else if (fileVersion == 0 && !discovered_.empty()) {
+          discovered_.clear();
+          hiddenDiscoveredIds_.clear();
+          rewriteMigratedFile = true;
+        }
       }
     } catch (...) {
       // Corrupt games.json: empty registry, no crash.
@@ -174,6 +181,8 @@ void GameRegistry::load()
   }
 
   rebuildIndexes();
+  if (rewriteMigratedFile)
+    saveLocked();
 }
 
 void GameRegistry::rebuildIndexes()
@@ -211,27 +220,26 @@ void GameRegistry::saveLocked()
     return;
 
   nlohmann::json j;
-  j["version"] = 2;
+  j["version"] = 10;
   {
     nlohmann::json arr = nlohmann::json::array();
-    for (const auto& g : user_)
-      arr.push_back(g.toJson());
+    for (const auto& game : user_)
+      arr.push_back(game.toJson());
     j["user"] = std::move(arr);
   }
   {
     nlohmann::json arr = nlohmann::json::array();
-    for (const auto& g : discovered_)
-      arr.push_back(g.toJson());
+    for (const auto& game : discovered_)
+      arr.push_back(game.toJson());
     j["discovered"] = std::move(arr);
   }
+  j["ignoredExes"] = ignoredExes_;
   {
     nlohmann::json arr = nlohmann::json::array();
-    for (const auto& f : customFolders_)
-      arr.push_back(f.toJson());
-    j["customFolders"] = std::move(arr);
+    for (const auto& id : hiddenDiscoveredIds_)
+      arr.push_back(id);
+    j["hiddenDiscoveredIds"] = std::move(arr);
   }
-  j["ignoredExes"] = ignoredExes_;
-  j["launchers"] = launcherEnabled_;
   j["verboseDetection"] = verbose_;
 
   try {
@@ -294,6 +302,8 @@ std::string GameRegistry::upsertUserGame(const GameDefinition& g)
     nu.id = "u:" + slugify(g.name) + "-" + slugify(exes[0]);
   nu.executables = exes;
   nu.source = GameSource::User;
+  nu.productType = "game";
+  if (!g.installPaths.empty()) nu.installPaths = g.installPaths;
   user_.push_back(std::move(nu));
   const std::string id = user_.back().id;
   rebuildIndexes();
@@ -320,7 +330,32 @@ bool GameRegistry::removeDiscoveredGame(const std::string& id)
                            [&](const GameDefinition& g) { return g.id == id; });
   if (it == discovered_.end())
     return false;
+  // Move all executables of the removed product to the ignored list so it
+  // is never re-detected via unknown promotion or path fallback, even if a
+  // future scan re-creates the same product with a different id (e.g., exe-
+  // based unknown promotion). This satisfies "delete in detected → ignored".
+  for (auto itr = it; itr != discovered_.end(); ++itr) {
+    for (const auto& exe : itr->executables) {
+      if (!exe.empty() && std::find(ignoredExes_.begin(), ignoredExes_.end(), exe) == ignoredExes_.end())
+        ignoredExes_.push_back(exe);
+    }
+  }
   discovered_.erase(it, discovered_.end());
+  hiddenDiscoveredIds_.insert(id);
+  rebuildIndexes();
+  saveLocked();
+  return true;
+}
+
+bool GameRegistry::discardNonGameProduct(const std::string& id)
+{
+  std::lock_guard<std::mutex> lock(mtx_);
+  const auto before = discovered_.size();
+  discovered_.erase(std::remove_if(discovered_.begin(), discovered_.end(),
+                                   [&](const GameDefinition& game) { return game.id == id; }),
+                    discovered_.end());
+  if (discovered_.size() == before)
+    return false;
   rebuildIndexes();
   saveLocked();
   return true;
@@ -359,6 +394,12 @@ void GameRegistry::mergeDiscovered(const GameDefinition& g)
   std::lock_guard<std::mutex> lock(mtx_);
   if (g.name.empty())
     return;
+  // User explicitly removed this discovered product — don't re-add on rescan.
+  std::string probeId = g.id;
+  if (probeId.empty() && !g.launchers.empty())
+    probeId = "d:" + g.launchers[0].type + ":" + g.launchers[0].id;
+  if (!probeId.empty() && hiddenDiscoveredIds_.count(probeId))
+    return;
 
   const std::string normName = normalizedGameName(g.name);
 
@@ -371,6 +412,9 @@ void GameRegistry::mergeDiscovered(const GameDefinition& g)
         base.launchers.push_back(l);
     base.stale = false;
     base.emulator = base.emulator || g.emulator;
+    // Keep authoritative productType if provided and base is discovered; user entries stay "game"
+    if (base.source == GameSource::Discovered && g.productType != "unknown" && !g.productType.empty())
+      base.productType = g.productType;
   };
 
   for (auto& u : user_) {
@@ -396,6 +440,8 @@ void GameRegistry::mergeDiscovered(const GameDefinition& g)
     d.name = g.name;
     mergeIntoExisting(d);
     d.emulator = g.emulator;
+    if (g.productType != "unknown" && !g.productType.empty())
+      d.productType = g.productType;
     rebuildIndexes();
     saveLocked();
     return;
@@ -404,6 +450,7 @@ void GameRegistry::mergeDiscovered(const GameDefinition& g)
   GameDefinition nd = g;
   nd.id = key;
   nd.source = GameSource::Discovered;
+  if (nd.productType.empty()) nd.productType = "unknown";
   if (nd.discoveredAtMs == 0)
     nd.discoveredAtMs = nowMs();
   discovered_.push_back(std::move(nd));
@@ -411,54 +458,32 @@ void GameRegistry::mergeDiscovered(const GameDefinition& g)
   saveLocked();
 }
 
-// --------------------------------------------------------- custom fold ----
-
-std::string GameRegistry::addCustomFolder(const CustomFolder& f)
+bool GameRegistry::addRuntimeExecutable(const std::string& productId, const std::string& exeLower)
 {
   std::lock_guard<std::mutex> lock(mtx_);
-  if (f.name.empty() || f.path.empty())
-    return "";
-
-  // Reuse an existing folder on the same path.
-  const std::string np = normalizePath(f.path);
-  for (auto& existing : customFolders_) {
-    if (existing.path == np) {
-      existing.name = f.name;
-      existing.emulator = f.emulator;
+  const std::string exe = toLower(exeLower);
+  if (exe.empty() || productId.empty()) return false;
+  for (auto& d : discovered_) if (d.id == productId) {
+    if (std::find(d.executables.begin(), d.executables.end(), exe) == d.executables.end()) {
+      d.executables.push_back(exe);
+      rebuildIndexes();
       saveLocked();
-      return existing.id;
+      return true;
     }
-  }
-
-  CustomFolder nu = f;
-  nu.path = np;
-  nu.id = "c:" + slugify(f.name);
-  bool dup = std::any_of(customFolders_.begin(), customFolders_.end(),
-                         [&](const CustomFolder& x) { return x.id == nu.id; });
-  if (dup)
-    nu.id = "c:" + slugify(f.name) + "-" + std::to_string(customFolders_.size());
-  customFolders_.push_back(std::move(nu));
-  saveLocked();
-  return customFolders_.back().id;
-}
-
-bool GameRegistry::removeCustomFolder(const std::string& id)
-{
-  std::lock_guard<std::mutex> lock(mtx_);
-  auto it = std::remove_if(customFolders_.begin(), customFolders_.end(),
-                           [&](const CustomFolder& f) { return f.id == id; });
-  if (it == customFolders_.end())
     return false;
-  customFolders_.erase(it, customFolders_.end());
-  saveLocked();
-  return true;
+  }
+  for (auto& u : user_) if (u.id == productId) {
+    if (std::find(u.executables.begin(), u.executables.end(), exe) == u.executables.end()) {
+      u.executables.push_back(exe);
+      rebuildIndexes();
+      saveLocked();
+      return true;
+    }
+    return false;
+  }
+  return false;
 }
 
-std::vector<CustomFolder> GameRegistry::customFolders() const
-{
-  std::lock_guard<std::mutex> lock(mtx_);
-  return customFolders_;
-}
 
 // ---------------------------------------------------------------- queries --
 
@@ -493,21 +518,24 @@ const GameDefinition* GameRegistry::findByExe(const std::string& exeLower) const
 const GameDefinition* GameRegistry::findByInstallPath(const std::string& lowerPath) const
 {
   std::lock_guard<std::mutex> lock(mtx_);
-  auto claim = [&](const GameDefinition& g) -> const GameDefinition* {
-    if (!g.enabled)
-      return nullptr;
-    for (const auto& ip : g.installPaths)
-      if (pathUnder(lowerPath, ip))
-        return &g;
-    return nullptr;
+  const GameDefinition* best = nullptr;
+  size_t bestLength = 0;
+  auto consider = [&](const GameDefinition& game) {
+    if (!game.enabled)
+      return;
+    for (const auto& installPath : game.installPaths) {
+      if (installPath.size() > bestLength && pathUnder(lowerPath, installPath)) {
+        best = &game;
+        bestLength = installPath.size();
+      }
+    }
   };
-  for (const auto& g : user_)
-    if (const auto* hit = claim(g))
-      return hit;
-  for (const auto& g : discovered_)
-    if (const auto* hit = claim(g))
-      return hit;
-  return nullptr;
+  // User products retain precedence when equally specific.
+  for (const auto& game : user_)
+    consider(game);
+  for (const auto& game : discovered_)
+    consider(game);
+  return best;
 }
 
 std::vector<GameDefinition> GameRegistry::all() const
@@ -569,32 +597,5 @@ std::vector<std::string> GameRegistry::ignoredExes() const
   return ignoredExes_;
 }
 
-// -------------------------------------------------------------- launchers --
-
-void GameRegistry::setLauncherEnabled(const std::string& type, bool enabled)
-{
-  std::lock_guard<std::mutex> lock(mtx_);
-  launcherEnabled_[type] = enabled;
-  saveLocked();
-}
-
-bool GameRegistry::launcherEnabled(const std::string& type) const
-{
-  std::lock_guard<std::mutex> lock(mtx_);
-  auto it = launcherEnabled_.find(type);
-  return it == launcherEnabled_.end() || it->second; // enabled by default
-}
-
-std::map<std::string, bool> GameRegistry::launcherEnabledMap() const
-{
-  std::lock_guard<std::mutex> lock(mtx_);
-  std::map<std::string, bool> out;
-  for (const auto& type : {"steam", "epic", "gog", "ubisoft", "ea", "battlenet", "riot", "msstore", "heroic",
-                           "custom"}) {
-    auto it = launcherEnabled_.find(type);
-    out[type] = it == launcherEnabled_.end() || it->second;
-  }
-  return out;
-}
 
 } // namespace clipforge

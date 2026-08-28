@@ -9,21 +9,59 @@ namespace clipforge {
 
 namespace {
 
-const char* sourceName(GameSource s)
+const char* sourceName(GameSource source)
 {
-  switch (s) {
-    case GameSource::Discovered:
-      return "discovered";
-    case GameSource::User:
-      return "user";
-  }
-  return "discovered";
+  return source == GameSource::User ? "user" : "discovered";
+}
+
+bool isConfirmedNonGame(const GameDefinition* game)
+{
+  return game && game->classification() == "confirmed-non-game";
+}
+
+bool hasLauncherRef(const GameDefinition& game, const std::string& type)
+{
+  for (const auto& launcher : game.launchers)
+    if (launcher.type == type)
+      return true;
+  return false;
+}
+
+bool isOperatingSystemApplicationPath(const std::string& lowerPath)
+{
+  if (lowerPath.empty())
+    return false;
+  const bool windowsRoot = lowerPath.size() > 11 && lowerPath[1] == ':' &&
+                           lowerPath.compare(2, 9, "\\windows\\") == 0;
+  return windowsRoot || lowerPath.find("\\windowsapps\\") != std::string::npos ||
+         lowerPath.find("\\systemapps\\") != std::string::npos;
+}
+
+bool containsMediaTarget(const std::string& text)
+{
+  if (text.empty())
+    return false;
+  const std::string lower = toLower(text);
+  static const char* const kMediaExtensions[] = {
+      ".mp4", ".mkv", ".webm", ".avi", ".mov", ".wmv", ".m4v", ".mpg", ".mpeg",
+      ".m2ts", ".flv", ".ogv", ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg",
+      ".opus", ".wma", ".m3u", ".m3u8", ".pls", ".jpg", ".jpeg", ".png", ".webp",
+      ".gif", ".bmp", ".avif",
+  };
+  for (const char* extension : kMediaExtensions)
+    if (lower.find(extension) != std::string::npos)
+      return true;
+  static const char* const kMediaProtocols[] = {
+      "http://", "https://", "rtsp://", "rtmp://", "udp://", "dvd://", "bd://", "ytdl://",
+  };
+  for (const char* protocol : kMediaProtocols)
+    if (lower.find(protocol) != std::string::npos)
+      return true;
+  return false;
 }
 
 } // namespace
 
-// Launcher exes -> platform type. These are also hard-negative signals: the
-// launcher itself running is never a game (Todo #6).
 std::string GameDetector::launcherTypeOfExe(const std::string& exeLower)
 {
   static const std::map<std::string, std::string> kLaunchers = {
@@ -40,7 +78,7 @@ std::string GameDetector::launcherTypeOfExe(const std::string& exeLower)
       {"agent.exe", "battlenet"},
       {"riotclientservices.exe", "riot"},
   };
-  auto it = kLaunchers.find(exeLower);
+  const auto it = kLaunchers.find(exeLower);
   return it == kLaunchers.end() ? std::string() : it->second;
 }
 
@@ -49,192 +87,225 @@ bool GameDetector::isLauncherExe(const std::string& exeLower)
   return !launcherTypeOfExe(exeLower).empty();
 }
 
+bool GameDetector::canOwnQualifiedDescendant(const std::string& gameId)
+{
+  return gameId.rfind("d:runtime:", 0) != 0;
+}
+
 bool GameDetector::isKnownNonGameExe(const std::string& exeLower)
 {
-  // System / shell / capture infrastructure.
-  static const std::set<std::string> kSystem = {
-      "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe",      "smss.exe",
-      "svchost.exe", "conhost.exe", "dwm.exe", "explorer.exe", "taskhostw.exe",     "taskhostex.exe",
-      "backgroundtaskhost.exe", "runtimebroker.exe", "shellexperiencehost.exe",     "searchhost.exe",
-      "searchindexer.exe", "sihost.exe", "startmenuexperiencehost.exe",             "textinputhost.exe",
-      "widgets.exe", "widgetservice.exe", "securityhealthservice.exe", "audiodg.exe", "spoolsv.exe",
-      "fontdrvhost.exe", "ctflom.exe", "dllhost.exe", "wmiprvse.exe", "sgrmbroker.exe", "logonui.exe",
-      "lockapp.exe", "gamebar.exe", "gamebarpresencewriter.exe", "gamingservices.exe", "gamingservicesnet.exe",
-      "unsecapp.exe", "comhost.exe", "cloudfilesyncengine.exe", "win11appstyler.exe",
-      "ctfmon.exe", "msiexec.exe", "searchprotocolhost.exe", "memory compression", "registry", "system",
-      "secure system", "wininit.exe", "hudapp.exe",
-      // Xbox / Microsoft Store bloat and overlay infrastructure (never games).
-      "microsoft.storepurchaseapp.exe", "storepurchaseapp.exe", "gamingapp.exe", "xboxapp.exe",
-      "xboxgamingoverlay.exe", "xboxgamecallableui.exe", "spartanshell.exe", "gamingservices.exe",
-      "gameoverlayui64.exe", "gameoverlay32.exe", "nvcontainer.exe", "nvbackend.exe", "nvsphelper.exe",
-      "nvidiawebhelper.exe", "nvidia share.exe", "nvidia share ui.exe",
+  // Process roles fixed by Windows or Shard's capture stack. Do not grow this
+  // into an application deny list: live window/runtime evidence is the
+  // classifier for ordinary applications.
+  static const std::set<std::string> kInfrastructure = {
+      "system", "registry", "memory compression", "secure system",
+      "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe",
+      "svchost.exe", "fontdrvhost.exe", "dwm.exe", "audiodg.exe", "conhost.exe", "dllhost.exe",
+      "wmiprvse.exe", "runtimebroker.exe", "backgroundtaskhost.exe", "sihost.exe", "taskhostw.exe",
+      "explorer.exe", "searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe",
+      "gamebarpresencewriter.exe", "gamingservices.exe", "gamingservicesnet.exe",
+      "gameoverlayui.exe", "gameoverlayui32.exe", "gameoverlayui64.exe",
+      "steamservice.exe", "steamwebhelper.exe", "epicwebhelper.exe", "riotclient.exe",
+      "riotclientupdater.exe", "galaxyclientbootstrap.exe", "shardcore.exe", "obs64.exe", "obs32.exe",
   };
-  // Browsers and webview helpers.
-  static const std::set<std::string> kBrowsers = {
-      "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "brave.exe", "vivaldi.exe", "iexplore.exe",
-      "chromium.exe", "seamonkey.exe", "waterfox.exe",
-  };
-  // Communication / presence.
-  static const std::set<std::string> kComm = {
-      "discord.exe", "telegram.exe", "whatsapp.exe", "slack.exe", "teams.exe", "ms-teams.exe", "zoom.exe",
-      "skype.exe", "signal.exe", "webexmta.exe", "webex.exe", "msteams.exe", "outlook.exe", "thunderbird.exe",
-  };
-  // Utilities / tooling / media / capture apps.
-  static const std::set<std::string> kUtils = {
-      "powershell.exe", "pwsh.exe", "cmd.exe", "wsl.exe", "notepad.exe", "taskmgr.exe", "control.exe",
-      "regedit.exe", "winrar.exe", "7zfm.exe", "7z.exe", "devenv.exe", "code.exe", "clion64.exe",
-      "idea64.exe", "pycharm64.exe", "rider64.exe", "x64dbg.exe", "x32dbg.exe", "obs64.exe", "obs32.exe",
-      "spotify.exe", "vlc.exe", "mpv.exe", "wmplayer.exe", "steamwebhelper.exe", "epicwebhelper.exe",
-      "galaxyclientbootstrap.exe", "onedrive.exe", "windowsTerminal.exe", "wt.exe", "mspaint.exe",
-      "calculator.exe", "snippingtool.exe", "photosapp.exe", "dwm.exe", "startmenu.exe", "magnify.exe",
-  };
-  // Battle.net's agent.exe is caught via the launcher map; keep a few more
-  // launcher-adjacent helpers here (they never run as games).
-  static const std::set<std::string> kLauncherHelpers = {
-      "steamservice.exe", "steamwebhelper.exe", "epicwebhelper.exe", "launcher.exe", "riotclient.exe",
-      "riotclientupdater.exe", "galaxyclientbootstrap.exe", "updater.exe", "unins000.exe",
-  };
-
-  return kSystem.count(exeLower) || kBrowsers.count(exeLower) || kComm.count(exeLower) ||
-         kUtils.count(exeLower) || kLauncherHelpers.count(exeLower) || isLauncherExe(exeLower);
+  return kInfrastructure.count(exeLower) != 0 || isLauncherExe(exeLower);
 }
+
 
 DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& ctx)
 {
-  DetectionResult r;
+  DetectionResult result;
   if (p.exe.empty() || !ctx.registry)
-    return r;
+    return result;
 
-  // Hard negatives first: explicit user ignore and known non-game exes.
   if (ctx.registry->isIgnoredExe(p.exe)) {
-    r.reasons.push_back({"user ignore rule", -200, p.exe + " is on the ignore list"});
-    r.score = -200;
-    r.decision = DetectionResult::Decision::Ignored;
-    return r;
+    result.reasons.push_back({"user ignore rule", -200, p.exe + " is explicitly ignored"});
+    result.score = -200;
+    return result;
   }
   if (isKnownNonGameExe(p.exe)) {
-    r.reasons.push_back({"known non-game", -200, p.exe + " is a system/browser/launcher/utility"});
-    r.score = -200;
-    r.decision = DetectionResult::Decision::Ignored;
-    return r;
+    result.reasons.push_back({"infrastructure process", -200, p.exe + " is Windows, launcher, or capture infrastructure"});
+    result.score = -200;
+    return result;
   }
 
-  // --- positive signals ---------------------------------------------------
-  const GameDefinition* g = ctx.registry->findByExe(p.exe);
-  bool exeMatched = g != nullptr;
-  bool strongListMatch = false; // user list / user-designated folder claim
-  if (g) {
-    const int base = g->source == GameSource::User ? 75 : 45;
-    strongListMatch = g->source == GameSource::User;
-    r.reasons.push_back({"executable match", base, p.exe + " -> " + g->name + " (" + sourceName(g->source) + ")"});
-    r.gameId = g->id;
-    r.gameName = g->name;
-    r.emulator = g->emulator;
-    r.score += base;
-    // Entries from a user-designated game folder (indie/itch installs,
-    // emulator libraries) carry a strong claim — the user pointed Shard here.
-    for (const auto& l : g->launchers) {
-      if (l.type == "custom") {
-        r.reasons.push_back({"user-designated folder", 20, g->name + " was added via a game folder"});
-        r.score += 20;
-        strongListMatch = true;
-        break;
-      }
-    }
-    if (g->emulator && !strongListMatch) {
-      r.reasons.push_back({"emulator entry", 20, g->name + " runs games through an emulator"});
-      r.score += 20;
-      strongListMatch = true;
-    }
-  } else if (!p.path.empty()) {
-    // No exe match: the process may still be a game running from a known
-    // install dir (exe too deep to scan, renamed). Weaker signal — treated
-    // as a discovered-level match.
-    const GameDefinition* byPath = ctx.registry->findByInstallPath(p.path);
-    if (byPath) {
-      g = byPath;
-      exeMatched = true;
-      r.reasons.push_back({"install path match", 45, p.path + " is under " + byPath->name + " install dir"});
-      r.gameId = byPath->id;
-      r.gameName = byPath->name;
-      r.score += 45;
+  const GameDefinition* exact = ctx.registry->findByExe(p.exe);
+  const GameDefinition* byPath = p.path.empty() ? nullptr : ctx.registry->findByInstallPath(p.path);
+  const GameDefinition* product = exact ? exact : (byPath ? byPath : ctx.productHint);
+  const bool runtimeProduct = product && product->id.rfind("d:runtime:", 0) == 0;
+  const bool confirmedProduct =
+      product && !runtimeProduct && product->classification() == "confirmed-game";
+  const bool explicitUser = exact && exact->source == GameSource::User;
+
+  if (isConfirmedNonGame(product)) {
+    result.reasons.push_back({"authoritative product type", -200,
+                              product->name + " is launcher-classified as " + product->productType});
+    result.score = -200;
+    return result;
+  }
+
+  if (product) {
+    result.gameId = product->id;
+    result.gameName = product->name;
+    result.emulator = product->emulator;
+    if (exact) {
+      const int delta = explicitUser ? 75 : 35;
+      result.reasons.push_back({"confirmed executable", delta,
+                                p.exe + " maps to " + product->name + " (" + sourceName(product->source) + ")"});
+      result.score += delta;
+    } else {
+      result.reasons.push_back({"product install containment", 25,
+                                p.path + " is under the installed product " + product->name});
+      result.score += 25;
     }
   }
 
-  // Launcher ancestry: a parent/grandparent is a known launcher AND the game
-  // is associated with that launcher.
-  std::string ancestorLauncher;
-  if (ctx.chain && ctx.lookup && g) {
-    const auto chain = ctx.chain(p.pid);
-    for (size_t i = 1; i < chain.size(); i++) {
-      const ProcessInfo anc = ctx.lookup(chain[i]);
-      const std::string t = launcherTypeOfExe(anc.exe);
-      if (!t.empty()) {
-        ancestorLauncher = t;
-        break;
-      }
-    }
-    if (!ancestorLauncher.empty()) {
-      bool ref = false;
-      for (const auto& l : g->launchers)
-        if (l.type == ancestorLauncher)
-          ref = true;
-      if (ref) {
-        r.reasons.push_back({"launcher association", 25,
-                             ancestorLauncher + " parent chain matches game launcher metadata"});
-        r.score += 25;
-        r.launcher = ancestorLauncher;
-      }
-    }
-  }
-
-  // Install-path containment (confirms an exe match, or stands alone).
-  if (g && !p.path.empty()) {
-    for (const auto& ip : g->installPaths) {
-      if (pathUnder(p.path, ip)) {
-        r.reasons.push_back({"install path match", 20, p.path + " is under " + ip});
-        r.score += 20;
-        break;
-      }
-    }
-  }
-
-  // Window facts.
   if (ctx.window.hasVisibleWindow) {
-    r.reasons.push_back({"visible window", 5, "process owns a visible top-level window"});
-    r.score += 5;
+    result.reasons.push_back({"visible window", 5, "process owns a visible top-level window"});
+    result.score += 5;
   }
-  if (ctx.window.fullscreen) {
-    r.reasons.push_back({"fullscreen", 5, "foreground window covers a monitor exactly"});
-    r.score += 5;
+  if (ctx.window.captureable) {
+    result.reasons.push_back({"captureable window", 20, "window is on-screen, non-tool, and large enough to capture"});
+    result.score += 20;
   }
   if (ctx.window.foreground) {
-    r.reasons.push_back({"foreground", 3, "window is foreground"});
-    r.score += 3;
+    result.reasons.push_back({"foreground intent", 15, "the user is actively foregrounding this process"});
+    result.score += 15;
+  }
+  if (ctx.window.fullscreen) {
+    result.reasons.push_back({"fullscreen render surface", 35, "window covers a monitor"});
+    result.score += 35;
+  }
+  if (ctx.runtime.graphicsApi) {
+    result.reasons.push_back({"graphics runtime", 30, "process loaded Direct3D, OpenGL, or Vulkan"});
+    result.score += 30;
+  }
+  if (ctx.runtime.gameRuntime) {
+    result.reasons.push_back({"game runtime", 40, "process loaded a game engine or game-oriented runtime"});
+    result.score += 40;
+  }
+  if (ctx.runtime.gameInput) {
+    result.reasons.push_back({"gaming input stack", 25,
+                              "process uses both modern gaming input and controller APIs"});
+    result.score += 25;
+  }
+  if (ctx.runtime.webRuntime) {
+    result.reasons.push_back({"web application runtime", -50, "process hosts Chromium/CEF"});
+    result.score -= 50;
   }
 
-  // Sustained runtime: only counts when we actually know the start time.
-  if (p.startMs > 0 && ctx.nowMs > 0 && ctx.nowMs - p.startMs >= ctx.sustainedMs) {
-    r.reasons.push_back({"sustained", 10, "process alive >= " + std::to_string(ctx.sustainedMs / 1000) + " s"});
-    r.score += 10;
+  // Launcher ancestry only corroborates an already identified product. It can
+  // never turn an arbitrary launcher child into a game.
+  if (product && ctx.chain && ctx.lookup) {
+    const auto chain = ctx.chain(p.pid);
+    for (size_t i = 1; i < chain.size(); i++) {
+      const ProcessInfo ancestor = ctx.lookup(chain[i]);
+      const std::string type = launcherTypeOfExe(ancestor.exe);
+      if (!type.empty() && hasLauncherRef(*product, type)) {
+        result.launcher = type;
+        result.reasons.push_back({"launcher correlation", 5, type + " ancestry agrees with product metadata"});
+        result.score += 5;
+        break;
+      }
+    }
   }
 
-  // Negative window signal: long-lived process with no visible window looks
-  // like a background utility (not applied to known list matches — a user or
-  // builtin claim wins over window shape).
-  if (!strongListMatch && p.startMs > 0 && ctx.nowMs > 0 && ctx.nowMs - p.startMs >= 20000 &&
-      !ctx.window.hasVisibleWindow) {
-    r.reasons.push_back({"no visible window", -15, "alive > 20 s without a window"});
-    r.score -= 15;
+
+  // Explicit user mappings are authoritative, but still need a real window;
+  // otherwise a listed launcher/anti-cheat helper would create a dead session.
+  if (explicitUser && ctx.window.captureable) {
+    result.decision = DetectionResult::Decision::Detected;
+    return result;
   }
 
-  // --- decision ------------------------------------------------------------
-  if (r.score >= 80 || (strongListMatch && r.score >= 55)) {
-    r.decision = DetectionResult::Decision::Detected;
-  } else if (r.score >= 55) {
-    r.decision = DetectionResult::Decision::Candidate;
+  const bool mediaTarget = containsMediaTarget(p.commandLine) || containsMediaTarget(ctx.window.title);
+  const bool mediaApplication = mediaTarget || (ctx.runtime.mediaRuntime && (!product || runtimeProduct));
+  if (mediaApplication && !ctx.runtime.gameRuntime) {
+    result.reasons.push_back({"media playback intent", -200,
+                              "process targets media content or hosts a dedicated playback runtime"});
+    result.score -= 200;
+    return result;
   }
-  return r;
+
+  if (ctx.runtime.webRuntime && (!product || runtimeProduct) && !ctx.runtime.gameRuntime) {
+    result.reasons.push_back({"hosted web application", -200,
+                              "untrusted process hosts Chromium, WebView, or Node native modules"});
+    result.score -= 200;
+    return result;
+  }
+
+  const bool operatingSystemApplication =
+      !ctx.runtime.gameRuntime && isOperatingSystemApplicationPath(p.path);
+  if (operatingSystemApplication) {
+    result.reasons.push_back({"operating-system application", -200,
+                              "Windows/SystemApps/WindowsApps process has no game-runtime evidence"});
+    result.score -= 200;
+    return result;
+  }
+
+  const bool largeRenderWindow = ctx.window.area >= (int64_t)640 * 360;
+  // Render behavior corroborates identity; it is never identity. Fullscreen
+  // alone is intentionally excluded because browsers, file dialogs, Python
+  // GUIs, media tools, and desktop shells can all own fullscreen GPU surfaces.
+  const bool renderEvidence = ctx.runtime.gameRuntime ||
+                              (ctx.runtime.graphicsApi && largeRenderWindow);
+  // Protected/anti-cheat games can deny module enumeration. The fallback is
+  // available only after launcher metadata positively identifies the product
+  // as a game; a generic application can never dwell its way into detection.
+  const bool stableProductWindow = confirmedProduct && largeRenderWindow &&
+                                   ctx.foregroundIntentMs >= 1500 &&
+                                   !ctx.runtime.webRuntime;
+  if (stableProductWindow) {
+    result.reasons.push_back({"stable confirmed-game window", 25,
+                              "launcher-classified game owns the foreground capture window for >= 1.5 s"});
+    result.score += 25;
+  }
+
+  // Emulators such as Dolphin expose no engine DLL or product metadata. They
+  // do expose two independent gaming-input stacks while rendering. Require
+  // that combination plus a sustained large GPU surface; Qt/Python/file-dialog
+  // windows have the render surface but not the paired gaming APIs.
+  const bool stableGameInputSurface =
+      ctx.runtime.gameInput && ctx.runtime.graphicsApi && largeRenderWindow &&
+      (runtimeProduct || ctx.foregroundIntentMs >= 2500);
+  if (stableGameInputSurface) {
+    result.reasons.push_back({"stable game-input render surface", 30,
+                              "paired gaming-input APIs render in the foreground for >= 2.5 s"});
+    result.score += 30;
+  }
+
+  const bool knownProductShape = confirmedProduct && (renderEvidence || stableProductWindow);
+  const bool untrustedProduct = !product || runtimeProduct;
+  const bool unknownShape = untrustedProduct && !ctx.runtime.webRuntime &&
+                            ((ctx.recentProcess && ctx.runtime.gameRuntime) ||
+                             stableGameInputSurface);
+  const bool liveGameShape = ctx.window.captureable && ctx.window.foreground &&
+                             (knownProductShape || unknownShape);
+
+  if (liveGameShape) {
+    // product==nullptr is intentional: GameSystem creates a stable runtime
+    // product immediately, then re-runs detection to bind the process to it.
+    result.decision = DetectionResult::Decision::Detected;
+    if (!product) {
+      result.gameName = trim(ctx.window.title);
+      if (result.gameName.empty()) {
+        result.gameName = baseName(p.exe);
+        const size_t dot = result.gameName.rfind('.');
+        if (dot != std::string::npos)
+          result.gameName.resize(dot);
+      }
+      if (result.gameName.size() > 128)
+        result.gameName.resize(128);
+    }
+    return result;
+  }
+
+  // A foreground captureable process may still be loading its graphics DLLs.
+  // Keep it hot for the next monitor ticks instead of waiting 30 seconds or
+  // promoting it merely because a launcher exists in its ancestor chain.
+  if (ctx.window.captureable && ctx.window.foreground)
+    result.decision = DetectionResult::Decision::Candidate;
+  return result;
 }
 
 } // namespace clipforge

@@ -1,4 +1,4 @@
-// ClipForge cross-language contract: the single definition of settings JSON,
+// Shard cross-language contract: the single definition of settings JSON,
 // RPC methods/events, and the hotkey schema. Mirrors core/src/config.h and the
 // core's JSON-RPC handlers exactly. Keep both in sync.
 
@@ -8,7 +8,13 @@
 
 export type CaptureMode = "auto" | "screen" | "game";
 export type AudioSourceKind = "input" | "output" | "process";
-export type EncoderChoice = "auto" | "obs_x264" | "obs_nvenc_h264_tex" | "obs_nvenc_av1_tex";
+export type EncoderChoice =
+  | "auto"
+  | "obs_x264"
+  | "obs_x265"
+  | "obs_nvenc_h264_tex"
+  | "obs_nvenc_hevc_tex"
+  | "obs_nvenc_av1_tex";
 export type VideoPreset = "low" | "medium" | "high" | "custom";
 export type NotificationStyle = "overlay" | "windows" | "off";
 
@@ -17,7 +23,7 @@ export interface AudioSourceConfig {
   name: string;
   kind: AudioSourceKind;
   window?: string; // "::<exe>" descriptor for kind === "process"
-  gain: number; // 0..1
+  gain: number; // 0..2
   enabled: boolean;
 }
 
@@ -44,11 +50,8 @@ export interface ReplaySettings {
 
 export interface GameSettings {
   autoRecord: boolean;
-  gamesPath: string;
   graceSeconds: number; // auto-record grace after the last game session ends
   verboseDetection: boolean; // structured [GameDetection] logs on core stderr
-  // Per-launcher discovery toggles (steam/epic/gog/ubisoft/ea/battlenet/riot/msstore).
-  launchers: Record<string, boolean>;
 }
 
 export interface HotkeyEntry {
@@ -57,13 +60,13 @@ export interface HotkeyEntry {
   accelerator: string; // Electron accelerator, e.g. "F8"
   action: "save_clip" | "toggle_record";
   durationSec?: number; // for save_clip
+  durationUnit?: "sec" | "min"; // persisted display unit for save_clip
 }
 
 export interface ExportSettings {
   targetMb: number; // default 10 (Discord free cap)
   codec: "h264" | "h265";
-  resolution: "auto" | "source" | "1080p" | "720p" | "480p" | "360p";
-  audioBitrateKbps: number;
+  resolution: "source" | "1080p" | "720p" | "480p" | "360p";
 }
 
 export interface StorageSettings {
@@ -71,18 +74,51 @@ export interface StorageSettings {
   // Base directory for clip storage. The app creates `clips/` and `editor/`
   // inside it; empty = default (userData).
   clipsDir: string;
+  deleteEdited: boolean;
 }
 
 export interface AppSettings {
   // How clip-saved feedback is delivered.
-  //   overlay  -> in-app toast (always visible when the window is)
+  //   overlay  -> on-screen popup (always visible, top-left)
   //   windows  -> Windows notification when the window is hidden/unfocused
   //   off      -> no notification
   notificationStyle: NotificationStyle;
   startWithWindows: boolean;
+  // Hide to tray on window close instead of quitting (tray Quit always exits).
+  minimizeToTray: boolean;
+  // Short, unobtrusive sound when a clip finishes saving.
+  clipSound: boolean;
+  // Volume for clip sound 0..1 (default 0.8). Added to allow per-user loudness control.
+  clipSoundVolume: number;
+  // Absolute path to custom clip sound (wav/mp3/ogg/flac/m4a). "" = bundled default (Clip Sound.wav).
+  clipSoundPath: string;
+  // Developer console: bottom-right indicator + separate streaming log window.
+  developerConsole: boolean;
+  // Hardware acceleration: when disabled, Electron/Chromium runs without GPU
+  // compositing (app.disableHardwareAcceleration). Requires restart.
+  // Defaults true for performance; some hybrid-GPU / driver bug systems need
+  // it off to make WGC/game-capture reliable (Terraria etc).
+  hardwareAcceleration: boolean;
+}
+
+
+
+export interface ThemeMeta {
+  id: string;
+  name: string;
+  author?: string;
+  version?: string;
+  description?: string;
+  kind: "builtin" | "custom";
+}
+export interface AppearanceSettings {
+  // Selected theme id — builtin (default/oled/midnight) or custom folder name.
+  // Persisted in settings.json and mirrored to localStorage for early paint.
+  theme: string;
 }
 
 export interface Settings {
+  appearance: AppearanceSettings;
   capture: CaptureSettings;
   video: VideoSettings;
   replay: ReplaySettings;
@@ -100,20 +136,19 @@ export const DEFAULT_SETTINGS: Settings = {
   replay: { maxSeconds: 600, maxMb: 2048 },
   game: {
     autoRecord: false,
-    gamesPath: "",
     graceSeconds: 30,
     verboseDetection: false,
-    launchers: { steam: true, epic: true, gog: true, ubisoft: true, ea: true, battlenet: true, riot: true, msstore: true },
   },
   audio: { sources: [] },
-  storage: { limitGb: 20, clipsDir: "" },
-  app: { notificationStyle: "overlay", startWithWindows: false },
+  storage: { limitGb: 20, clipsDir: "", deleteEdited: false },
+  app: { notificationStyle: "overlay", startWithWindows: false, minimizeToTray: true, clipSound: true, clipSoundVolume: 0.8, clipSoundPath: "", developerConsole: false, hardwareAcceleration: true },
+  appearance: { theme: "default" },
   hotkeys: [
-    { id: "save_60", label: "Save last minute", accelerator: "F8", action: "save_clip", durationSec: 60 },
-    { id: "save_300", label: "Save last 5 minutes", accelerator: "F9", action: "save_clip", durationSec: 300 },
+    { id: "save_60", label: "Save last minute", accelerator: "F8", action: "save_clip", durationSec: 60, durationUnit: "min" },
+    { id: "save_300", label: "Save last 5 minutes", accelerator: "F9", action: "save_clip", durationSec: 300, durationUnit: "min" },
     { id: "record", label: "Toggle recording", accelerator: "F10", action: "toggle_record" },
   ],
-  export: { targetMb: 10, codec: "h264", resolution: "auto", audioBitrateKbps: 128 },
+  export: { targetMb: 10, codec: "h264", resolution: "source" },
 };
 
 // ---------------------------------------------------------------------------
@@ -127,6 +162,7 @@ export type RpcMethod =
   | "recording.stop"
   | "clip.save"
   | "audio.listDevices"
+  | "capture.listMonitors"
   | "game.listKnown"
   | "game.addKnown"
   | "game.removeKnown"
@@ -138,14 +174,8 @@ export type RpcMethod =
   | "game.ignoreExe"
   | "game.unignoreExe"
   | "game.listIgnored"
-  | "game.listLaunchers"
-  | "game.setLauncherEnabled"
-  | "game.refreshDiscovery"
   | "game.sessions"
   | "game.detectExplain"
-  | "game.listCustomFolders"
-  | "game.addCustomFolder"
-  | "game.removeCustomFolder"
   | "shutdown";
 
 // Where a game definition comes from.
@@ -166,23 +196,10 @@ export interface GameInfo {
   enabled: boolean;
   stale: boolean;
   emulator: boolean;
+  productType?: string; // game | software | tool | dlc | unknown
+  classification?: string; // confirmed-game | confirmed-non-game | unknown
 }
 
-export interface CustomFolderInfo {
-  id: string;
-  name: string;
-  path: string;
-  emulator: boolean;
-}
-
-export interface LauncherInfo {
-  type: string;
-  label: string;
-  enabled: boolean;
-  installed: boolean; // launcher present on this machine
-  lastScanMs: number | null;
-  gameCount: number;
-}
 
 export interface GameSessionInfo {
   gameId: string;
@@ -244,6 +261,15 @@ export interface AudioDeviceInfo {
   isVoicemeeter: boolean;
 }
 
+export interface MonitorInfo {
+  index: number;
+  id?: string; // GDI device/instance id (core RPC only)
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Library (renderer <-> main IPC)
 // ---------------------------------------------------------------------------
@@ -263,11 +289,34 @@ export interface ClipRecord {
   source: "clip" | "recording" | "edited";
 }
 
-// One audio stream inside a clip/recording (multi-track recordings expose one
-// entry per source track).
+// Media metadata and cached waveform peaks used by the editor. `streamIndex`
+// is the absolute FFmpeg stream index, so export mapping stays explicit.
 export interface AudioTrackInfo {
-  index: number;
+  streamIndex: number;
+  audioIndex: number;
   codec: string;
+  name: string;
+  kind: AudioSourceKind | "mix" | "unknown";
+  channels: number;
+  sampleRate: number;
+  bitRate: number;
+}
+
+export interface WaveformData {
+  duration: number;
+  peaks: number[];
+}
+
+export interface EditorExportProject {
+  segments: { start: number; end: number; id?: string }[];
+  audioTracks: {
+    streamIndex: number;
+    name: string;
+    included: boolean;
+    muted: boolean;
+    volume: number;
+    excludedSegmentIds?: string[];
+  }[];
 }
 
 export interface ExportResult {
@@ -280,37 +329,81 @@ export interface ExportProgress {
   clipId: string;
   phase: string;
   percent: number;
+  elapsedSec?: number;
+  totalSec?: number;
   done?: boolean;
   error?: string;
   result?: ExportResult;
 }
 
+// One line in the developer console stream.
+export interface DevConsoleLine {
+  t: number; // epoch ms
+  level: "core" | "app" | "rpc" | "event";
+  text: string;
+}
+
 // ---------------------------------------------------------------------------
-// Renderer bridge surface (window.clipforge, provided by preload.ts)
+// Renderer bridge surface (window.shard, provided by preload.ts)
 // ---------------------------------------------------------------------------
 
-export interface ClipforgeApi {
+export interface ShardApi {
   // core RPC passthrough
   invoke(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  // Electron-side display enumeration (no core needed) — settings fallback
+  // while the core is still connecting.
+  listMonitorsFallback(): Promise<MonitorInfo[]>;
   onCoreEvent(cb: (type: string, params: Record<string, unknown>) => void): () => void;
   // settings
   getSettings(): Promise<Settings>;
   setSettings(s: Settings): Promise<void>;
+  pickClipsFolder(currentPath: string): Promise<string | null>;
+  getDefaultClipsFolder(): Promise<string>;
   // library
   listClips(): Promise<ClipRecord[]>;
   deleteClip(id: string): Promise<void>;
   setProtected(id: string, prot: boolean): Promise<void>;
-  probeTracks(path: string): Promise<AudioTrackInfo[]>;
+  probeTracks(clipId: string): Promise<AudioTrackInfo[]>;
+  prepareAudioPreview(clipId: string, streamIndex: number): Promise<string>;
+  generateWaveform(clipId: string, streamIndex: number, points: number): Promise<WaveformData>;
+  generateTimelineFrames(clipId: string, count: number): Promise<string[]>;
   onLibraryChanged(cb: () => void): () => void;
   revealInExplorer(path: string): void;
   openClip(path: string): void;
   // drag & drop (Windows: drag a clip file out of the window, e.g. into Discord)
   startDrag(path: string, iconPath?: string): void;
   // export
-  startExport(clipId: string, segments?: { start: number; end: number }[], audioTracks?: number[]): Promise<void>;
+  startExport(clipId: string, project: EditorExportProject): Promise<void>;
   cancelExport(): Promise<void>;
   onExport(cb: (p: ExportProgress) => void): () => void;
   // misc
   version(): Promise<string>;
+  restartApp(): Promise<void>;
   onToast(cb: (message: string) => void): () => void;
+  // Frameless Windows shell controls. Other platforms retain their native frame.
+  windowControlsSupported: boolean;
+  minimizeWindow(): Promise<void>;
+  toggleMaximizeWindow(): Promise<boolean>;
+  closeWindow(): Promise<void>;
+  isWindowMaximized(): Promise<boolean>;
+  onWindowMaximized(cb: (maximized: boolean) => void): () => void;
+  // developer console stream + window toggle (returns new open state)
+  onDevConsoleLine(cb: (line: DevConsoleLine) => void): () => void;
+  toggleDevConsole(): Promise<boolean>;
+  // Clip sound: pick custom file (dialog) and preview
+  pickClipSound(): Promise<string | null>;
+  previewClipSound(path: string, volume: number): Promise<void>;
+  getClipSoundDefaultPath(): Promise<string>;
+  onPlayClipSound(cb: (data: { path: string; volume: number }) => void): () => void;
+  // Themes — custom themes live in %APPDATA%/Shard/Themes/<id>/theme.css
+  listCustomThemes(): Promise<ThemeMeta[]>;
+  readTheme(id: string): Promise<{ css: string; dir: string } | null>;
+  readCustomCss(): Promise<{ css: string; dir: string } | null>;
+  getThemesDir(): Promise<string>;
+  openThemesFolder(): Promise<void>;
+  // Temporarily release all global shortcuts so the rebind UI can capture
+  // keys that are currently registered (e.g. restoring the F8/F9 defaults).
+  suspendHotkeys(): Promise<void>;
+  resumeHotkeys(): Promise<void>;
+  listProcesses(): Promise<Array<{ exe: string; pid: number; title: string }>>;
 }

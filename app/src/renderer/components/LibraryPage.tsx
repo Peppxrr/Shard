@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ClipRecord } from "../../shared/contracts";
-import { Icon, IconButton, Button, EmptyState, Modal } from "./ui";
+import { Icon, IconButton, Button, EmptyState, Modal, ShardSelect } from "./ui";
+import { StandaloneVideoPlayer } from "../editor/VideoPreview";
 
 interface Props {
   clips: ClipRecord[];
@@ -30,6 +31,17 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
     clips.forEach((c) => c.game && set.add(c.game));
     return [...set].sort();
   }, [clips]);
+  const gameOptions = useMemo(() => games.map((game) => ({
+    value: game,
+    label: game.length > 28 ? `${game.slice(0, 27)}…` : game,
+  })), [games]);
+  const gameLabel = gameFilter === "all"
+    ? "All games"
+    : (gameOptions.find((game) => game.value === gameFilter)?.label ?? "All games");
+  const sourceLabel = sourceFilter === "all"
+    ? "All sources"
+    : sourceFilter === "recording" ? "Recordings" : sourceFilter === "edited" ? "Edited" : "Clips";
+  const sortLabel = SORTS.find((entry) => entry.value === sort)?.label ?? "Newest first";
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -65,30 +77,36 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
           <Icon name="search" size={15} />
           <input type="search" placeholder="Search clips…" value={search} onChange={(e) => setSearch(e.target.value)} />
         </label>
-        <select className="select" value={gameFilter} onChange={(e) => setGameFilter(e.target.value)}>
-          <option value="all">All games</option>
-          {games.map((g) => (
-            <option key={g} value={g}>{g}</option>
-          ))}
-        </select>
-        <select className="select" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
-          <option value="all">All sources</option>
-          <option value="clip">Clips</option>
-          <option value="recording">Recordings</option>
-          <option value="edited">Edited</option>
-        </select>
-        <select className="select" value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-          {SORTS.map((s) => (
-            <option key={s.value} value={s.value}>{s.label}</option>
-          ))}
-        </select>
+        <ShardSelect
+          value={gameFilter}
+          onChange={setGameFilter}
+          style={{ width: filterWidth(gameLabel, 32) }}
+          options={[{ value: "all", label: "All games" }, ...gameOptions]}
+        />
+        <ShardSelect
+          value={sourceFilter}
+          onChange={setSourceFilter}
+          style={{ width: filterWidth(sourceLabel, 18) }}
+          options={[
+            { value: "all", label: "All sources" },
+            { value: "clip", label: "Clips" },
+            { value: "recording", label: "Recordings" },
+            { value: "edited", label: "Edited" },
+          ]}
+        />
+        <ShardSelect
+          value={sort}
+          onChange={(v) => setSort(v as SortKey)}
+          style={{ width: filterWidth(sortLabel, 20) }}
+          options={SORTS}
+        />
         <span className="spacer" />
         <span className="chip num">{filtered.length} {filtered.length === 1 ? "clip" : "clips"}</span>
       </div>
 
       {filtered.length === 0 ? (
         <EmptyState
-          icon={<Icon name="aperture" size={30} />}
+          icon={<Icon name="film" size={30} />}
           title="No clips yet"
         >
           Hit your <strong>Save clip</strong> hotkey to pull a replay from the buffer.
@@ -111,6 +129,10 @@ function pathBase(p: string): string {
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
+function filterWidth(label: string, maxChars: number): string {
+  return `${Math.max(11, Math.min(maxChars, Array.from(label).length + 4))}ch`;
+}
+
 function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => void; onEdit: () => void }) {
   const [confirming, setConfirming] = useState(false);
   const isFav = clip.protected === 1;
@@ -122,10 +144,10 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
         title="Click to play · drag to share"
         onDragStart={(e) => {
           e.preventDefault();
-          window.clipforge.startDrag(clip.path, clip.thumb || undefined);
+          window.shard.startDrag(clip.path, clip.thumb || undefined);
         }}
       >
-        {clip.thumb ? <img className="clip__img" src={`file://${clip.thumb}`} alt="" /> : <div className="clip__nothumb"><Icon name="aperture" size={26} /></div>}
+        {clip.thumb ? <img className="clip__img" src={`file://${clip.thumb}`} alt="" /> : <div className="clip__nothumb"><Icon name="film" size={26} /></div>}
         <div className="clip__tags">
           {isFav && <span className="badge badge--fav"><Icon name="star" size={11} /></span>}
           {clip.source === "edited" && <span className="badge badge--edited">Edited</span>}
@@ -140,13 +162,13 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
         <div className="clip__actions" onClick={(e) => e.stopPropagation()}>
           <IconButton size="sm" label="Edit" onClick={onEdit}><Icon name="scissor" size={15} /></IconButton>
           <IconButton size="sm" label={isFav ? "Unfavorite" : "Favorite — keep from auto-delete"} active={isFav}
-            className={isFav ? "is-fav" : ""} onClick={() => void window.clipforge.setProtected(clip.id, !isFav)}>
+            className={isFav ? "is-fav" : ""} onClick={() => void window.shard.setProtected(clip.id, !isFav)}>
             <Icon name="star" size={15} />
           </IconButton>
-          <IconButton size="sm" label="Reveal in Explorer" onClick={() => window.clipforge.revealInExplorer(clip.path)}><Icon name="folderOpen" size={15} /></IconButton>
+          <IconButton size="sm" label="Reveal in Explorer" onClick={() => window.shard.revealInExplorer(clip.path)}><Icon name="folderOpen" size={15} /></IconButton>
           {confirming ? (
             <span className="confirm-inline">
-              <Button size="sm" variant="danger" onClick={() => void window.clipforge.deleteClip(clip.id)}>Delete</Button>
+              <Button size="sm" variant="danger" onClick={() => void window.shard.deleteClip(clip.id)}>Delete</Button>
               <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>Cancel</Button>
             </span>
           ) : (
@@ -160,38 +182,34 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
 
 // Viewer modal — reuses the shared Modal. Preserves reveal + one-click export; Edit opens the trim editor.
 export function Viewer({ clip, onClose, onEdit }: { clip: ClipRecord; onClose: () => void; onEdit?: () => void }) {
+  const exportWholeClip = async () => {
+    const tracks = await window.shard.probeTracks(clip.id);
+    void window.shard.startExport(clip.id, {
+      segments: [{ start: 0, end: clip.durationMs / 1000 }],
+      audioTracks: tracks.map((track) => ({
+        streamIndex: track.streamIndex,
+        name: track.name,
+        included: true,
+        muted: false,
+        volume: 1,
+      })),
+    }).catch((error: unknown) => console.error("[editor] quick export failed", error));
+    onClose();
+  };
   return (
     <Modal open onClose={onClose} size="lg" title={clip.game ?? "Untagged"}
       sub={<>{relativeDate(clip.createdAt)} · {fmtSize(clip.sizeBytes)} · {fmtDuration(clip.durationMs)}</>}
       foot={<>
-        <Button icon={<Icon name="folderOpen" size={15} />} onClick={() => window.clipforge.revealInExplorer(clip.path)}>Reveal in Explorer</Button>
+        <Button icon={<Icon name="folderOpen" size={15} />} onClick={() => window.shard.revealInExplorer(clip.path)}>Reveal in Explorer</Button>
         <span className="spacer" />
         {onEdit && <Button icon={<Icon name="scissor" size={15} />} onClick={onEdit}>Edit</Button>}
-        <Button variant="primary" icon={<Icon name="link" size={15} />} onClick={() => { void window.clipforge.startExport(clip.id); onClose(); }}>Export</Button>
+        <Button variant="primary" icon={<Icon name="export" size={15} />} onClick={() => void exportWholeClip()}>Export</Button>
       </>}>
-      <VideoPlayer src={`file://${clip.path}`} loop />
+      <StandaloneVideoPlayer sourcePath={clip.path} loop />
     </Modal>
   );
 }
 
-// Plain <video> with space/arrows — Chromium plays our mp4s natively.
-export function VideoPlayer({ src, loop = false }: { src: string; loop?: boolean }) {
-  return (
-    <video
-      src={src}
-      controls
-      autoPlay
-      loop={loop}
-      className="player"
-      onKeyDown={(e) => {
-        const v = e.currentTarget;
-        if (e.key === " ") { e.preventDefault(); v.paused ? v.play() : v.pause(); }
-        if (e.key === "ArrowRight") v.currentTime = Math.min(v.duration, v.currentTime + 5);
-        if (e.key === "ArrowLeft") v.currentTime = Math.max(0, v.currentTime - 5);
-      }}
-    />
-  );
-}
 
 export function fmtDuration(ms: number): string {
   const s = Math.round(ms / 1000);

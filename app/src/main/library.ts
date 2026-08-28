@@ -8,7 +8,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { ClipRecord } from "../shared/contracts";
-import { ffprobe, makeThumbnail, remuxToMp4 } from "./ffmpeg";
+import { ffprobe, ffprobeAsync, makeThumbnail, makeThumbnailAsync, remuxToMp4 } from "./ffmpeg";
 import { getSettings } from "./settings";
 
 // SQLite columns are snake_case; the renderer contract is camelCase.
@@ -84,15 +84,47 @@ export class Library extends EventEmitter {
     return row.s;
   }
 
-  oldestUnprotected(): ClipRecord | undefined {
-    // Editor exports are never auto-deleted (user's explicit edits).
+  oldestUnprotected(includeEdited: boolean): ClipRecord | undefined {
     const row = this.db
-      .prepare("SELECT * FROM clips WHERE protected = 0 AND source != 'edited' ORDER BY created_at ASC LIMIT 1")
-      .get() as Record<string, unknown> | undefined;
+      .prepare(
+        `SELECT * FROM clips
+         WHERE protected = 0 AND (? = 1 OR source != 'edited')
+         ORDER BY created_at ASC LIMIT 1`,
+      )
+      .get(includeEdited ? 1 : 0) as Record<string, unknown> | undefined;
     return row ? toClipRecord(row) : undefined;
   }
 
   // Import an mp4 already in the library format. `game` tags the clip.
+  async importMp4Async(file: string, source: "clip" | "recording" | "edited", game: string | null = null): Promise<ClipRecord> {
+    const probe = await ffprobeAsync(file);
+    let thumb: string | null = null;
+    try { thumb = await makeThumbnailAsync(file, this.thumbsDir); } catch {}
+    const rec: ClipRecord = {
+      id: randomUUID(),
+      path: file,
+      thumb: thumb ?? "",
+      game,
+      createdAt: Date.now(),
+      durationMs: Math.round(probe.durationSec * 1000),
+      sizeBytes: probe.sizeBytes,
+      width: probe.width || null,
+      height: probe.height || null,
+      fps: probe.fps,
+      protected: 0,
+      source,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO clips (id, path, thumb, game, created_at, duration_ms, size_bytes, width, height, fps, protected, source)
+         VALUES (@id, @path, @thumb, @game, @createdAt, @durationMs, @sizeBytes, @width, @height, @fps, @protected, @source)`
+      )
+      .run(rec);
+    this.emit("added", rec);
+    return rec;
+  }
+
+  // Sync wrapper kept for legacy callers
   importMp4(file: string, source: "clip" | "recording" | "edited", game: string | null = null): ClipRecord {
     const probe = ffprobe(file);
     const thumb = makeThumbnail(file, this.thumbsDir);

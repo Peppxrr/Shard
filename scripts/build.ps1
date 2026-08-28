@@ -1,4 +1,4 @@
-# ClipForge build orchestrator: vendored deps -> core build -> staged core-bin.
+# Shard build orchestrator: vendored deps -> core build -> staged core-bin.
 #
 # Usage:
 #   powershell -File scripts/build.ps1            # configure + build core (Release)
@@ -35,19 +35,101 @@ $config = $Config
 # Capture changes are carried as a reproducible patch in the parent repo.
 $obsDir = Join-Path $root "vendor/obs-studio"
 $obsPatch = Join-Path $root "patches/obs-game-capture.patch"
-if (-not (Test-Path $obsPatch)) { throw "OBS Game Capture patch not found: $obsPatch" }
+$hookPayloadDir = Join-Path $root "vendor/obs-hook-payload/32.2.1"
+$hookPayloadManifestPath = Join-Path $hookPayloadDir "manifest.json"
+if (-not (Test-Path $hookPayloadManifestPath)) {
+  throw "Official OBS Game Capture payload manifest not found: $hookPayloadManifestPath"
+}
+$hookPayloadManifest = Get-Content $hookPayloadManifestPath -Raw | ConvertFrom-Json
+if ($hookPayloadManifest.obsVersion -ne "32.2.1") {
+  throw "OBS Game Capture payload version mismatch: expected 32.2.1, got $($hookPayloadManifest.obsVersion)"
+}
 
-git -C $obsDir apply --check $obsPatch 2>$null
-if ($LASTEXITCODE -eq 0) {
-  Write-Host "==> Applying Shard OBS Game Capture patch =="
-  git -C $obsDir apply $obsPatch
-  if ($LASTEXITCODE -ne 0) { throw "failed to apply OBS Game Capture patch ($LASTEXITCODE)" }
-} else {
-  git -C $obsDir apply --reverse --check $obsPatch 2>$null
-  if ($LASTEXITCODE -ne 0) {
-    throw "OBS checkout differs from both the pinned base and the expected Shard patch"
+$obsCommit = (git -C $obsDir rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $obsCommit -ne $hookPayloadManifest.obsCommit) {
+  throw "Embedded win-capture and official payload release mismatch: expected OBS commit $($hookPayloadManifest.obsCommit), got $obsCommit"
+}
+
+function Assert-ObsHookPayload {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)]$Expected,
+    [Parameter(Mandatory = $true)][string]$ExpectedSigner
+  )
+
+  if (-not (Test-Path $Path -PathType Leaf)) {
+    throw "Official OBS Game Capture payload missing: $Path"
+  }
+  $actualHash = (Get-FileHash $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualHash -ne $Expected.sha256.ToLowerInvariant()) {
+    throw "Official OBS Game Capture payload hash mismatch for $Path`: expected $($Expected.sha256), got $actualHash"
+  }
+
+  $signature = Get-AuthenticodeSignature $Path
+  $actualSigner = if ($signature.SignerCertificate) {
+    $signature.SignerCertificate.GetNameInfo(
+      [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+      $false
+    )
+  } else {
+    "<missing>"
+  }
+  $actualThumbprint = if ($signature.SignerCertificate) {
+    $signature.SignerCertificate.Thumbprint
+  } else {
+    "<missing>"
+  }
+  if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+    throw "Official OBS Game Capture payload Authenticode verification failed for $Path`: $($signature.Status) $($signature.StatusMessage)"
+  }
+  if ($actualSigner -ne $ExpectedSigner -or $actualThumbprint -ne $Expected.signerThumbprint) {
+    throw "Official OBS Game Capture payload signer mismatch for $Path`: expected '$ExpectedSigner'/$($Expected.signerThumbprint), got '$actualSigner'/$actualThumbprint"
   }
 }
+
+$hookPayloadFiles = @(
+  "graphics-hook64.dll",
+  "graphics-hook32.dll",
+  "inject-helper64.exe",
+  "inject-helper32.exe"
+)
+foreach ($name in $hookPayloadFiles) {
+  $expected = $hookPayloadManifest.files.PSObject.Properties[$name].Value
+  Assert-ObsHookPayload (Join-Path $hookPayloadDir $name) $expected $hookPayloadManifest.signer
+}
+Write-Host "==> Verified official signed OBS Studio $($hookPayloadManifest.obsVersion) Game Capture payload =="
+if (-not (Test-Path $obsPatch)) { throw "OBS Game Capture patch not found: $obsPatch" }
+
+# Apply a Shard patch to the pinned obs-studio checkout. Idempotent: if the
+# patch no longer applies (already applied), the reverse check must succeed
+# or the checkout drifted from both the pinned base and the expected patch.
+# NOTE: only the OBS Game Capture patch is applied here. The injected hook
+# payload (graphics-hook*.dll / inject-helper*.exe) is the official signed
+# OBS build verified above — never rebuild or modify it, anti-cheat
+# compatibility depends on the signed payload matching upstream hashes.
+function Invoke-ObsPatch([string]$Path, [string]$Label) {
+  if (-not (Test-Path $Path)) { throw "$Label patch not found: $Path" }
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  git -C $obsDir apply --check $Path 2>$null
+  $patchApplies = $LASTEXITCODE -eq 0
+  $ErrorActionPreference = $previousErrorActionPreference
+  if ($patchApplies) {
+    Write-Host "==> Applying Shard $Label patch =="
+    git -C $obsDir apply $Path
+    if ($LASTEXITCODE -ne 0) { throw "failed to apply $Label patch ($LASTEXITCODE)" }
+  } else {
+    $ErrorActionPreference = "Continue"
+    git -C $obsDir apply --reverse --check $Path 2>$null
+    $patchAlreadyApplied = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = $previousErrorActionPreference
+    if (-not $patchAlreadyApplied) {
+      throw "OBS checkout differs from both the pinned base and the expected Shard $Label patch"
+    }
+  }
+}
+
+Invoke-ObsPatch $obsPatch "OBS Game Capture"
 
 if ($Clean) {
   Remove-Item -Recurse -Force $buildDir, (Join-Path $root "build_x86") -ErrorAction SilentlyContinue
@@ -69,9 +151,9 @@ cmake -S $coreDir -B $buildDir `
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
 
 Write-Host "==> Building core + OBS plugins =="
-# obs-studio's own targets; clipcore links libobs, the rest are shipped plugins.
+# obs-studio's own targets; shardcore links libobs, the rest are shipped plugins.
 $targets = @(
-  "clipcore", "libobs-d3d11", "libobs-winrt", "obs-ffmpeg-mux", "obs-nvenc-test",
+  "shardcore", "libobs-d3d11", "libobs-winrt", "obs-ffmpeg-mux", "obs-nvenc-test",
   "win-capture", "win-wasapi", "obs-x264", "obs-nvenc",
   "obs-ffmpeg", "obs-outputs", "obs-filters", "image-source", "text-freetype2"
 )
@@ -84,17 +166,18 @@ $bin64 = Join-Path $rundir "bin/64bit"
 $plugins64 = Join-Path $rundir "obs-plugins/64bit"
 $dataDir = Join-Path $rundir "data"
 
-# 1. clipcore.exe (MSVC multi-config puts it at build_x64/<Config>/clipcore.exe)
-$clipcoreExe = Join-Path $buildDir "$config/clipcore.exe"
-if (-not (Test-Path $clipcoreExe)) {
+# 1. shardcore.exe (MSVC multi-config puts it at build_x64/<Config>/shardcore.exe)
+$shardcoreExe = Join-Path $buildDir "$config/shardcore.exe"
+if (-not (Test-Path $shardcoreExe)) {
   # Older layouts built into a per-target dir; fall back to the newest copy
   # of the requested config anywhere under the build dir.
-  $clipcoreExe = Get-ChildItem -Recurse -Filter clipcore.exe $buildDir |
+  $shardcoreExe = Get-ChildItem -Recurse -Filter shardcore.exe $buildDir |
     Where-Object { $_.FullName -match "\\$config\\" } |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 }
-if (-not $clipcoreExe -or -not (Test-Path $clipcoreExe)) { throw "clipcore.exe not found for config $config" }
-Copy-Item $clipcoreExe (Join-Path $stageDir "clipcore.exe") -Force
+if (-not $shardcoreExe -or -not (Test-Path $shardcoreExe)) { throw "shardcore.exe not found for config $config" }
+Remove-Item (Join-Path $stageDir "clipcore.exe") -Force -ErrorAction SilentlyContinue
+Copy-Item $shardcoreExe (Join-Path $stageDir "shardcore.exe") -Force
 
 # 2. runtime DLLs + ffmpeg-mux helper next to the exe
 foreach ($dll in @("obs.dll", "libobs-d3d11.dll", "libobs-winrt.dll", "w32-pthreads.dll", "obs-ffmpeg-mux.exe", "obs-nvenc-test.exe")) {
@@ -142,13 +225,52 @@ foreach ($p in $shipPlugins) {
   if (Test-Path $dll) { Copy-Item $dll (Join-Path $pluginDest "$p.dll") -Force }
 }
 
-# 4. plugin data dirs (win-capture carries graphics-hook64/32.dll + inject helpers)
+# 4. plugin data dirs. The target-side Game Capture payload is not built from
+# source: overwrite any incremental rundir copies with the exact official,
+# signed OBS 32.2.1 release files from Shard's pinned payload directory.
 $dataDest = Join-Path $stageDir "data/obs-plugins"
 foreach ($p in $shipPlugins) {
   $src = Join-Path $dataDir "obs-plugins/$p"
   if (Test-Path $src) {
     Copy-Item $src $dataDest -Recurse -Force
   }
+}
+
+$winCaptureDataDest = Join-Path $dataDest "win-capture"
+New-Item -ItemType Directory -Force $winCaptureDataDest | Out-Null
+foreach ($name in $hookPayloadFiles) {
+  Copy-Item (Join-Path $hookPayloadDir $name) (Join-Path $winCaptureDataDest $name) -Force
+}
+foreach ($manifest in @("shard-vulkan32.json", "shard-vulkan64.json")) {
+  Copy-Item (Join-Path $hookPayloadDir $manifest) (Join-Path $winCaptureDataDest $manifest) -Force
+}
+
+# Stock names and misplaced incremental copies can register or select a second
+# hook. Shard registers only its uniquely named, app-owned Vulkan manifests.
+foreach ($name in $hookPayloadFiles) {
+  Remove-Item (Join-Path $dataDest $name) -Force -ErrorAction SilentlyContinue
+}
+foreach ($manifest in @("obs-vulkan32.json", "obs-vulkan64.json")) {
+  Remove-Item (Join-Path $winCaptureDataDest $manifest) -Force -ErrorAction SilentlyContinue
+}
+
+foreach ($name in $hookPayloadFiles) {
+  $expected = $hookPayloadManifest.files.PSObject.Properties[$name].Value
+  Assert-ObsHookPayload (Join-Path $winCaptureDataDest $name) $expected $hookPayloadManifest.signer
+}
+
+# The staging dir is never wiped (incremental builds depend on it), so old
+# layouts and build symbols accumulate. Strip everything the packaged app
+# must not carry: *.pdb anywhere (the payload's official binaries ship
+# symbol-free; pdbs next to them are stale from-source build leftovers) and
+# pre-patch layout copies at the data/obs-plugins root, which can register a
+# second hook. verify-core-bin.mjs (wired into npm run package) enforces this
+# at packaging time.
+Get-ChildItem $stageDir -Recurse -Filter *.pdb | Remove-Item -Force
+foreach ($name in @("obs-vulkan32.json", "obs-vulkan64.json", "compatibility.json", "locale",
+                    "graphics-hook32.dll", "graphics-hook64.dll", "inject-helper32.exe", "inject-helper64.exe",
+                    "get-graphics-offsets32.exe", "get-graphics-offsets64.exe")) {
+  Remove-Item (Join-Path $dataDest $name) -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # 5. libobs core data (effects, locales)

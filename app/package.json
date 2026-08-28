@@ -1,7 +1,7 @@
 {
-  "name": "clipforge",
+  "name": "shard",
   "productName": "Shard",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Medal-style game clipper — RAM replay buffer, hotkeys, library, editor, Discord-size exports.",
   "license": "GPL-2.0",
   "private": true,
@@ -9,11 +9,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build && tsc -p tsconfig.main.json",
+    "test:editor": "node --no-warnings --experimental-strip-types scripts/test-editor.mjs",
     "postinstall": "node scripts/postinstall.mjs",
-    "package": "npm run build && electron-builder --win"
+    "package": "npm run build && node scripts/verify-core-bin.mjs && electron-builder --win"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "^13.0.3",
+    "uiohook-napi": "^1.5.5"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.1",

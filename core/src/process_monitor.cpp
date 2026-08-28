@@ -4,13 +4,17 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cwchar>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wbemidl.h>
+#include <winternl.h>
 #endif
+
+#include <string>
 
 namespace clipforge {
 
@@ -143,6 +147,90 @@ public:
 private:
   std::function<void(const ProcessEvent&)> push_;
   LONG refs_ = 1;
+};
+
+template <size_t N>
+bool moduleMatches(const wchar_t* name, const wchar_t* const (&candidates)[N])
+{
+  for (const wchar_t* candidate : candidates)
+    if (_wcsicmp(name, candidate) == 0)
+      return true;
+  return false;
+}
+
+bool moduleStartsWith(const wchar_t* name, const wchar_t* prefix)
+{
+  return _wcsnicmp(name, prefix, std::wcslen(prefix)) == 0;
+}
+
+bool moduleEndsWith(const wchar_t* name, const wchar_t* suffix)
+{
+  const size_t nameLength = std::wcslen(name);
+  const size_t suffixLength = std::wcslen(suffix);
+  return nameLength >= suffixLength &&
+         _wcsicmp(name + nameLength - suffixLength, suffix) == 0;
+}
+
+const wchar_t* const kGraphicsModules[] = {
+    L"d3d9.dll", L"d3d10.dll", L"d3d10_1.dll", L"d3d11.dll",
+    L"d3d12.dll", L"dxgi.dll", L"opengl32.dll", L"vulkan-1.dll",
+};
+
+// Strong semantic identity only. SDL, FMOD, Mono, Steam API, and graphics APIs
+// are general-purpose middleware used by ordinary desktop software; treating
+// any one of them as a game caused the generic-GUI false positives this probe
+// exists to prevent.
+const wchar_t* const kGameRuntimeModules[] = {
+    L"unityplayer.dll", L"gameassembly.dll",
+};
+
+const wchar_t* const kModernGameInputModules[] = {
+    L"windows.gaming.input.dll", L"gameinput.dll",
+};
+
+const wchar_t* const kControllerInputModules[] = {
+    L"dinput8.dll", L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll",
+};
+
+const wchar_t* const kWebRuntimeModules[] = {
+    L"libcef.dll", L"chrome_elf.dll", L"msedge_elf.dll",
+    L"webview2loader.dll", L"embeddedbrowserwebview.dll",
+};
+
+std::wstring wideFromUtf8(const std::string& value)
+{
+  if (value.empty())
+    return {};
+  const int count = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()),
+                                        nullptr, 0);
+  if (count <= 0)
+    return {};
+  std::wstring out(static_cast<size_t>(count), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), out.data(), count);
+  return out;
+}
+
+bool regularFile(const std::string& path)
+{
+  const std::wstring wide = wideFromUtf8(path);
+  if (wide.empty())
+    return false;
+  const DWORD attributes = GetFileAttributesW(wide.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+bool hasElectronApplicationLayout(const ProcessInfo& process)
+{
+  const size_t separator = process.path.find_last_of("\\/");
+  if (separator == std::string::npos)
+    return false;
+  const std::string root = process.path.substr(0, separator);
+  return regularFile(root + "\\resources\\app.asar") &&
+         (regularFile(root + "\\resources.pak") || regularFile(root + "\\chrome_100_percent.pak"));
+}
+
+const wchar_t* const kMediaRuntimeModules[] = {
+    L"libvlc.dll", L"libvlccore.dll", L"libmpv-2.dll", L"gstreamer-1.0-0.dll",
 };
 
 #endif // _WIN32
@@ -297,6 +385,7 @@ void ProcessMonitor::applySnapshot()
       if (it->second.startMs != 0)
         p.startMs = it->second.startMs;
       p.path = it->second.path;
+      p.commandLine = it->second.commandLine;
     }
 
     // Diff: only genuinely new/exited processes produce events.
@@ -363,36 +452,129 @@ bool ProcessMonitor::alive(uint32_t pid) const
   return table_.find(pid) != table_.end();
 }
 
+std::vector<uint32_t> ProcessMonitor::allPids() const
+{
+  std::lock_guard<std::mutex> lock(mtx_);
+  std::vector<uint32_t> out;
+  out.reserve(table_.size());
+  for (const auto& [pid, _] : table_) out.push_back(pid);
+  return out;
+}
+
 void ProcessMonitor::resolve(uint32_t pid)
 {
 #ifdef _WIN32
-  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (!h)
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!process)
     return;
+
+  std::string resolvedPath;
   wchar_t path[MAX_PATH] = {0};
-  DWORD size = MAX_PATH;
+  DWORD pathSize = MAX_PATH;
+  if (QueryFullProcessImageNameW(process, 0, path, &pathSize))
+    resolvedPath = toLower(wideToUtf8(path));
+
   int64_t startMs = 0;
-  if (QueryFullProcessImageNameW(h, 0, path, &size)) {
-    FILETIME ct, et, kt, ut;
-    if (GetProcessTimes(h, &ct, &et, &kt, &ut)) {
-      ULARGE_INTEGER li;
-      li.LowPart = ct.dwLowDateTime;
-      li.HighPart = ct.dwHighDateTime;
-      // FILETIME (100 ns since 1601) -> unix ms.
-      startMs = (int64_t)(li.QuadPart / 10000 - 11644473600000LL);
-    }
-    std::lock_guard<std::mutex> lock(mtx_);
-    auto it = table_.find(pid);
-    if (it != table_.end()) {
-      it->second.path = toLower(wideToUtf8(path));
-      if (it->second.startMs == 0)
-        it->second.startMs = startMs;
+  FILETIME creation, exit, kernel, user;
+  if (GetProcessTimes(process, &creation, &exit, &kernel, &user)) {
+    ULARGE_INTEGER value;
+    value.LowPart = creation.dwLowDateTime;
+    value.HighPart = creation.dwHighDateTime;
+    startMs = (int64_t)(value.QuadPart / 10000 - 11644473600000LL);
+  }
+
+  std::string commandLine;
+  using NtQueryInformationProcessFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  const auto queryProcess = ntdll ? reinterpret_cast<NtQueryInformationProcessFn>(
+                                        GetProcAddress(ntdll, "NtQueryInformationProcess"))
+                                  : nullptr;
+  if (queryProcess) {
+    ULONG bytes = 0;
+    queryProcess(process, 60 /* ProcessCommandLineInformation */, nullptr, 0, &bytes);
+    if (bytes >= sizeof(UNICODE_STRING) && bytes <= 1024 * 1024) {
+      std::vector<unsigned char> buffer(bytes);
+      if (queryProcess(process, 60, buffer.data(), bytes, &bytes) >= 0) {
+        const auto* text = reinterpret_cast<const UNICODE_STRING*>(buffer.data());
+        if (text->Buffer && text->Length > 0) {
+          const int chars = text->Length / (int)sizeof(wchar_t);
+          const int utf8Bytes = WideCharToMultiByte(CP_UTF8, 0, text->Buffer, chars, nullptr, 0, nullptr, nullptr);
+          if (utf8Bytes > 0) {
+            commandLine.resize((size_t)utf8Bytes);
+            WideCharToMultiByte(CP_UTF8, 0, text->Buffer, chars, commandLine.data(), utf8Bytes, nullptr, nullptr);
+            commandLine = toLower(commandLine);
+          }
+        }
+      }
     }
   }
-  CloseHandle(h);
+  CloseHandle(process);
+
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = table_.find(pid);
+  if (it != table_.end()) {
+    if (!resolvedPath.empty())
+      it->second.path = std::move(resolvedPath);
+    if (!commandLine.empty())
+      it->second.commandLine = std::move(commandLine);
+    if (it->second.startMs == 0)
+      it->second.startMs = startMs;
+  }
 #else
   (void)pid;
 #endif
+}
+
+ProcessRuntimeFacts ProcessMonitor::probeRuntime(uint32_t pid) const
+{
+  ProcessRuntimeFacts facts;
+#ifdef _WIN32
+  if (pid == 0)
+    return facts;
+  const ProcessInfo process = lookup(pid);
+  // Electron's browser process does not consistently keep chrome_elf.dll
+  // loaded. Its signed distribution layout and app.asar command line are
+  // stable runtime evidence shared by CurseForge, Discord, launchers, and
+  // other hosted applications—unlike an executable-name denylist.
+  facts.webRuntime = hasElectronApplicationLayout(process) ||
+                     process.commandLine.find("app.asar") != std::string::npos;
+
+
+  HANDLE snapshot = INVALID_HANDLE_VALUE;
+  // The loader may mutate its module list while a game starts. Toolhelp asks
+  // callers to retry ERROR_BAD_LENGTH rather than treating it as no evidence.
+  for (int attempt = 0; attempt < 3; attempt++) {
+    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH)
+      break;
+  }
+  if (snapshot == INVALID_HANDLE_VALUE)
+    return facts;
+
+  MODULEENTRY32W module = {};
+  module.dwSize = sizeof(module);
+  bool modernGameInput = false;
+  bool controllerInput = false;
+  if (Module32FirstW(snapshot, &module)) {
+    facts.probeSucceeded = true;
+    do {
+      facts.graphicsApi = facts.graphicsApi || moduleMatches(module.szModule, kGraphicsModules);
+      facts.gameRuntime = facts.gameRuntime || moduleMatches(module.szModule, kGameRuntimeModules);
+      modernGameInput = modernGameInput || moduleMatches(module.szModule, kModernGameInputModules);
+      controllerInput = controllerInput || moduleMatches(module.szModule, kControllerInputModules);
+      facts.webRuntime = facts.webRuntime || moduleMatches(module.szModule, kWebRuntimeModules) ||
+                         moduleEndsWith(module.szModule, L".node");
+      facts.mediaRuntime = facts.mediaRuntime || moduleMatches(module.szModule, kMediaRuntimeModules) ||
+                           moduleStartsWith(module.szModule, L"avformat-") ||
+                           moduleStartsWith(module.szModule, L"libavformat");
+    } while (Module32NextW(snapshot, &module));
+  }
+  facts.gameInput = modernGameInput && controllerInput;
+  CloseHandle(snapshot);
+#else
+  (void)pid;
+#endif
+  return facts;
 }
 
 } // namespace clipforge

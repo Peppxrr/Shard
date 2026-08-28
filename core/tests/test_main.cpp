@@ -72,13 +72,14 @@ static std::string jsonEscape(const std::string& s)
 }
 
 ProcessInfo proc(const std::string& exe, uint32_t pid, uint32_t parent = 0, const std::string& path = "",
-                 int64_t startMs = 1000)
+                 int64_t startMs = 1000, const std::string& commandLine = "")
 {
   ProcessInfo p;
   p.exe = exe;
   p.pid = pid;
   p.parentPid = parent;
   p.path = path;
+  p.commandLine = commandLine;
   p.startMs = startMs;
   return p;
 }
@@ -86,17 +87,49 @@ ProcessInfo proc(const std::string& exe, uint32_t pid, uint32_t parent = 0, cons
 DetectionResult detectWith(const GameRegistry& reg, const ProcessInfo& p,
                            std::function<std::vector<uint32_t>(uint32_t)> chain = {},
                            std::function<ProcessInfo(uint32_t)> lookup = {}, WindowFacts wf = {},
-                           int64_t nowMs = 60000)
+                           int64_t nowMs = 60000, RuntimeFacts runtime = {},
+                           int64_t foregroundIntentMs = 0, const GameDefinition* productHint = nullptr)
 {
   DetectContext ctx;
   ctx.registry = &reg;
+  ctx.productHint = productHint;
   ctx.chain = chain ? chain : std::function<std::vector<uint32_t>(uint32_t)>([](uint32_t id) {
     return std::vector<uint32_t>{id};
   });
   ctx.lookup = lookup ? lookup : std::function<ProcessInfo(uint32_t)>([](uint32_t) { return ProcessInfo{}; });
   ctx.window = wf;
+  ctx.runtime = runtime;
   ctx.nowMs = nowMs;
+  ctx.recentProcess = p.startMs > 0 && nowMs >= p.startMs && nowMs - p.startMs <= 15000;
+  ctx.foregroundIntentMs = foregroundIntentMs;
   return GameDetector::detect(p, ctx);
+}
+
+WindowFacts gameWindow(bool foreground = true, const std::string& title = "")
+{
+  WindowFacts facts;
+  facts.hasVisibleWindow = true;
+  facts.title = title;
+  facts.captureable = true;
+  facts.foreground = foreground;
+  facts.area = (int64_t)1280 * 720;
+  return facts;
+}
+
+RuntimeFacts graphicsRuntime(bool gameRuntime = false)
+{
+  RuntimeFacts facts;
+  facts.probeSucceeded = true;
+  facts.graphicsApi = true;
+  facts.gameRuntime = gameRuntime;
+  return facts;
+}
+
+RuntimeFacts gameInputRuntime()
+{
+  RuntimeFacts facts = graphicsRuntime();
+  facts.gameInput = true;
+  return facts;
 }
 
 DetectionResult detected(const std::string& id, const std::string& name, int score = 80, bool emu = false)
@@ -159,13 +192,6 @@ static void testPersistenceRoundTrip()
     const std::string id = reg.upsertUserGame(g);
     CHECK(!id.empty());
     reg.addIgnoredExe("discord.exe");
-    reg.setLauncherEnabled("steam", false);
-    CustomFolder f;
-    f.name = "My Emus";
-    f.path = "C:\\Emus";
-    f.emulator = true;
-    const std::string fid = reg.addCustomFolder(f);
-    CHECK(!fid.empty());
   }
   {
     GameRegistry reg;
@@ -179,14 +205,49 @@ static void testPersistenceRoundTrip()
       CHECK(g->installPaths.size() == 1);
     }
     CHECK(reg.isIgnoredExe("discord.exe"));
-    CHECK(!reg.launcherEnabled("steam"));
-    const auto folders = reg.customFolders();
-    CHECK_EQ(folders.size(), (size_t)1);
-    if (!folders.empty()) {
-      CHECK_EQ(folders[0].name, std::string("My Emus"));
-      CHECK(folders[0].emulator);
-    }
   }
+}
+
+static void testV9RegistryMigration()
+{
+  TestDir dir("v9-migration");
+  const fs::path path = dir.root / "games.json";
+  {
+    std::ofstream out(path);
+    out << R"({"version":9,"user":[{"id":"u:kept","name":"Kept","executables":["kept.exe"]}],)"
+           R"("discovered":[{"id":"d:runtime:web-host","name":"Old Hosted App False Positive",)"
+           R"("executables":["chat-host.exe"],"installPaths":["c:\\tools\\"],)"
+           R"("launchers":[{"type":"runtime","id":"web-host"}]},)"
+           R"({"id":"d:steam:365670","name":"Unqualified Launcher Product","executables":[],)"
+           R"("installPaths":["c:\\steam\\blender\\"],"launchers":[{"type":"steam","id":"365670"}]}],)"
+           R"("customFolders":[{"id":"c:old","name":"Old","path":"c:\\games"}],)"
+           R"("launchers":{"steam":false},"hiddenDiscoveredIds":["d:steam:438100"],)"
+           R"("ignoredExes":["snippingtool.exe"]})";
+  }
+  GameRegistry registry;
+  registry.setPath(path.string());
+  registry.load();
+  CHECK(registry.findByExe("kept.exe") != nullptr);
+  CHECK(registry.findByExe("player.exe") == nullptr);
+  CHECK(registry.discoveredGames().empty());
+  CHECK(registry.isIgnoredExe("snippingtool.exe"));
+  {
+    std::ifstream persistedFile(path);
+    nlohmann::json persisted;
+    persistedFile >> persisted;
+    CHECK_EQ(persisted.value("version", 0), 10);
+    CHECK(!persisted.contains("customFolders"));
+    CHECK(!persisted.contains("launchers"));
+  }
+
+  GameDefinition vrchat;
+  vrchat.id = "d:steam:438100";
+  vrchat.name = "VRChat";
+  vrchat.installPaths = {"c:\\games\\vrchat\\"};
+  vrchat.launchers = {{"steam", "438100"}};
+  vrchat.productType = "game";
+  registry.mergeDiscovered(vrchat);
+  CHECK(registry.findById("d:steam:438100") != nullptr);
 }
 
 static void testUserPrecedence()
@@ -304,20 +365,33 @@ static void testDetectorUserGame()
   GameRegistry reg;
   reg.setPath((fs::temp_directory_path() / "shard-tests-det.json").string());
   reg.load();
-  GameDefinition g;
-  g.name = "User Game";
-  g.executables = {"ugame.exe"};
-  reg.upsertUserGame(g);
-  WindowFacts wf;
-  wf.hasVisibleWindow = true;
-  const auto r = detectWith(reg, proc("ugame.exe", 100), {}, {}, wf);
-  CHECK_EQ((int)r.decision, (int)DetectionResult::Decision::Detected);
-  CHECK_EQ(r.gameName, std::string("User Game"));
-  CHECK(r.reasons.size() >= 2); // executable match + visible window
+  GameDefinition game;
+  game.name = "User Game";
+  game.executables = {"ugame.exe"};
+  reg.upsertUserGame(game);
 
-  // Without any registry entry the same exe is ignored.
-  const auto unknown = detectWith(reg, proc("not-a-game.exe", 101), {}, {}, wf);
-  CHECK_EQ((int)unknown.decision, (int)DetectionResult::Decision::Ignored);
+  const auto explicitResult = detectWith(reg, proc("ugame.exe", 100), {}, {}, gameWindow(false));
+  CHECK_EQ((int)explicitResult.decision, (int)DetectionResult::Decision::Detected);
+  CHECK_EQ(explicitResult.gameName, std::string("User Game"));
+
+  const auto loading = detectWith(reg, proc("new-game.exe", 101), {}, {}, gameWindow());
+  CHECK_EQ((int)loading.decision, (int)DetectionResult::Decision::Candidate);
+
+  const auto liveUnknown =
+      detectWith(reg, proc("new-game.exe", 101, 0, "", 59000), {}, {}, gameWindow(), 60000,
+                 graphicsRuntime(true));
+  CHECK_EQ((int)liveUnknown.decision, (int)DetectionResult::Decision::Detected);
+  CHECK(liveUnknown.gameId.empty());
+  CHECK_EQ(liveUnknown.gameName, std::string("new-game"));
+
+  const auto minecraft =
+      detectWith(reg, proc("javaw.exe", 102, 50, "c:\\java\\bin\\javaw.exe", 59000), {}, {},
+                 gameWindow(true, "Minecraft 1.21.4"), 60000, graphicsRuntime(true));
+  CHECK_EQ((int)minecraft.decision, (int)DetectionResult::Decision::Detected);
+  CHECK_EQ(minecraft.gameName, std::string("Minecraft 1.21.4"));
+  CHECK(!GameDetector::canOwnQualifiedDescendant("d:runtime:curseforge"));
+  CHECK(GameDetector::canOwnQualifiedDescendant("d:steam:438100"));
+  CHECK(GameDetector::canOwnQualifiedDescendant("u:minecraft"));
 }
 
 static void testDetectorNonGames()
@@ -325,45 +399,120 @@ static void testDetectorNonGames()
   GameRegistry reg;
   reg.setPath((fs::temp_directory_path() / "shard-tests-det2.json").string());
   reg.load();
-  WindowFacts wf;
-  wf.hasVisibleWindow = true;
-  wf.foreground = true;
-  CHECK_EQ((int)detectWith(reg, proc("discord.exe", 200), {}, {}, wf).decision,
+
+  CHECK_EQ((int)detectWith(reg, proc("steam.exe", 201), {}, {}, gameWindow(), 60000,
+                           graphicsRuntime(true)).decision,
            (int)DetectionResult::Decision::Ignored);
-  CHECK_EQ((int)detectWith(reg, proc("steam.exe", 201), {}, {}, wf).decision,
+  CHECK_EQ((int)detectWith(reg, proc("svchost.exe", 202), {}, {}, gameWindow(), 60000,
+                           graphicsRuntime(true)).decision,
            (int)DetectionResult::Decision::Ignored);
-  CHECK_EQ((int)detectWith(reg, proc("chrome.exe", 202), {}, {}, wf).decision,
+
+  // A generic D3D renderer is not semantic game evidence. Long foreground
+  // dwell must never turn an unknown application into a game.
+  const ProcessInfo renderer =
+      proc("arbitrary-renderer.exe", 203, 0, "d:\\tools\\arbitrary-renderer.exe",
+           59000);
+  CHECK_EQ((int)detectWith(reg, renderer, {}, {}, gameWindow(), 60000,
+                           graphicsRuntime()).decision,
+           (int)DetectionResult::Decision::Candidate);
+  CHECK_EQ((int)detectWith(reg, renderer, {}, {}, gameWindow(), 60000,
+                           graphicsRuntime(), 10000).decision,
+           (int)DetectionResult::Decision::Candidate);
+  WindowFacts fullscreenGui = gameWindow(true, "Python GUI");
+  fullscreenGui.fullscreen = true;
+  CHECK((int)detectWith(reg,
+                        proc("pythonw.exe", 210, 0, "c:\\python\\pythonw.exe", 59000),
+                        {}, {}, fullscreenGui, 60000, graphicsRuntime(), 10000).decision !=
+        (int)DetectionResult::Decision::Detected);
+  // Dolphin exposes D3D/OpenGL plus Windows.Gaming.Input and XInput/DirectInput,
+  // but no engine DLL or launcher metadata. Independent gaming-input evidence
+  // restores it after a dwell without restoring generic GPU-window detection.
+  const ProcessInfo dolphin =
+      proc("dolphin.exe", 213, 0, "e:\\games\\dolphin\\dolphin.exe", 1000);
+  CHECK_EQ((int)detectWith(reg, dolphin, {}, {}, gameWindow(true, "Dolphin 2512"), 60000,
+                           gameInputRuntime()).decision,
+           (int)DetectionResult::Decision::Candidate);
+  const auto dolphinDetected =
+      detectWith(reg, dolphin, {}, {}, gameWindow(true, "Dolphin 2512"), 60000,
+                 gameInputRuntime(), 2600);
+  CHECK_EQ((int)dolphinDetected.decision, (int)DetectionResult::Decision::Detected);
+  CHECK_EQ(dolphinDetected.gameName, std::string("Dolphin 2512"));
+  GameDefinition packagedTool;
+  packagedTool.id = "d:msstore:screensketch";
+  packagedTool.name = "Snipping Tool";
+  packagedTool.installPaths = {"c:\\program files\\windowsapps\\microsoft.screensketch_11.0\\"};
+  packagedTool.launchers = {{"msstore", "screensketch"}};
+  packagedTool.productType = "game"; // provider metadata must not bypass the OS-app guard
+  reg.mergeDiscovered(packagedTool);
+  WindowFacts screenshotWindow = gameWindow();
+  screenshotWindow.fullscreen = true;
+  const auto snippingTool = detectWith(
+      reg,
+      proc("snippingtool.exe", 206, 0,
+           "c:\\program files\\windowsapps\\microsoft.screensketch_11.0\\snippingtool.exe", 59000),
+      {}, {}, screenshotWindow, 60000, graphicsRuntime(), 3000);
+  CHECK_EQ((int)snippingTool.decision, (int)DetectionResult::Decision::Ignored);
+  RuntimeFacts webRuntime = graphicsRuntime();
+  webRuntime.webRuntime = true;
+  CHECK((int)detectWith(reg, proc("chat-app.exe", 205, 0, "", 59000), {}, {}, gameWindow(), 60000,
+                        webRuntime).decision != (int)DetectionResult::Decision::Detected);
+  GameDefinition oldHostedApp;
+  oldHostedApp.id = "d:runtime:web-host";
+  oldHostedApp.name = "Hosted App";
+  oldHostedApp.executables = {"hosted-app.exe"};
+  oldHostedApp.installPaths = {"c:\\apps\\hosted\\"};
+  oldHostedApp.launchers = {{"runtime", "web-host"}};
+  oldHostedApp.productType = "game";
+  reg.mergeDiscovered(oldHostedApp);
+  CHECK_EQ((int)detectWith(reg, proc("hosted-app.exe", 209, 0, "c:\\apps\\hosted\\hosted-app.exe", 59000),
+                           {}, {}, gameWindow(), 60000, webRuntime, 3000).decision,
            (int)DetectionResult::Decision::Ignored);
-  // Xbox/MS bloat and overlays are hard-ignored even with a window.
-  CHECK_EQ((int)detectWith(reg, proc("microsoft.storepurchaseapp.exe", 203), {}, {}, wf).decision,
+  GameDefinition staleRuntimeProduct;
+  staleRuntimeProduct.id = "d:runtime:old-gui";
+  staleRuntimeProduct.name = "Old GUI False Positive";
+  staleRuntimeProduct.executables = {"old-gui.exe"};
+  staleRuntimeProduct.installPaths = {"c:\\apps\\old-gui\\"};
+  staleRuntimeProduct.launchers = {{"runtime", "old-gui"}};
+  staleRuntimeProduct.productType = "game";
+  reg.mergeDiscovered(staleRuntimeProduct);
+  CHECK((int)detectWith(reg,
+                        proc("old-gui.exe", 211, 0, "c:\\apps\\old-gui\\old-gui.exe", 59000),
+                        {}, {}, gameWindow(), 60000, graphicsRuntime(), 10000).decision !=
+        (int)DetectionResult::Decision::Detected);
+  CHECK_EQ((int)detectWith(reg, proc("explorer.exe", 212), {}, {}, fullscreenGui, 60000,
+                           graphicsRuntime(true), 10000).decision,
            (int)DetectionResult::Decision::Ignored);
-  CHECK_EQ((int)detectWith(reg, proc("gamingapp.exe", 204), {}, {}, wf).decision,
+  const ProcessInfo mediaPlayer =
+      proc("player.exe", 207, 0, "c:\\tools\\player.exe", 59000,
+           "player.exe c:\\videos\\movie.mkv --fullscreen");
+  CHECK_EQ((int)detectWith(reg, mediaPlayer, {}, {}, gameWindow(true, "movie.mkv"), 60000,
+                           graphicsRuntime(), 3000).decision,
            (int)DetectionResult::Decision::Ignored);
-  CHECK_EQ((int)detectWith(reg, proc("gameoverlayui64.exe", 205), {}, {}, wf).decision,
+  RuntimeFacts mediaFramework = graphicsRuntime();
+  mediaFramework.mediaRuntime = true;
+  CHECK_EQ((int)detectWith(reg, proc("player.exe", 208, 0, "c:\\tools\\player.exe", 59000),
+                           {}, {}, gameWindow(), 60000, mediaFramework, 3000).decision,
            (int)DetectionResult::Decision::Ignored);
-  CHECK_EQ((int)detectWith(reg, proc("xboxapp.exe", 206), {}, {}, wf).decision,
-           (int)DetectionResult::Decision::Ignored);
-  // Unknown exe with no evidence -> ignored.
-  CHECK_EQ((int)detectWith(reg, proc("randomness.exe", 207), {}, {}, wf).decision,
+  CHECK_EQ((int)detectWith(reg, proc("background.exe", 204)).decision,
            (int)DetectionResult::Decision::Ignored);
 }
 
 static void testDetectorLauncherChain()
 {
+  TestDir dir("detector-hint");
   GameRegistry reg;
-  reg.setPath((fs::temp_directory_path() / "shard-tests-det3.json").string());
+  reg.setPath((dir.root / "games.json").string());
   reg.load();
-  GameDefinition g;
-  g.id = "d:steam:1001";
-  g.name = "Launcher Game";
-  g.executables = {"lgame.exe"};
-  g.installPaths = {"c:\\steam\\lgame\\"};
-  g.launchers = {{"steam", "1001"}};
-  reg.mergeDiscovered(g);
+  GameDefinition game;
+  game.id = "d:steam:1001";
+  game.name = "Launcher Game";
+  game.installPaths = {"c:\\steam\\lgame\\"};
+  game.launchers = {{"steam", "1001"}};
+  game.productType = "game";
 
   auto chain = [](uint32_t id) {
-    if (id == 300)
-      return std::vector<uint32_t>{300, 301, 302};
+    if (id == 300 || id == 303 || id == 304)
+      return std::vector<uint32_t>{id, 301, 302};
     return std::vector<uint32_t>{id};
   };
   auto lookup = [](uint32_t id) {
@@ -373,24 +522,29 @@ static void testDetectorLauncherChain()
       p.exe = "steam.exe";
     return p;
   };
-  WindowFacts wf;
-  wf.hasVisibleWindow = true;
-  const ProcessInfo game = proc("lgame.exe", 300, 301, "c:\\steam\\lgame\\bin\\lgame.exe");
-  const auto r = detectWith(reg, game, chain, lookup, wf);
-  CHECK_EQ((int)r.decision, (int)DetectionResult::Decision::Detected);
-  CHECK(r.score >= 80);
-  CHECK_EQ(r.launcher, std::string("steam"));
-  bool hasLauncherReason = false;
-  for (const auto& rr : r.reasons)
-    if (rr.signal == "launcher association")
-      hasLauncherReason = true;
-  CHECK(hasLauncherReason);
 
-  // Discovered exe alone (no launcher, no install path) is a candidate.
-  auto chainNone = [](uint32_t id) { return std::vector<uint32_t>{id}; };
-  const ProcessInfo plain = proc("lgame.exe", 301, 0, "", 1000);
-  const auto cand = detectWith(reg, plain, chainNone, lookup, wf);
-  CHECK_EQ((int)cand.decision, (int)DetectionResult::Decision::Candidate);
+  const ProcessInfo renderer = proc("real-renderer.exe", 300, 301, "c:\\steam\\lgame\\bin\\real-renderer.exe");
+  const auto detectedResult =
+      detectWith(reg, renderer, chain, lookup, gameWindow(), 60000, graphicsRuntime(), 0, &game);
+  CHECK_EQ((int)detectedResult.decision, (int)DetectionResult::Decision::Detected);
+  CHECK_EQ(detectedResult.gameId, std::string("d:steam:1001"));
+  CHECK_EQ(detectedResult.launcher, std::string("steam"));
+  CHECK(reg.discoveredGames().empty());
+  GameDefinition qualified = game;
+  qualified.executables = {renderer.exe};
+  reg.mergeDiscovered(qualified);
+  CHECK_EQ(reg.discoveredGames().size(), (size_t)1);
+
+  // Launcher ancestry and directory containment cannot admit a helper without
+  // renderer evidence.
+  const ProcessInfo helper = proc("helper.exe", 303, 301, "c:\\steam\\lgame\\helper.exe");
+  const auto helperResult =
+      detectWith(reg, helper, chain, lookup, gameWindow(), 60000, RuntimeFacts{}, 0, &game);
+  CHECK((int)helperResult.decision != (int)DetectionResult::Decision::Detected);
+
+  const ProcessInfo arbitrary = proc("arbitrary.exe", 304, 301, "c:\\other\\arbitrary.exe");
+  const auto arbitraryResult = detectWith(reg, arbitrary, chain, lookup, gameWindow());
+  CHECK((int)arbitraryResult.decision != (int)DetectionResult::Decision::Detected);
 }
 
 static void testDetectorUserIgnoreWins()
@@ -398,16 +552,15 @@ static void testDetectorUserIgnoreWins()
   GameRegistry reg;
   reg.setPath((fs::temp_directory_path() / "shard-tests-det4.json").string());
   reg.load();
-  GameDefinition g;
-  g.name = "Ignored Game";
-  g.executables = {"igame.exe"};
-  reg.upsertUserGame(g);
+  GameDefinition game;
+  game.name = "Ignored Game";
+  game.executables = {"igame.exe"};
+  reg.upsertUserGame(game);
   reg.addIgnoredExe("igame.exe");
-  WindowFacts wf;
-  wf.hasVisibleWindow = true;
-  wf.fullscreen = true;
-  const auto r = detectWith(reg, proc("igame.exe", 400), {}, {}, wf);
-  CHECK_EQ((int)r.decision, (int)DetectionResult::Decision::Ignored);
+  WindowFacts window = gameWindow();
+  window.fullscreen = true;
+  const auto result = detectWith(reg, proc("igame.exe", 400), {}, {}, window, 60000, graphicsRuntime(true));
+  CHECK_EQ((int)result.decision, (int)DetectionResult::Decision::Ignored);
 }
 
 static void testDetectorMultiExeIdentity()
@@ -415,12 +568,12 @@ static void testDetectorMultiExeIdentity()
   GameRegistry reg;
   reg.setPath((fs::temp_directory_path() / "shard-tests-det5.json").string());
   reg.load();
-  GameDefinition g;
-  g.name = "Multi Exe Game";
-  g.executables = {"main.exe", "win64-shipping.exe"};
-  reg.upsertUserGame(g);
-  const auto a = detectWith(reg, proc("main.exe", 500), {}, {}, WindowFacts{});
-  const auto b = detectWith(reg, proc("win64-shipping.exe", 501), {}, {}, WindowFacts{});
+  GameDefinition game;
+  game.name = "Multi Exe Game";
+  game.executables = {"main.exe", "win64-shipping.exe"};
+  reg.upsertUserGame(game);
+  const auto a = detectWith(reg, proc("main.exe", 500), {}, {}, gameWindow(false));
+  const auto b = detectWith(reg, proc("win64-shipping.exe", 501), {}, {}, gameWindow(false));
   CHECK_EQ((int)a.decision, (int)DetectionResult::Decision::Detected);
   CHECK_EQ((int)b.decision, (int)DetectionResult::Decision::Detected);
   CHECK_EQ(a.gameId, b.gameId);
@@ -431,17 +584,17 @@ static void testDetectorEmulatorFlag()
   GameRegistry reg;
   reg.setPath((fs::temp_directory_path() / "shard-tests-det7.json").string());
   reg.load();
-  GameDefinition g;
-  g.id = "d:custom:emu:dolphin";
-  g.name = "Dolphin";
-  g.executables = {"dolphin.exe"};
-  g.emulator = true;
-  reg.mergeDiscovered(g);
-  WindowFacts wf;
-  wf.hasVisibleWindow = true;
-  const auto r = detectWith(reg, proc("dolphin.exe", 600), {}, {}, wf);
-  CHECK_EQ((int)r.decision, (int)DetectionResult::Decision::Detected);
-  CHECK(r.emulator);
+  GameDefinition game;
+  game.id = "d:custom:emu:dolphin";
+  game.name = "Dolphin";
+  game.executables = {"dolphin.exe"};
+  game.productType = "game";
+  game.emulator = true;
+  reg.mergeDiscovered(game);
+  const auto result =
+      detectWith(reg, proc("dolphin.exe", 600), {}, {}, gameWindow(), 60000, graphicsRuntime());
+  CHECK_EQ((int)result.decision, (int)DetectionResult::Decision::Detected);
+  CHECK(result.emulator);
 }
 
 // ---------------------------------------------------------------- sessions --
@@ -558,6 +711,62 @@ static void writeFile(const fs::path& p, const std::string& content)
   out << content;
 }
 
+static void appendU32(std::string& out, uint32_t value)
+{
+  for (int shift = 0; shift < 32; shift += 8)
+    out.push_back(static_cast<char>((value >> shift) & 0xff));
+}
+
+static void appendU64(std::string& out, uint64_t value)
+{
+  appendU32(out, static_cast<uint32_t>(value));
+  appendU32(out, static_cast<uint32_t>(value >> 32));
+}
+
+static void writeSteamAppInfo(const fs::path& path,
+                              const std::vector<std::pair<uint32_t, std::string>>& products)
+{
+  std::string bytes;
+  appendU32(bytes, 0x07564429); // appinfo v41
+  appendU32(bytes, 1);          // public universe
+  appendU64(bytes, 0);          // patched with string-table offset below
+
+  for (const auto& [appid, type] : products) {
+    std::string kv;
+    kv.push_back(0); appendU32(kv, 0); // appinfo
+    kv.push_back(0); appendU32(kv, 1); // common
+    kv.push_back(1); appendU32(kv, 2); // type
+    kv.append(type);
+    kv.push_back('\0');
+    kv.push_back(8); // end common
+    kv.push_back(8); // end appinfo
+
+    appendU32(bytes, appid);
+    appendU32(bytes, static_cast<uint32_t>(60 + kv.size()));
+    appendU32(bytes, 2); // info state
+    appendU32(bytes, 0); // last updated
+    appendU64(bytes, 0); // PICS token
+    bytes.append(20, '\0');
+    appendU32(bytes, 0); // change number
+    bytes.append(20, '\0');
+    bytes.append(kv);
+  }
+  appendU32(bytes, 0); // app-entry terminator
+
+  const uint64_t tableOffset = bytes.size();
+  for (int i = 0; i < 8; i++)
+    bytes[8 + i] = static_cast<char>((tableOffset >> (i * 8)) & 0xff);
+  appendU32(bytes, 3);
+  for (const char* value : {"appinfo", "common", "type"}) {
+    bytes.append(value);
+    bytes.push_back('\0');
+  }
+
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path, std::ios::binary);
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
 static void testSteamDiscovery()
 {
   TestDir dir("steam");
@@ -575,17 +784,58 @@ static void testSteamDiscovery()
             "\"AppState\"\n{\n\t\"name\"\t\t\"Steamworks Common Redistributables\"\n\t\"installdir\"\t\t"
             "\"Steamworks Redist\"\n}\n");
   writeFile(steamRoot / "steamapps" / "common" / "Steamworks Redist" / "vcredist_x64.exe", "x");
+  writeFile(steamRoot / "steamapps" / "appmanifest_431960.acf",
+            "\"AppState\"\n{\n\t\"name\"\t\t\"Wallpaper Engine\"\n\t\"installdir\"\t\t"
+            "\"wallpaper_engine\"\n}\n");
+  writeFile(steamRoot / "steamapps" / "common" / "wallpaper_engine" / "wallpaper64.exe", "x");
+  writeFile(steamRoot / "steamapps" / "appmanifest_4091970.acf",
+            "\"AppState\"\n{\n\t\"name\"\t\t\"Baballonia\"\n\t\"installdir\"\t\t"
+            "\"Baballonia\"\n}\n");
+  writeFile(steamRoot / "steamapps" / "common" / "Baballonia" / "Baballonia.exe", "x");
+  writeSteamAppInfo(steamRoot / "appcache" / "appinfo.vdf",
+                    {{730, "Game"}, {228980, "Tool"}, {431960, "Application"}, {4091970, "Application"}});
 
   ScanContext ctx;
   ctx.steamLibraryFile = (steamRoot / "steamapps" / "libraryfolders.vdf").string();
+  ctx.steamAppInfoFile = (steamRoot / "appcache" / "appinfo.vdf").string();
   const auto games = LauncherDiscovery::scanSteam(ctx);
-  CHECK_EQ(games.size(), (size_t)1);
-  if (!games.empty()) {
-    const auto& g = games[0];
-    CHECK_EQ(g.name, std::string("Counter-Strike 2"));
-    CHECK_EQ(g.launchers[0].id, std::string("730"));
-    CHECK(g.executables.size() == 1 && g.executables[0] == "cs2.exe");
+  CHECK_EQ(games.size(), (size_t)4);
+  const auto findProduct = [&](const std::string& id) -> const GameDefinition* {
+    const auto it = std::find_if(games.begin(), games.end(),
+                                 [&](const GameDefinition& game) { return game.id == id; });
+    return it == games.end() ? nullptr : &*it;
+  };
+  const GameDefinition* cs2 = findProduct("d:steam:730");
+  const GameDefinition* wallpaper = findProduct("d:steam:431960");
+  const GameDefinition* baballonia = findProduct("d:steam:4091970");
+  CHECK(cs2 != nullptr);
+  CHECK(wallpaper != nullptr);
+  CHECK(baballonia != nullptr);
+  if (cs2) {
+    CHECK_EQ(cs2->productType, std::string("game"));
+    CHECK(cs2->executables.empty()); // Steam ACF never recursively claims an install tree.
   }
+  if (wallpaper) CHECK_EQ(wallpaper->productType, std::string("software"));
+  if (baballonia) CHECK_EQ(baballonia->productType, std::string("software"));
+
+  GameRegistry registry;
+  registry.setPath((dir.root / "games.json").string());
+  registry.load();
+  LauncherDiscovery discovery;
+  GameDefinition contaminated;
+  contaminated.id = "d:steam:431960";
+  contaminated.name = "Wallpaper Engine";
+  contaminated.executables = {"wallpaperui.exe"};
+  contaminated.productType = "game";
+  registry.mergeDiscovered(contaminated);
+  CHECK(registry.findByExe("wallpaperui.exe") != nullptr);
+  CHECK(registry.discardNonGameProduct("d:steam:431960"));
+  CHECK(registry.findByExe("wallpaperui.exe") == nullptr);
+  CHECK(!registry.isIgnoredExe("wallpaperui.exe"));
+  discovery.setContext(ctx);
+  const auto scan = discovery.scanAll();
+  CHECK_EQ(scan.products.size(), (size_t)4);
+  CHECK(registry.discoveredGames().empty());
 }
 
 static void testEpicDiscovery()
@@ -604,8 +854,10 @@ static void testEpicDiscovery()
   ctx.epicManifestsDir = manifests.string();
   const auto games = LauncherDiscovery::scanEpic(ctx);
   CHECK_EQ(games.size(), (size_t)1);
-  if (!games.empty())
+  if (!games.empty()) {
     CHECK_EQ(games[0].name, std::string("Fortnite"));
+    CHECK(games[0].executables.empty());
+  }
 }
 
 static void testHeroicDiscovery()
@@ -626,38 +878,10 @@ static void testHeroicDiscovery()
   if (!games.empty()) {
     CHECK_EQ(games[0].name, std::string("Hades"));
     CHECK_EQ(games[0].launchers[0].type, std::string("heroic"));
-    CHECK(games[0].executables.size() >= 1);
+    CHECK(games[0].executables.empty());
   }
 }
 
-static void testCustomFolderDiscovery()
-{
-  TestDir dir("custom");
-  writeFile(dir.root / "my-game" / "Game.exe", "x");
-  writeFile(dir.root / "my-game" / "readme.txt", "x");
-  writeFile(dir.root / "emus" / "Dolphin.exe", "x");
-  writeFile(dir.root / "emus" / "Cemu.exe", "x");
-
-  ScanContext ctx;
-  ctx.customFolders = {
-      {"c:indie", "Indie games", dir.root.string() + "\\my-game\\", false},
-      {"c:emus", "Emulators", dir.root.string() + "\\emus\\", true},
-  };
-  const auto games = LauncherDiscovery::scanCustom(ctx);
-  CHECK_EQ(games.size(), (size_t)3); // 1 indie + 2 emulators
-  int emuCount = 0;
-  for (const auto& g : games) {
-    if (g.launchers[0].type != "custom")
-      CHECK(false);
-    if (g.emulator)
-      emuCount++;
-  }
-  CHECK_EQ(emuCount, 2);
-  // Emulator entries carry the flag for capture-side window selection.
-  for (const auto& g : games)
-    if (g.executables[0] == "dolphin.exe")
-      CHECK(g.emulator);
-}
 
 // Small fake registry helper (map-backed; must match the std::function shape).
 struct FakeRegistryHelper {
@@ -760,29 +984,140 @@ static void testRiotDiscovery()
   ctx.riotInstallsFile = (dir.root / "RiotClientInstalls.json").string();
   const auto games = LauncherDiscovery::scanRiot(ctx);
   CHECK_EQ(games.size(), (size_t)1);
-  if (!games.empty())
+  if (!games.empty()) {
     CHECK_EQ(games[0].name, std::string("VALORANT"));
+    CHECK(games[0].executables.empty());
+  }
 }
 
-static void testExeScanNoiseFiltering()
+
+static void testExplicitOverridesAndInfrastructure()
 {
-  TestDir dir("scan");
-  writeFile(dir.root / "game.exe", "x");
-  writeFile(dir.root / "unins000.exe", "x");
-  writeFile(dir.root / "setup.exe", "x");
-  writeFile(dir.root / "redist" / "vcredist_x64.exe", "x");
-  writeFile(dir.root / "bin" / "win64" / "engine.exe", "x");
-  writeFile(dir.root / "bin" / "win64" / "deep" / "too-deep.exe", "x");
-  const auto exes = LauncherDiscovery::scanDirForExes(dir.root.string(), 3, 25);
-  CHECK(exes.size() >= 2 && exes.size() <= 3);
-  CHECK(std::find(exes.begin(), exes.end(), "game.exe") != exes.end());
-  CHECK(std::find(exes.begin(), exes.end(), "engine.exe") != exes.end());
-  CHECK(std::find(exes.begin(), exes.end(), "unins000.exe") == exes.end());
-  CHECK(std::find(exes.begin(), exes.end(), "setup.exe") == exes.end());
-  CHECK(std::find(exes.begin(), exes.end(), "too-deep.exe") == exes.end());
+  TestDir dir("explicit-overrides");
+  GameRegistry reg;
+  reg.setPath((dir.root / "games.json").string());
+  reg.load();
+
+  // Generic helper names do not need a maintained deny list. Without positive
+  // identity, even a game-oriented runtime is insufficient once the process
+  // is outside the current launch episode.
+  const auto helper = detectWith(reg, proc("launch.exe", 700), {}, {}, gameWindow(), 60000,
+                                 graphicsRuntime(true));
+  CHECK((int)helper.decision != (int)DetectionResult::Decision::Detected);
+
+  GameDefinition explicitHelper;
+  explicitHelper.name = "Launch Game";
+  explicitHelper.executables = {"launch.exe"};
+  reg.upsertUserGame(explicitHelper);
+  const auto userOverride = detectWith(reg, proc("launch.exe", 701), {}, {}, gameWindow(false));
+  CHECK_EQ((int)userOverride.decision, (int)DetectionResult::Decision::Detected);
+
+  // Ordinary application names are not hard-coded. An explicit user mapping
+  // remains authoritative.
+  GameDefinition explicitOrdinary;
+  explicitOrdinary.name = "Custom App Game";
+  explicitOrdinary.executables = {"custom-app.exe"};
+  reg.upsertUserGame(explicitOrdinary);
+  const auto ordinary = detectWith(reg, proc("custom-app.exe", 702), {}, {}, gameWindow(false));
+  CHECK_EQ((int)ordinary.decision, (int)DetectionResult::Decision::Detected);
+}
+static void testInstallPathFallbackStrongEvidence()
+{
+  GameRegistry reg;
+  reg.setPath((fs::temp_directory_path() / "shard-tests-fallback.json").string());
+  reg.load();
+  GameDefinition game;
+  game.id = "d:steam:999";
+  game.name = "MyGame";
+  game.installPaths = {"c:\\games\\mygame\\"};
+  game.productType = "game";
+  game.source = GameSource::Discovered;
+  reg.mergeDiscovered(game);
+
+  const ProcessInfo helper = proc("helper.exe", 800, 0, "c:\\games\\mygame\\helper.exe");
+  const auto noRenderer = detectWith(reg, helper, {}, {}, gameWindow());
+  CHECK((int)noRenderer.decision != (int)DetectionResult::Decision::Detected);
+
+  // Anti-cheat/protected games may deny module enumeration. A known installed
+  // product must leave Candidate after a short stable foreground dwell.
+  const auto protectedCandidate =
+      detectWith(reg, helper, {}, {}, gameWindow(), 60000, RuntimeFacts{}, 1000);
+  CHECK((int)protectedCandidate.decision != (int)DetectionResult::Decision::Detected);
+  const auto protectedGame =
+      detectWith(reg, helper, {}, {}, gameWindow(), 60000, RuntimeFacts{}, 1600);
+  CHECK_EQ((int)protectedGame.decision, (int)DetectionResult::Decision::Detected);
+  CHECK_EQ(protectedGame.gameId, std::string("d:steam:999"));
+
+  const auto renderer =
+      detectWith(reg, helper, {}, {}, gameWindow(), 60000, graphicsRuntime());
+  CHECK_EQ((int)renderer.decision, (int)DetectionResult::Decision::Detected);
+  CHECK_EQ(renderer.gameId, std::string("d:steam:999"));
+
+  const auto backgroundRenderer =
+      detectWith(reg, helper, {}, {}, gameWindow(false), 60000, graphicsRuntime());
+  CHECK((int)backgroundRenderer.decision != (int)DetectionResult::Decision::Detected);
 }
 
-// -------------------------------------------------------------------- main --
+
+static void testLiveUnknownEvidence()
+{
+  GameRegistry reg;
+  reg.setPath((fs::temp_directory_path() / "shard-tests-live-unknown.json").string());
+  reg.load();
+
+  auto launcherChain = [](uint32_t id) { return std::vector<uint32_t>{id, 901}; };
+  auto lookup = [](uint32_t id) {
+    ProcessInfo process;
+    process.pid = id;
+    if (id == 901)
+      process.exe = "steam.exe";
+    return process;
+  };
+
+  const ProcessInfo child = proc("anything.exe", 900, 901, "c:\\other\\anything.exe");
+  const auto ancestryOnly = detectWith(reg, child, launcherChain, lookup, gameWindow());
+  CHECK((int)ancestryOnly.decision != (int)DetectionResult::Decision::Detected);
+
+  // A recognized game runtime can still qualify on the first foreground tick.
+  const auto immediate =
+      detectWith(reg, child, launcherChain, lookup, gameWindow(), 1001, graphicsRuntime(true));
+  CHECK_EQ((int)immediate.decision, (int)DetectionResult::Decision::Detected);
+  CHECK(immediate.gameId.empty());
+
+  const auto background =
+      detectWith(reg, child, launcherChain, lookup, gameWindow(false), 1001, graphicsRuntime());
+  CHECK((int)background.decision != (int)DetectionResult::Decision::Detected);
+}
+
+static void testRuntimeExecutablePersistence()
+{
+  TestDir dir("runtime-executable");
+  const fs::path path = dir.root / "games.json";
+  {
+    GameRegistry registry;
+    registry.setPath(path.string());
+    registry.load();
+    GameDefinition product;
+    product.id = "d:steam:42";
+    product.name = "Runtime Product";
+    product.installPaths = {"c:\\games\\runtime\\"};
+    product.launchers = {{"steam", "42"}};
+    product.productType = "game";
+    registry.mergeDiscovered(product);
+    CHECK(registry.findByExe("qualified.exe") == nullptr);
+    CHECK(registry.addRuntimeExecutable(product.id, "qualified.exe"));
+  }
+  {
+    GameRegistry registry;
+    registry.setPath(path.string());
+    registry.load();
+    const GameDefinition* qualified = registry.findByExe("qualified.exe");
+    CHECK(qualified != nullptr);
+    if (qualified)
+      CHECK_EQ(qualified->id, std::string("d:steam:42"));
+  }
+}
+
 
 int main()
 {
@@ -794,6 +1129,8 @@ int main()
     std::printf("ok: registry/v1-migration\n");
     testPersistenceRoundTrip();
     std::printf("ok: registry/persistence\n");
+    testV9RegistryMigration();
+    std::printf("ok: registry/v9-migration\n");
     testUserPrecedence();
     std::printf("ok: registry/precedence\n");
     testDiscoveredMergeByName();
@@ -827,16 +1164,18 @@ int main()
     std::printf("ok: launcher/epic\n");
     testHeroicDiscovery();
     std::printf("ok: launcher/heroic\n");
-    testCustomFolderDiscovery();
-    std::printf("ok: launcher/custom\n");
     testMsStoreDiscovery();
     std::printf("ok: launcher/msstore\n");
-    testGogDiscovery();
-    std::printf("ok: launcher/gog\n");
     testRiotDiscovery();
     std::printf("ok: launcher/riot\n");
-    testExeScanNoiseFiltering();
-    std::printf("ok: launcher/exe-scan\n");
+    testExplicitOverridesAndInfrastructure();
+    std::printf("ok: detector/explicit-overrides\n");
+    testInstallPathFallbackStrongEvidence();
+    std::printf("ok: detector/fallback-strong\n");
+    testLiveUnknownEvidence();
+    std::printf("ok: system/live-unknown\n");
+    testRuntimeExecutablePersistence();
+    std::printf("ok: system/runtime-executable\n");
   } catch (const std::exception& e) {
     std::printf("EXCEPTION: %s\n", e.what());
     return 3;

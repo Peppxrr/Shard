@@ -1,0 +1,10 @@
+if(NOT DEFINED SOURCE_DIR)
+  message(FATAL_ERROR "SOURCE_DIR is required")
+endif()
+
+set(cmake_file "${SOURCE_DIR}/source/CMakeLists.txt")
+file(READ "${cmake_file}" contents)
+string(REPLACE "if(POLICY CMP0025)\n    cmake_policy(SET CMP0025 OLD) # report Apple's Clang as just Clang\nendif()\n" "" contents "${contents}")
+string(REPLACE "if(POLICY CMP0054)\n    cmake_policy(SET CMP0054 OLD) # Only interpret if() arguments as variables or keywords when unquoted\nendif()\n" "" contents "${contents}")
+string(REPLACE "cmake_minimum_required (VERSION 2.8.8) # OBJECT libraries require 2.8.8" "cmake_minimum_required(VERSION 3.5...3.30)" contents "${contents}")
+file(WRITE "${cmake_file}" "${contents}")

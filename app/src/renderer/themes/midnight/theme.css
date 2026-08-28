@@ -1,0 +1,47 @@
+/**
+ * @name Midnight
+ * @author Shard
+ * @version 1.0.0
+ * @description Midnight — deeper blue-tinted dark surfaces, cooler and more saturated.
+ */
+
+:root {
+  --bg-0: #050a14;
+  --bg-1: #0a1020;
+  --bg-2: #0f1930;
+  --bg-3: #16213f;
+  --bg-4: #1e2b4d;
+
+  --stroke: #1a2640;
+  --stroke-2: #24365a;
+  --stroke-3: #324a78;
+
+  --fg: #e6edff;
+  --fg-2: #aab9db;
+  --fg-3: #7585ac;
+  --fg-4: #536184;
+
+  /* Cooler, deeper blue accent */
+  --accent: #4f8cff;
+  --accent-2: #6b7cff;
+  --accent-ink: #060a14;
+  --accent-soft: rgba(79, 140, 255, 0.18);
+  --accent-softer: rgba(79, 140, 255, 0.09);
+  --accent-grad: linear-gradient(135deg, #3f7dff 0%, #6b7cff 100%);
+  --accent-grad-soft: linear-gradient(135deg, rgba(63, 125, 255, 0.20), rgba(107, 124, 255, 0.12));
+
+  color-scheme: dark;
+}
+
+.app {
+  background:
+    radial-gradient(1100px 520px at 85% -10%, rgba(79, 140, 255, 0.10), transparent 60%),
+    radial-gradient(900px 420px at -10% 110%, rgba(107, 124, 255, 0.07), transparent 55%),
+    var(--bg-0);
+}
+.capture__hero {
+  background:
+    radial-gradient(120% 140% at 100% 0%, rgba(107, 124, 255, 0.14), transparent 55%),
+    radial-gradient(90% 120% at 0% 100%, rgba(63, 125, 255, 0.10), transparent 60%),
+    linear-gradient(160deg, var(--bg-2), var(--bg-1) 62%);
+}

@@ -70,8 +70,7 @@ nlohmann::json GameSettings::toJson() const
   return {{"autoRecord", autoRecord},
           {"gamesPath", gamesPath},
           {"graceSeconds", graceSeconds},
-          {"verboseDetection", verboseDetection},
-          {"launchers", launcherEnabled}};
+          {"verboseDetection", verboseDetection}};
 }
 
 void GameSettings::applyPartial(const nlohmann::json& j)
@@ -80,9 +79,6 @@ void GameSettings::applyPartial(const nlohmann::json& j)
   if (j.contains("gamesPath")) gamesPath = j.value("gamesPath", gamesPath);
   if (j.contains("graceSeconds")) graceSeconds = j.value("graceSeconds", graceSeconds);
   if (j.contains("verboseDetection")) verboseDetection = j.value("verboseDetection", verboseDetection);
-  if (j.contains("launchers") && j["launchers"].is_object())
-    for (auto it = j["launchers"].begin(); it != j["launchers"].end(); ++it)
-      launcherEnabled[it.key()] = it.value().get<bool>();
 }
 
 void Config::updateDirs()
@@ -155,44 +151,73 @@ std::vector<std::string> Config::applyPartial(const nlohmann::json& j)
 {
   std::vector<std::string> touched;
 
-  auto touch = [&](const char* k) { touched.emplace_back(k); };
-
   if (j.contains("capture")) {
+    const auto before = capture.toJson();
     capture.applyPartial(j["capture"]);
-    touch("capture");
+    if (capture.toJson() != before)
+      touched.emplace_back("capture");
   }
   if (j.contains("video")) {
+    const auto before = video.toJson();
     video.applyPartial(j["video"]);
-    touch("video");
+    if (video.toJson() != before)
+      touched.emplace_back("video");
   }
   if (j.contains("replay")) {
+    const auto before = replay.toJson();
     replay.applyPartial(j["replay"]);
-    touch("replay");
+    if (replay.toJson() != before)
+      touched.emplace_back("replay");
   }
   if (j.contains("game")) {
+    const auto before = game.toJson();
     game.applyPartial(j["game"]);
-    touch("game");
+    if (game.toJson() != before)
+      touched.emplace_back("game");
   }
   if (j.contains("audio") && j["audio"].contains("sources")) {
-    audioSources.clear();
-    for (const auto& s : j["audio"]["sources"])
-      audioSources.push_back(AudioSourceConfig::fromJson(s));
-    touch("audio");
+    nlohmann::json before = nlohmann::json::array();
+    for (const auto& source : audioSources)
+      before.push_back(source.toJson());
+
+    std::vector<AudioSourceConfig> next;
+    for (const auto& source : j["audio"]["sources"])
+      next.push_back(AudioSourceConfig::fromJson(source));
+
+    nlohmann::json after = nlohmann::json::array();
+    for (const auto& source : next)
+      after.push_back(source.toJson());
+    if (after != before) {
+      audioSources = std::move(next);
+      touched.emplace_back("audio");
+    }
   }
   if (j.contains("storage")) {
+    bool changed = false;
     if (j["storage"].contains("limitGb")) {
-      storageLimitGb = j["storage"]["limitGb"];
-      touch("storage");
+      const double next = j["storage"]["limitGb"];
+      if (storageLimitGb != next) {
+        storageLimitGb = next;
+        changed = true;
+      }
     }
     if (j["storage"].contains("clipsDir") && j["storage"]["clipsDir"].is_string()) {
-      clipsBaseDir = j["storage"]["clipsDir"];
-      updateDirs();
-      touch("storage");
+      const std::string next = j["storage"]["clipsDir"];
+      if (clipsBaseDir != next) {
+        clipsBaseDir = next;
+        updateDirs();
+        changed = true;
+      }
     }
+    if (changed)
+      touched.emplace_back("storage");
   }
   if (j.contains("app") && j["app"].contains("startWithWindows")) {
-    appStartWithWindows = j["app"]["startWithWindows"];
-    touch("app");
+    const bool next = j["app"]["startWithWindows"];
+    if (appStartWithWindows != next) {
+      appStartWithWindows = next;
+      touched.emplace_back("app");
+    }
   }
 
   return touched;

@@ -1,16 +1,15 @@
-// GameSystem — owns the whole detection subsystem (Todo #19): the layered
-// registry, launcher discovery, process monitor, confidence detector, and
-// session manager. Replaces the old foreground-window-only GameDetect.
+// GameSystem owns installed-product discovery, event-driven process facts,
+// live renderer qualification, game sessions, and the capture subject.
 //
-// Pipeline (each stage independent, data flows downward):
-//   LauncherDiscovery -> GameRegistry -> ProcessMonitor -> GameDetector
-//        -> GameSessionManager -> SourceManager (capture subject)
+// LauncherDiscovery -> GameRegistry provides product identity only. A process
+// enters GameSessionManager only after GameDetector sees an explicit user
+// mapping or a captureable foreground window with renderer/custom-folder
+// evidence. Qualified executables are then learned individually.
 //
-// Threading: one owner loop thread (~2 Hz) drains the process monitor (WMI
-// events + toolhelp reconciliation), evaluates candidates, refreshes session
-// window metadata, and drives capture + auto-record. Discovery runs on the
-// loop thread at startup, hourly, and on demand (RPC). Registry/session state
-// is mutex-guarded for the RPC threads.
+// One owner loop (~2 Hz) drains WMI/toolhelp events, follows foreground intent,
+// rechecks windows/modules while a renderer loads, refreshes sessions, and
+// drives capture + auto-record. Discovery runs at startup, hourly, and by RPC.
+// Registry/session state is mutex-guarded for RPC threads.
 #pragma once
 
 #include "app.h"
@@ -27,8 +26,8 @@
 #include <chrono>
 #include <map>
 #include <mutex>
-#include <set>
 #include <string>
+#include <optional>
 #include <thread>
 
 namespace clipforge {
@@ -57,15 +56,8 @@ public:
   nlohmann::json listIgnored() const;
   bool ignoreExe(const std::string& exe);
   bool unignoreExe(const std::string& exe);
-  nlohmann::json listLaunchers() const;
-  bool setLauncherEnabled(const std::string& type, bool enabled);
-  nlohmann::json refreshDiscovery();
   nlohmann::json sessions() const;
   nlohmann::json detectExplain(const nlohmann::json& params) const;
-  // Custom game folders (indie/itch installs, emulator libraries).
-  nlohmann::json listCustomFolders() const;
-  nlohmann::json addCustomFolder(const nlohmann::json& params);
-  bool removeCustomFolder(const std::string& id);
 
   // ------------------------------------------------------ state.get -------
   std::string currentExe() const;
@@ -84,7 +76,7 @@ private:
   void handleProcessEvent(const ProcessEvent& e);
   void evaluateProcess(uint32_t pid);
   void reEvaluateCandidates();
-  void unknownGamePromotion();
+  void evaluateForegroundProcess();
   void probeSessions();
   void runDiscoveryScan();
   void updateCaptureSubject();
@@ -92,17 +84,21 @@ private:
   void emitGameChanged();
   void logDetection(const ProcessInfo& p, const DetectionResult& r);
 
-  bool hasLauncherAncestry(uint32_t pid) const;
-  bool pathUnderDiscoveredInstall(const std::string& lowerPath) const;
+  std::string createRuntimeProduct(const ProcessInfo& process, const DetectionResult& result);
   uint32_t foregroundPid() const;
 
+  std::optional<GameDefinition> productHintForPath(const std::string& lowerPath) const;
   // Window probe results for one pid (WIN32; empty off-Windows).
   struct WindowProbe {
     std::string title;
     std::string cls;
     bool hasWindow = false;
+    bool captureable = false;
     bool fullscreen = false;
     bool foreground = false;
+    bool minimized = false; // best window is iconic (minimized)
+    bool onScreen = false;  // best window rect intersects a monitor
+    long area = 0; // best window client area (for standalone heuristic)
   };
   // Best window for the pid: fullscreen > title-contains-hint > largest.
   WindowProbe probeWindow(uint32_t pid, const std::string& titleHint = "") const;
@@ -120,26 +116,28 @@ private:
   std::string registryPathOverride_;
   std::thread loopThread_;
   std::atomic<bool> run_{false};
+  std::atomic<bool> discoveryRequested_{false};
 
   mutable std::mutex stateMtx_;
-  // pid -> gameId for processes already promoted to a session
+  // pid -> gameId for processes already qualified into a session.
   std::map<uint32_t, std::string> knownPids_;
-  // Candidate re-evaluation: pid -> first candidate timestamp (unix ms).
+  // Recently started or foreground candidates are re-evaluated while their
+  // renderer modules and top-level window are still loading.
   std::map<uint32_t, int64_t> candidateSince_;
-  // Unknown-game workflow: pid -> first seen timestamp.
-  std::map<uint32_t, int64_t> unknownSince_;
-  // pids the unknown workflow already promoted (avoid repeats).
-  std::set<uint32_t> unknownPromoted_;
+  uint32_t observedForegroundPid_ = 0;
 
   // Active-game following: the game holding focus becomes primary after it
   // keeps focus for the debounce window (capture follows the active game).
+  // 1.5s rejects transient 200ms flick, but 8s focus on B reliably captures B.
+  // This is the SINGLE authority for primary selection (updateCaptureSubject
+  // never mutates primary).
   std::string focusGameId_;
   int64_t focusSinceMs_ = 0;
-  const int64_t kFocusDebounceMs = 10000;
+  const int64_t kFocusDebounceMs = 1500;
 
   std::chrono::steady_clock::time_point lastDiscovery_{};
-  std::vector<LauncherDiscovery::Result> lastScanResults_;
-  int64_t lastScanAtMs_ = 0;
+  mutable std::mutex productHintsMtx_;
+  std::vector<GameDefinition> productHints_;
 
   // Primary session bookkeeping for capture + events.
   std::string pushedSubjectExe_;

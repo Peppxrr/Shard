@@ -114,7 +114,7 @@ bool Server::start()
   }
 
   if (port_.load() <= 0) {
-    std::fprintf(stderr, "clipcore: failed to bind RPC server after %d attempts\n", attempt);
+    std::fprintf(stderr, "shardcore: failed to bind RPC server after %d attempts\n", attempt);
     return false;
   }
 

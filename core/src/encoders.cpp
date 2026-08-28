@@ -8,8 +8,7 @@ namespace clipforge {
 
 namespace {
 
-constexpr const char* const kNvencIds[] = {"obs_nvenc_h264_tex", "obs_nvenc_h264_soft", "obs_nvenc_av1_tex",
-                                           "obs_nvenc_av1_soft", nullptr};
+constexpr const char* const kNvencIds[] = {"obs_nvenc_h264_tex", "obs_nvenc_h264_soft", nullptr};
 
 bool encoderIdExists(const char* id)
 {
@@ -22,6 +21,8 @@ bool encoderIdExists(const char* id)
 }
 
 } // namespace
+
+EncoderManager::EncoderManager(const Config& config) : config_(config) {}
 
 std::string EncoderManager::resolveVideoEncoderId(const std::string& requested) const
 {
@@ -92,12 +93,23 @@ obs_data_t* EncoderManager::videoSettings() const
     obs_data_set_string(s, "preset", v.x264Preset.empty() ? "veryfast" : v.x264Preset.c_str());
     obs_data_set_string(s, "profile", "high");
   } else if (id.find("av1") != std::string::npos) {
-    // NVENC AV1: no profile/bf knobs (like the OBS frontend).
-    obs_data_set_string(s, "preset", "p4");
-  } else {
-    // NVENC (tex or soft)
-    obs_data_set_string(s, "preset", "p4");
-    obs_data_set_string(s, "profile", "high");
+    obs_data_set_string(s, "preset", "p3");
+    obs_data_set_string(s, "preset2", "p3");
+    obs_data_set_string(s, "multipass", "disabled");
+    obs_data_set_bool(s, "adaptive_quantization", false);
+    obs_data_set_bool(s, "psycho_aq", false);
+    obs_data_set_bool(s, "lookahead", false);
+  } else if (id.find("nvenc") != std::string::npos) {
+    // Single-pass NVENC keeps the capture path light enough to coexist with
+    // games already saturating the GPU. Texture encoders avoid a GPU->CPU copy.
+    obs_data_set_string(s, "preset", "p3");
+    obs_data_set_string(s, "preset2", "p3");
+    obs_data_set_string(s, "tune", "ll");
+    obs_data_set_string(s, "multipass", "disabled");
+    obs_data_set_string(s, "profile", id.find("hevc") != std::string::npos ? "main" : "high");
+    obs_data_set_bool(s, "adaptive_quantization", false);
+    obs_data_set_bool(s, "psycho_aq", false);
+    obs_data_set_bool(s, "lookahead", false);
     obs_data_set_int(s, "bf", 2);
   }
   return s;

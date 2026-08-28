@@ -1,8 +1,8 @@
-// Launcher discovery: finds installed games from launcher metadata without
-// scanning the whole filesystem (Todo #3).
-//
+// Installed-product discovery from launcher metadata. Providers return product
+// ids/install roots as ephemeral live-detection hints; they never populate the
+// user-visible game registry or recursively claim directory executables.
 // Supported integrations:
-//   steam    libraryfolders.vdf + appmanifest_*.acf (VDF/ACF text parsing)
+//   steam    libraryfolders.vdf + appmanifest_*.acf + appcache/appinfo.vdf
 //   epic     %ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item (JSON)
 //   gog      registry: HKLM\SOFTWARE\WOW6432Node\GOG.com\Games\<id>
 //   ubisoft  registry: HKLM\SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs\<id>
@@ -27,24 +27,14 @@
 
 namespace clipforge {
 
-// A user-configured game folder scanned for games (indie/itch installs,
-// emulator libraries, ...).
-struct CustomFolderSpec {
-  std::string id;
-  std::string name;
-  std::string path; // normalized
-  bool emulator = false;
-};
-
 struct ScanContext {
   // File roots (tests point these at fixture dirs).
   std::string steamLibraryFile;   // <Steam>/steamapps/libraryfolders.vdf
+  std::string steamAppInfoFile;   // <Steam>/appcache/appinfo.vdf (authoritative product type)
   std::string epicManifestsDir;   // Epic Game Launcher Data/Manifests
   std::string riotInstallsFile;   // %ProgramData%/Riot Games/RiotClientInstalls.json
   std::string heroicConfigDir;    // %USERPROFILE%/.config/heroic (games_config/*.json)
 
-  // User-configured game folders (populated from the registry before a scan).
-  std::vector<CustomFolderSpec> customFolders;
 
   // Registry access (hive: "HKLM" | "HKCU"; keyPath without hive; valueName).
   std::function<std::string(const std::string& hive, const std::string& keyPath,
@@ -61,16 +51,22 @@ class LauncherDiscovery {
 public:
   struct Result {
     std::string type;
-    int games = 0;      // definitions merged into the registry
+    int games = 0;      // installed product hints found by the provider
     bool ran = false;   // provider executed (enabled and present)
     int64_t lastScanMs = 0;
   };
 
-  explicit LauncherDiscovery(GameRegistry& registry);
+  struct ScanOutput {
+    std::vector<Result> results;
+    std::vector<GameDefinition> products;
+  };
+
+  LauncherDiscovery() = default;
   void setContext(const ScanContext& ctx) { ctx_ = ctx; }
 
-  // Scan every enabled launcher and merge results into the registry.
-  std::vector<Result> scanAll();
+  // Scan all available launchers. Product metadata is returned as ephemeral
+  // identity hints; it is never merged into the user-visible game registry.
+  ScanOutput scanAll();
 
   // Static pure providers (testable).
   static std::vector<GameDefinition> scanSteam(const ScanContext& ctx);
@@ -82,21 +78,16 @@ public:
   static std::vector<GameDefinition> scanRiot(const ScanContext& ctx);
   static std::vector<GameDefinition> scanMsStore(const ScanContext& ctx);
   static std::vector<GameDefinition> scanHeroic(const ScanContext& ctx);
-  static std::vector<GameDefinition> scanCustom(const ScanContext& ctx);
 
   // Fill well-known Windows paths (call once at startup on Windows).
   static ScanContext defaults();
 
-  // Bounded executable scan of an install dir (depth-limited, noise dirs and
-  // installer/redist artifacts skipped, capped count).
-  static std::vector<std::string> scanDirForExes(const std::string& dir, int maxDepth = 3, int maxExes = 25);
 
   static int64_t nowMs();
 
 private:
   static Result runOne(const std::string& type, const std::vector<GameDefinition>& games);
 
-  GameRegistry& registry_;
   ScanContext ctx_;
 };
 

@@ -1,5 +1,6 @@
 #include "jsonrpc.h"
 
+#include <algorithm>
 #include <atomic>
 
 namespace clipforge {
@@ -20,7 +21,7 @@ nlohmann::json Rpc::buildState() const
   const auto subj = sources_.subject();
   nlohmann::json subject = {{"kind", "none"}, {"name", nullptr}};
   if (subj.kind == SourceManager::Subject::Kind::Monitor) {
-    subject = {{"kind", "monitor"}, {"name", "Desktop"}};
+    subject = {{"kind", "monitor"}, {"name", subj.name}};
   } else if (subj.kind == SourceManager::Subject::Kind::Window) {
     subject = {{"kind", "game"}, {"name", subj.name}};
   }
@@ -107,6 +108,8 @@ nlohmann::json Rpc::dispatch(const nlohmann::json& req)
   }
   if (method == "audio.listDevices")
     return {{"result", sources_.listDevices()}};
+  if (method == "capture.listMonitors")
+    return {{"result", sources_.listMonitors()}};
   // ---- game registry / detection ----
   if (method == "game.listKnown")
     return {{"result", games_.listKnown()}};
@@ -148,28 +151,10 @@ nlohmann::json Rpc::dispatch(const nlohmann::json& req)
   }
   if (method == "game.listIgnored")
     return {{"result", games_.listIgnored()}};
-  if (method == "game.listLaunchers")
-    return {{"result", games_.listLaunchers()}};
-  if (method == "game.setLauncherEnabled") {
-    if (!params.contains("type") || !params.contains("enabled"))
-      return {{"error", {{"code", -32602}, {"message", "game.setLauncherEnabled requires type and enabled"}}}};
-    return {{"result", games_.setLauncherEnabled(params["type"], params["enabled"])}};
-  }
-  if (method == "game.refreshDiscovery")
-    return {{"result", games_.refreshDiscovery()}};
   if (method == "game.sessions")
     return {{"result", games_.sessions()}};
   if (method == "game.detectExplain")
     return {{"result", games_.detectExplain(params)}};
-  if (method == "game.listCustomFolders")
-    return {{"result", games_.listCustomFolders()}};
-  if (method == "game.addCustomFolder")
-    return {{"result", games_.addCustomFolder(params)}};
-  if (method == "game.removeCustomFolder") {
-    if (!params.contains("id"))
-      return {{"error", {{"code", -32602}, {"message", "game.removeCustomFolder requires id"}}}};
-    return {{"result", games_.removeCustomFolder(params["id"])}};
-  }
   if (method == "shutdown") {
     markShutdown();
     return {{"result", true}};
@@ -180,6 +165,11 @@ nlohmann::json Rpc::dispatch(const nlohmann::json& req)
 
 nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
 {
+  const bool monitorChanged =
+      params.contains("capture") && params["capture"].contains("monitor") &&
+      params["capture"]["monitor"].is_number_integer() &&
+      params["capture"]["monitor"].get<int>() != config_.capture.monitor;
+  const size_t oldAudioTrackCount = 1 + std::min<size_t>(config_.audioSources.size(), 5);
   // Detect resolution/fps changes before applying (they need obs_reset_video).
   bool resChanged = false;
   if (params.contains("video")) {
@@ -199,22 +189,34 @@ nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
   }
 
   auto touched = config_.applyPartial(params);
+  const size_t newAudioTrackCount = 1 + std::min<size_t>(config_.audioSources.size(), 5);
+  const bool audioTrackCountChanged = oldAudioTrackCount != newAudioTrackCount;
   config_.save();
+  const bool fullRestart = resChanged || monitorChanged;
+  if (fullRestart)
+    restartVideoPipeline();
 
   for (const auto& key : touched) {
-    if (key == "capture")
-      sources_.applyVideoSource();
-    else if (key == "audio")
-      sources_.applyAudioSources();
-    else if (key == "video") {
-      if (resChanged)
-        restartVideoPipeline();
-      else
+    if (key == "capture") {
+      if (!fullRestart)
+        sources_.applyVideoSource();
+    } else if (key == "audio") {
+      if (!fullRestart) {
+        sources_.applyAudioSources();
+        // Enabled/gain changes only replace the live source mix. Preserve the
+        // ring and an active recording; a structural row-count change still
+        // needs fresh output track bindings.
+        if (audioTrackCountChanged)
+          restartCaptureOutputs();
+      }
+    } else if (key == "video") {
+      if (!fullRestart)
         restartCaptureOutputs();
-    } else if (key == "replay")
+    } else if (key == "replay") {
       ring_.updateCaps();
-    else if (key == "game")
+    } else if (key == "game") {
       games_.onConfigChanged();
+    }
   }
 
   return {{"applied", touched}, {"state", buildState()}};
@@ -232,22 +234,28 @@ void Rpc::restartCaptureOutputs()
 
 void Rpc::restartVideoPipeline()
 {
-  // Resolution/fps changes need obs_reset_video, which requires every output
-  // and source stopped and released. Order: recording -> ring -> sources ->
-  // obs teardown -> re-init -> re-apply -> restart.
+  // Resolution/fps/monitor changes need obs_reset_video, which requires every
+  // output and source stopped and released. Stop the watchdog first so its
+  // activity callback cannot restart the ring during the reset.
   const bool wasRecording = recorder_.active();
+  sources_.stopWatchdog();
   recorder_.stopAndWait();
   ring_.stop();
   sources_.releaseAll();
 
-  app_.shutdown();
-  app_.init();
+  if (!app_.resetVideo()) {
+    events_.emit("error", {{"code", "CAPTURE_INIT_FAILED"}, {"message", app_.lastError()}});
+    return;
+  }
 
   sources_.applyVideoSource();
   sources_.applyAudioSources();
-  ring_.start();
-  if (wasRecording)
+  const bool ringStarted = ring_.start();
+  if (!ringStarted)
+    events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Replay ring failed to restart"}});
+  if (wasRecording && ringStarted)
     recorder_.start();
+  sources_.startWatchdog();
 }
 
 nlohmann::json Rpc::methodRecordingStart()
