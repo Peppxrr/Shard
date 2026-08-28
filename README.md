@@ -1,13 +1,12 @@
 # Shard
-**IMPORTANT**
-This is entirely Ai coded I am not an actual developer there will be plenty of bugs and ui issues. Create an issue and let me know about any bugs and why they happen or commit a fix yourself.
 
+> **Status:** Shard is in early development and uses extensive AI-assisted development. Bugs, rough edges, and UI issues are expected. Bug reports and focused contributions are welcome; contributors are responsible for reviewing and testing what they submit.
 
 **A local-first Windows game clipper built on OBS.**
 
 Shard keeps a rolling replay buffer in RAM, detects running games, and saves the last few seconds or minutes with a global hotkey. The Electron desktop app includes a searchable clip library, video viewer, non-destructive editor, multi-track audio controls, and target-size exports for services such as Discord.
 
-> **Status:** early development. Windows is the supported runtime today; the core keeps platform-specific capture code isolated for future Linux work.
+Windows is the supported runtime today; the core keeps platform-specific capture code isolated for future Linux work.
 
 **Current release:** [Shard v0.1.2](https://github.com/Peppxrr/Shard/releases/tag/v0.1.2) — Windows installer and portable build.
 
@@ -222,10 +221,20 @@ For normal server startup, `PORT <n>` is always the first stdout line. Diagnosti
 - Clip metadata is stored in a local SQLite database.
 - Shard does not upload clips or telemetry.
 
-## License
+## Contributing and security
 
-Shard is licensed under **GPL-2.0**. See [`LICENSE`](LICENSE).
+Contributions are welcome through pull requests. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the expected workflow and testing guidance.
 
-Shard embeds and modifies OBS Studio components under GPL-2.0. Attribution and related notices are in [`NOTICE`](NOTICE). FFmpeg and other staged runtime components retain their respective upstream licenses.
+Please avoid posting vulnerability details publicly before they can be investigated. See [`SECURITY.md`](SECURITY.md) for the security-reporting policy.
+
+## License and attribution
+
+Shard is licensed under **GNU GPL v2.0**. See [`LICENSE`](LICENSE).
+
+Shard is an independent project built on and incorporating modified OBS Studio components. OBS Studio is Copyright (C) Lain Bailey and contributors and is distributed under the GNU General Public License. Shard is not affiliated with or endorsed by the OBS Project. Attribution and third-party notices are in [`NOTICE`](NOTICE).
+
+The repository includes the pinned OBS source used by Shard together with the relevant patches/build workflow so that the corresponding source for distributed OBS-derived components remains available.
+
+FFmpeg and other staged runtime components retain their respective upstream licenses.
 
 UI icons are based on [Feather Icons](https://github.com/feathericons/feather) (MIT License, Copyright (c) 2013-2023 Cole Bemis).
