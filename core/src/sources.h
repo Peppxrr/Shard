@@ -13,7 +13,7 @@
 #include <thread>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 inline uint64_t duration_ms_now()
 {
@@ -155,4 +155,4 @@ private:
   mutable std::mutex sourceMutex_;
 };
 
-} // namespace clipforge
+} // namespace shard

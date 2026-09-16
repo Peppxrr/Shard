@@ -41,7 +41,7 @@ static int g_failures = 0;
     }                                                                                                     \
   } while (0)
 
-using namespace clipforge;
+using namespace shard;
 
 // ------------------------------------------------------------ test fixtures
 
@@ -88,7 +88,8 @@ DetectionResult detectWith(const GameRegistry& reg, const ProcessInfo& p,
                            std::function<std::vector<uint32_t>(uint32_t)> chain = {},
                            std::function<ProcessInfo(uint32_t)> lookup = {}, WindowFacts wf = {},
                            int64_t nowMs = 60000, RuntimeFacts runtime = {},
-                           int64_t foregroundIntentMs = 0, const GameDefinition* productHint = nullptr)
+                           int64_t foregroundIntentMs = 0, const GameDefinition* productHint = nullptr,
+                           int64_t visibleWindowMs = 0)
 {
   DetectContext ctx;
   ctx.registry = &reg;
@@ -102,6 +103,7 @@ DetectionResult detectWith(const GameRegistry& reg, const ProcessInfo& p,
   ctx.nowMs = nowMs;
   ctx.recentProcess = p.startMs > 0 && nowMs >= p.startMs && nowMs - p.startMs <= 15000;
   ctx.foregroundIntentMs = foregroundIntentMs;
+  ctx.visibleWindowMs = visibleWindowMs;
   return GameDetector::detect(p, ctx);
 }
 
@@ -356,6 +358,13 @@ static void testRemoveUserAndDiscovered()
   reg.mergeDiscovered(d);
   CHECK(reg.removeDiscoveredGame("d:steam:5"));
   CHECK(reg.findByExe("disc.exe") == nullptr);
+  CHECK(reg.isIgnoredExe("disc.exe"));
+  reg.mergeDiscovered(d);
+  CHECK(reg.findByExe("disc.exe") == nullptr);
+  CHECK(reg.removeIgnoredExe("disc.exe"));
+  CHECK(!reg.isIgnoredExe("disc.exe"));
+  reg.mergeDiscovered(d);
+  CHECK(reg.findByExe("disc.exe") != nullptr);
 }
 
 // --------------------------------------------------------------- detector --
@@ -700,6 +709,20 @@ static void testSessionPrimarySwitchAndFocus()
   mgr.onProcessExited(901);
   CHECK_EQ(mgr.count(), (size_t)1);
   CHECK_EQ(mgr.primary().gameId, std::string("u:game-a"));
+}
+
+static void testBackgroundSessionAdmission()
+{
+  GameSessionManager mgr;
+  mgr.onDetected(detected("u:a", "Game A"), proc("a.exe", 910), false);
+  CHECK_EQ(mgr.primary().gameId, std::string("u:a"));
+  mgr.onDetected(detected("u:b", "Game B"), proc("b.exe", 911), false);
+  CHECK_EQ(mgr.count(), (size_t)2);
+  CHECK_EQ(mgr.primary().gameId, std::string("u:a"));
+  mgr.setPrimaryByGameId("u:b");
+  CHECK_EQ(mgr.primary().gameId, std::string("u:b"));
+  mgr.onProcessExited(911);
+  CHECK_EQ(mgr.primary().gameId, std::string("u:a"));
 }
 
 // ---------------------------------------------------------------- launchers
@@ -1055,7 +1078,82 @@ static void testInstallPathFallbackStrongEvidence()
 
   const auto backgroundRenderer =
       detectWith(reg, helper, {}, {}, gameWindow(false), 60000, graphicsRuntime());
-  CHECK((int)backgroundRenderer.decision != (int)DetectionResult::Decision::Detected);
+  CHECK_EQ((int)backgroundRenderer.decision, (int)DetectionResult::Decision::Detected);
+}
+
+static void testEditorsAndVisibleGames()
+{
+  TestDir dir("editors-visible-games");
+  GameRegistry reg;
+  reg.setPath((dir.root / "games.json").string());
+  reg.load();
+  RuntimeFacts editor = gameInputRuntime();
+  editor.gameRuntime = true;
+  // VRChat avatar authoring: controller and engine DLLs are not game identity
+  // when the process is Unity Editor, regardless of focus or dwell.
+  const ProcessInfo unity = proc("unity.exe", 950, 0, "c:\\unity\\editor\\unity.exe", 59000,
+                                 "unity.exe -projectPath c:\\avatars\\my-avatar");
+  for (bool foreground : {false, true}) {
+    CHECK_EQ((int)detectWith(reg, unity, {}, {}, gameWindow(foreground, "My Avatar - Unity"),
+                            60000, editor, 10000, nullptr, 10000).decision,
+             (int)DetectionResult::Decision::Ignored);
+  }
+  // Old learned false positives and even misleading launcher containment
+  // must not overrule the editor role.
+  GameDefinition learned;
+  learned.id = "d:runtime:unity";
+  learned.name = "My Avatar";
+  learned.executables = {"unity.exe"};
+  learned.productType = "game";
+  reg.mergeDiscovered(learned);
+  CHECK_EQ((int)detectWith(reg, unity, {}, {}, gameWindow(), 60000, editor, 5000).decision,
+           (int)DetectionResult::Decision::Ignored);
+  editor.editorRuntime = true;
+  CHECK_EQ((int)detectWith(reg, proc("renamed-editor.exe", 951), {}, {}, gameWindow(),
+                          60000, editor, 5000).decision, (int)DetectionResult::Decision::Ignored);
+  WindowFacts editorWindow = gameWindow();
+  editorWindow.windowClass = "UnityContainerWndClass";
+  CHECK_EQ((int)detectWith(reg, proc("custom.exe", 952), {}, {}, editorWindow, 60000,
+                          gameInputRuntime(), 5000).decision, (int)DetectionResult::Decision::Ignored);
+
+  // Actual Unity games stay immediate, even before focus and with an editor
+  // parent. Titles mentioning Unity/project/editor are never deny rules.
+  for (const char* exe : {"vrchat.exe", "standalone.exe"}) {
+    CHECK_EQ((int)detectWith(reg, proc(exe, 953, 950, "", 59000), {}, {},
+                            gameWindow(false, "Unity Project Game"), 60000, graphicsRuntime(true)).decision,
+             (int)DetectionResult::Decision::Detected);
+  }
+  // Already-running games on another monitor qualify after a visible dwell;
+  // old processes need not be relaunched or clicked.
+  const ProcessInfo oldGame = proc("old-game.exe", 954, 0, "", 1000);
+  CHECK_EQ((int)detectWith(reg, oldGame, {}, {}, gameWindow(false), 60000,
+                          graphicsRuntime(true), 0, nullptr, 1600).decision,
+           (int)DetectionResult::Decision::Detected);
+  CHECK_EQ((int)detectWith(reg, oldGame, {}, {}, gameWindow(false), 60000,
+                          gameInputRuntime(), 0, nullptr, 2600).decision,
+           (int)DetectionResult::Decision::Detected);
+  CHECK_EQ((int)detectWith(reg, oldGame, {}, {}, gameWindow(false), 60000,
+                          gameInputRuntime(), 0, nullptr, 500).decision,
+           (int)DetectionResult::Decision::Candidate);
+  CHECK_EQ((int)detectWith(reg, oldGame, {}, {}, gameWindow(false), 60000,
+                          graphicsRuntime(), 0, nullptr, 60000).decision,
+           (int)DetectionResult::Decision::Candidate);
+  WindowFacts hidden = gameWindow(false);
+  hidden.captureable = false;
+  CHECK((int)detectWith(reg, oldGame, {}, {}, hidden, 60000,
+                        graphicsRuntime(true), 0, nullptr, 60000).decision !=
+        (int)DetectionResult::Decision::Detected);
+
+  GameDefinition user;
+  user.id = "u:editor";
+  user.name = "Explicit editor recording";
+  user.executables = {"unity.exe"};
+  reg.upsertUserGame(user);
+  CHECK_EQ((int)detectWith(reg, unity, {}, {}, gameWindow(false), 60000, editor).decision,
+           (int)DetectionResult::Decision::Detected);
+  reg.addIgnoredExe("unity.exe");
+  CHECK_EQ((int)detectWith(reg, unity, {}, {}, gameWindow(false), 60000, editor).decision,
+           (int)DetectionResult::Decision::Ignored);
 }
 
 
@@ -1141,6 +1239,7 @@ int main()
     testDetectorUserGame();
     std::printf("ok: detector/user\n");
     testDetectorNonGames();
+    testEditorsAndVisibleGames();
     std::printf("ok: detector/non-games\n");
     testDetectorLauncherChain();
     std::printf("ok: detector/launcher-chain\n");
@@ -1156,6 +1255,7 @@ int main()
     testSessionMultiPidDedupe();
     std::printf("ok: session/multi-pid\n");
     testSessionPrimarySwitchAndFocus();
+    testBackgroundSessionAdmission();
     std::printf("ok: session/primary-focus\n");
     // Launchers
     testSteamDiscovery();

@@ -3,6 +3,7 @@
 # already cross-platform via obs-studio).
 appId: com.shard.app
 productName: Shard
+buildVersion: 0.1.2.1
 directories:
   output: release
   buildResources: build
@@ -11,6 +12,12 @@ files:
   - dist/renderer/**/*
   - package.json
 extraResources:
+  - from: ../NOTICE
+    to: NOTICE
+  - from: ../LICENSE
+    to: LICENSE
+  - from: resources/licenses
+    to: licenses
   - from: resources/core-bin
     to: core-bin
     filter:
@@ -31,9 +38,10 @@ win:
       arch: [x64]
 nsis:
   oneClick: false
+  artifactName: ${productName}-Setup-${buildVersion}.${ext}
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: always
   shortcutName: Shard
 portable:
-  artifactName: ${productName}-${version}-portable.exe
+  artifactName: ${productName}-${buildVersion}-portable.${ext}

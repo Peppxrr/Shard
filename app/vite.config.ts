@@ -15,5 +15,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Installer output can contain locked runtime DLLs. It is not source code
+    // and must not trigger reloads or compete with electron-builder's renames.
+    watch: { ignored: /[\\/]release(?:[\\/]|$)/ },
   },
 });

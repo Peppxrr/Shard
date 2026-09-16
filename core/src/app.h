@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 struct Events {
   // Called from arbitrary threads. Implementations must be thread-safe.
@@ -69,4 +69,4 @@ private:
   uint32_t baseHeight_ = 1080;
 };
 
-} // namespace clipforge
+} // namespace shard

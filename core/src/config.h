@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 // One entry in the audio mix. `kind` mirrors the OBS wasapi source family:
 //   "input"   -> wasapi_input_capture        (mic / Voicemeeter AUX in)
@@ -94,4 +94,4 @@ struct Config {
   std::vector<std::string> applyPartial(const nlohmann::json& j);
 };
 
-} // namespace clipforge
+} // namespace shard

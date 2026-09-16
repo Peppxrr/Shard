@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ClipRecord } from "../../shared/contracts";
 import { Icon, IconButton, Button, EmptyState, Modal, ShardSelect } from "./ui";
-import { StandaloneVideoPlayer } from "../editor/VideoPreview";
+import { mediaFileUrl, StandaloneVideoPlayer } from "../editor/VideoPreview";
 
 interface Props {
   clips: ClipRecord[];
@@ -72,10 +72,14 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
 
   return (
     <div className="library">
+      <header className="page__head">
+        <h1 className="page__title">Library</h1>
+        <p className="dim page__sub">Your clips, recordings, and edits in one place.</p>
+      </header>
       <div className="toolbar">
         <label className="search">
           <Icon name="search" size={15} />
-          <input type="search" placeholder="Search clips…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <input type="search" aria-label="Search clips" placeholder="Search clips…" value={search} onChange={(e) => setSearch(e.target.value)} />
         </label>
         <ShardSelect
           value={gameFilter}
@@ -107,9 +111,9 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
       {filtered.length === 0 ? (
         <EmptyState
           icon={<Icon name="film" size={30} />}
-          title="No clips yet"
+          title={clips.length ? "No matching clips" : "No clips yet"}
         >
-          Hit your <strong>Save clip</strong> hotkey to pull a replay from the buffer.
+          {clips.length ? "Try another search or change your filters." : <>Use your <strong>Save clip</strong> hotkey to save a replay here.</>}
         </EmptyState>
       ) : (
         <div className="grid">
@@ -147,12 +151,11 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
           window.shard.startDrag(clip.path, clip.thumb || undefined);
         }}
       >
-        {clip.thumb ? <img className="clip__img" src={`file://${clip.thumb}`} alt="" /> : <div className="clip__nothumb"><Icon name="film" size={26} /></div>}
+        {clip.thumb ? <img className="clip__img" src={mediaFileUrl(clip.thumb)} alt="" /> : <div className="clip__nothumb"><Icon name="film" size={26} /></div>}
         <div className="clip__tags">
           {isFav && <span className="badge badge--fav"><Icon name="star" size={11} /></span>}
-          {clip.source === "edited" && <span className="badge badge--edited">Edited</span>}
         </div>
-        <span className="badge badge--type">{clip.source}</span>
+        <span className={`badge badge--type${clip.source === "edited" ? " badge--edited" : ""}`}>{clip.source}</span>
         <span className="badge badge--dur num">{fmtDuration(clip.durationMs)}</span>
       </div>
       <div className="clip__meta">
@@ -182,19 +185,30 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
 
 // Viewer modal — reuses the shared Modal. Preserves reveal + one-click export; Edit opens the trim editor.
 export function Viewer({ clip, onClose, onEdit }: { clip: ClipRecord; onClose: () => void; onEdit?: () => void }) {
+  const [preparingExport, setPreparingExport] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const exportWholeClip = async () => {
-    const tracks = await window.shard.probeTracks(clip.id);
-    void window.shard.startExport(clip.id, {
-      segments: [{ start: 0, end: clip.durationMs / 1000 }],
-      audioTracks: tracks.map((track) => ({
-        streamIndex: track.streamIndex,
-        name: track.name,
-        included: true,
-        muted: false,
-        volume: 1,
-      })),
-    }).catch((error: unknown) => console.error("[editor] quick export failed", error));
-    onClose();
+    if (preparingExport) return;
+    setPreparingExport(true);
+    setExportError(null);
+    try {
+      const tracks = await window.shard.probeTracks(clip.id);
+      void window.shard.startExport(clip.id, {
+        segments: [{ start: 0, end: clip.durationMs / 1000 }],
+        audioTracks: tracks.map((track) => ({
+          streamIndex: track.streamIndex,
+          name: track.name,
+          included: true,
+          muted: false,
+          volume: 1,
+        })),
+      }).catch((error: unknown) => console.error("[editor] quick export failed", error));
+      onClose();
+    } catch (error) {
+      setExportError(`Could not prepare export: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setPreparingExport(false);
+    }
   };
   return (
     <Modal open onClose={onClose} size="lg" title={clip.game ?? "Untagged"}
@@ -203,9 +217,10 @@ export function Viewer({ clip, onClose, onEdit }: { clip: ClipRecord; onClose: (
         <Button icon={<Icon name="folderOpen" size={15} />} onClick={() => window.shard.revealInExplorer(clip.path)}>Reveal in Explorer</Button>
         <span className="spacer" />
         {onEdit && <Button icon={<Icon name="scissor" size={15} />} onClick={onEdit}>Edit</Button>}
-        <Button variant="primary" icon={<Icon name="export" size={15} />} onClick={() => void exportWholeClip()}>Export</Button>
+        <Button variant="primary" loading={preparingExport} icon={<Icon name="export" size={15} />} onClick={() => void exportWholeClip()}>Export</Button>
       </>}>
       <StandaloneVideoPlayer sourcePath={clip.path} loop />
+      {exportError && <p className="viewer-player__error" role="alert">{exportError}</p>}
     </Modal>
   );
 }

@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 // Manual recording: an ffmpeg_muxer output (mkv container — crash-safe) with
 // its own encoder instances identical to the ring's. The app remuxes the mkv
@@ -36,6 +36,8 @@ public:
 
 private:
   static void onOutputStop(void* data, calldata_t* cd);
+  void releaseOutput();
+  bool startWithVideoEncoder(const std::string& videoId);
 
   App& app_;
   Config& config_;
@@ -49,4 +51,4 @@ private:
   std::string currentPath_;
 };
 
-} // namespace clipforge
+} // namespace shard

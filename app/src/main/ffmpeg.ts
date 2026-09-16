@@ -2,14 +2,97 @@
 // probing, and the export pipeline.
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
+import { TimelinePreviews } from "./timeline-previews";
 import { app } from "electron";
 import { existsSync, mkdirSync, statSync, promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
-import type { AudioTrackInfo, WaveformData } from "../shared/contracts";
+import type { AudioTrackInfo, ExportEncoderInfo, WaveformData } from "../shared/contracts";
 
 export function ffmpegBin(): string {
   const packaged = path.join(process.resourcesPath ?? "", "core-bin");
   return existsSync(packaged) ? packaged : path.join(app.getAppPath(), "resources", "core-bin");
+}
+
+const EXPORT_CPU_ENCODERS: Omit<ExportEncoderInfo, "preferred">[] = [
+  { id: "libx264", label: "x264 H.264 (CPU)", codec: "h264", vendor: "cpu", hardware: false },
+  { id: "libx265", label: "x265 HEVC (CPU)", codec: "hevc", vendor: "cpu", hardware: false },
+  { id: "libsvtav1", label: "SVT-AV1 (CPU)", codec: "av1", vendor: "cpu", hardware: false },
+];
+
+const EXPORT_GPU_ENCODERS: Omit<ExportEncoderInfo, "preferred">[] = [
+  { id: "h264_nvenc", label: "NVIDIA NVENC H.264", codec: "h264", vendor: "nvidia", hardware: true },
+  { id: "hevc_nvenc", label: "NVIDIA NVENC HEVC", codec: "hevc", vendor: "nvidia", hardware: true },
+  { id: "av1_nvenc", label: "NVIDIA NVENC AV1", codec: "av1", vendor: "nvidia", hardware: true },
+  { id: "h264_amf", label: "AMD AMF H.264", codec: "h264", vendor: "amd", hardware: true },
+  { id: "hevc_amf", label: "AMD AMF HEVC", codec: "hevc", vendor: "amd", hardware: true },
+  { id: "av1_amf", label: "AMD AMF AV1", codec: "av1", vendor: "amd", hardware: true },
+  { id: "h264_qsv", label: "Intel Quick Sync H.264", codec: "h264", vendor: "intel", hardware: true },
+  { id: "hevc_qsv", label: "Intel Quick Sync HEVC", codec: "hevc", vendor: "intel", hardware: true },
+  { id: "av1_qsv", label: "Intel Quick Sync AV1", codec: "av1", vendor: "intel", hardware: true },
+];
+
+let exportEncoderProbe: Promise<ExportEncoderInfo[]> | null = null;
+
+// Hardware encoder names in `ffmpeg -encoders` only mean the build contains a
+// wrapper. A one-frame encode proves the installed driver/GPU can initialize
+// it. The result is cached for the lifetime of the app.
+export function listExportEncoders(): Promise<ExportEncoderInfo[]> {
+  exportEncoderProbe ??= detectExportEncoders();
+  return exportEncoderProbe;
+}
+
+async function detectExportEncoders(): Promise<ExportEncoderInfo[]> {
+  const preferredVendor = await activeGpuVendor();
+  const detected: Omit<ExportEncoderInfo, "preferred">[] = [];
+  for (const encoder of EXPORT_GPU_ENCODERS) {
+    if (await probeExportEncoder(encoder.id))
+      detected.push(encoder);
+  }
+  const codecOrder = { h264: 0, hevc: 1, av1: 2 } as const;
+  detected.sort((a, b) => {
+    const aPrimary = a.vendor === preferredVendor ? 0 : 1;
+    const bPrimary = b.vendor === preferredVendor ? 0 : 1;
+    return aPrimary - bPrimary || a.vendor.localeCompare(b.vendor) || codecOrder[a.codec] - codecOrder[b.codec];
+  });
+  const preferred = detected.find((encoder) => encoder.vendor === preferredVendor && encoder.codec === "h264")
+    ?? detected.find((encoder) => encoder.codec === "h264")
+    ?? EXPORT_CPU_ENCODERS[0];
+  return [...detected, ...EXPORT_CPU_ENCODERS].map((encoder) => ({
+    ...encoder,
+    preferred: encoder.id === preferred.id,
+  }));
+}
+
+async function activeGpuVendor(): Promise<ExportEncoderInfo["vendor"] | ""> {
+  try {
+    const info = await app.getGPUInfo("basic") as unknown as { gpuDevice?: Array<{ active?: boolean; vendorId?: number | string }> };
+    const device = info.gpuDevice?.find((entry) => entry.active) ?? info.gpuDevice?.[0];
+    const id = typeof device?.vendorId === "string" ? Number.parseInt(device.vendorId, 16) : Number(device?.vendorId);
+    if (id === 0x10de) return "nvidia";
+    if (id === 0x1002 || id === 0x1022) return "amd";
+    if (id === 0x8086) return "intel";
+  } catch {}
+  return "";
+}
+
+function probeExportEncoder(encoder: ExportEncoderInfo["id"]): Promise<boolean> {
+  const exe = path.join(ffmpegBin(), "ffmpeg.exe");
+  const { promise, resolve } = Promise.withResolvers<boolean>();
+  const child = spawn(exe, [
+    "-hide_banner", "-loglevel", "error",
+    "-f", "lavfi", "-i", "color=size=256x256:rate=1",
+    "-frames:v", "1", "-an", "-c:v", encoder, "-f", "null", "-",
+  ], { windowsHide: true, stdio: "ignore" });
+  const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+  child.once("error", () => {
+    clearTimeout(timer);
+    resolve(false);
+  });
+  child.once("close", (code) => {
+    clearTimeout(timer);
+    resolve(code === 0);
+  });
+  return promise;
 }
 
 export interface ProbeResult {
@@ -156,9 +239,9 @@ export function makeThumbnail(src: string, dir: string): string | null {
 // List every audio stream with both its absolute stream index and its
 // audio-relative index. Export uses the absolute index to avoid FFmpeg's
 // `a:N` selector ambiguity when video and subtitle streams are present.
-export function probeAudioTracks(file: string): AudioTrackInfo[] {
+export async function probeAudioTracks(file: string): Promise<AudioTrackInfo[]> {
   const exe = path.join(ffmpegBin(), "ffprobe.exe");
-  const out = runSync(exe, [
+  const out = await runAsync(exe, [
     "-v", "error",
     "-select_streams", "a",
     "-show_entries", "stream=index,codec_name,channels,sample_rate,bit_rate:stream_tags=title,name,handler_name,language",
@@ -355,98 +438,10 @@ export function generateWaveform(
   return promise;
 }
 
-const timelineFrameCache = new Map<string, Promise<string[]>>();
-const MAX_TIMELINE_FRAME_DIRS = 12;
-const TIMELINE_FRAME_PRUNE_TO = 8;
-
-export function generateTimelineFrames(file: string, duration: number, requestedCount: number): Promise<string[]> {
-  if (!Number.isFinite(duration) || duration <= 0) return Promise.reject(new Error("Invalid clip duration"));
-  const count = Math.max(8, Math.min(48, Math.round(requestedCount)));
-  const modified = statSync(file).mtimeMs;
-  const key = createHash("sha256").update(`${file}\u0000${modified}\u0000${count}`).digest("hex").slice(0, 24);
-  const cached = timelineFrameCache.get(key);
-  if (cached) return cached;
-  const pending = extractTimelineFrames(file, duration, count, key);
-  timelineFrameCache.set(key, pending);
-  void pending.finally(() => timelineFrameCache.delete(key));
-  return pending;
-}
-
-async function extractTimelineFrames(file: string, duration: number, count: number, key: string): Promise<string[]> {
-  const root = path.join(app.getPath("temp"), "shard-editor-frames");
-  const directory = path.join(root, key);
-  await fs.mkdir(directory, { recursive: true });
-  await pruneTimelineFrameDirectories(root, key);
-  const existing = await listTimelineFrames(directory);
-  if (existing.length === count) {
-    const now = new Date();
-    await fs.utimes(directory, now, now).catch(() => {});
-    return existing;
-  }
-  await fs.rm(directory, { recursive: true, force: true });
-  await fs.mkdir(directory, { recursive: true });
-
-  const executable = path.join(ffmpegBin(), "ffmpeg.exe");
-  const outputPattern = path.join(directory, "frame-%03d.jpg");
-  const child = spawn(executable, [
-    "-y", "-v", "error",
-    "-i", file,
-    "-an",
-    "-vf", `fps=${count}/${duration},scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2:color=black`,
-    "-frames:v", String(count),
-    "-q:v", "5",
-    outputPattern,
-  ], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
-  const { promise, resolve, reject } = Promise.withResolvers<string[]>();
-  let stderr = "";
-  child.stderr.on("data", (chunk: Buffer) => {
-    stderr = `${stderr}${chunk.toString("utf8")}`.slice(-32768);
-  });
-  child.once("error", reject);
-  child.once("close", (code) => {
-    if (code !== 0) {
-      void fs.rm(directory, { recursive: true, force: true });
-      reject(new Error(`Timeline preview failed (ffmpeg ${code}): ${stderr.trim() || "no diagnostic output"}`));
-      return;
-    }
-    void listTimelineFrames(directory).then((frames) => {
-      if (!frames.length) {
-        reject(new Error("Timeline preview produced no frames"));
-        return;
-      }
-      resolve(frames);
-    }, reject);
-  });
-  return promise;
-}
-
-async function listTimelineFrames(directory: string): Promise<string[]> {
-  try {
-    return (await fs.readdir(directory))
-      .filter((name) => /^frame-\d+\.jpg$/i.test(name))
-      .sort()
-      .map((name) => path.join(directory, name));
-  } catch {
-    return [];
-  }
-}
-
-async function pruneTimelineFrameDirectories(root: string, keepKey: string): Promise<void> {
-  const entries = (await fs.readdir(root, { withFileTypes: true }))
-    .filter((entry) => entry.isDirectory() && entry.name !== keepKey);
-  if (entries.length < MAX_TIMELINE_FRAME_DIRS) return;
-  const candidates = (await Promise.all(entries.map(async (entry) => {
-    const candidatePath = path.join(root, entry.name);
-    try {
-      return { path: candidatePath, modified: (await fs.stat(candidatePath)).mtimeMs };
-    } catch {
-      return null;
-    }
-  }))).filter((entry): entry is { path: string; modified: number } => entry !== null);
-  candidates.sort((a, b) => a.modified - b.modified);
-  await Promise.all(candidates.slice(0, Math.max(0, candidates.length - TIMELINE_FRAME_PRUNE_TO)).map((candidate) =>
-    fs.rm(candidate.path, { recursive: true, force: true }).catch(() => {}),
-  ));
+let timelinePreviews: TimelinePreviews | undefined;
+export function editorTimelinePreviews(): TimelinePreviews {
+  return timelinePreviews ??= new TimelinePreviews(
+    path.join(app.getPath("temp"), "shard-editor-frames"), path.join(ffmpegBin(), "ffmpeg.exe"));
 }
 
 function audioTrackName(tags: { title?: string; name?: string; handler_name?: string; language?: string } | undefined, index: number): string {

@@ -1,11 +1,12 @@
 #include "detector.h"
 
 #include "game_util.h"
+#include "runtime_roles.h"
 
 #include <map>
 #include <set>
 
-namespace clipforge {
+namespace shard {
 
 namespace {
 
@@ -218,6 +219,13 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
     return result;
   }
 
+  if (ctx.runtime.editorRuntime || isEditorProcess(p.exe, p.commandLine, ctx.window.windowClass)) {
+    result.reasons.push_back({"game development editor", -200,
+                              "authoring/editor process; preview, Play mode, and gaming APIs do not establish a game"});
+    result.score -= 200;
+    return result;
+  }
+
   const bool mediaTarget = containsMediaTarget(p.commandLine) || containsMediaTarget(ctx.window.title);
   const bool mediaApplication = mediaTarget || (ctx.runtime.mediaRuntime && (!product || runtimeProduct));
   if (mediaApplication && !ctx.runtime.gameRuntime) {
@@ -253,11 +261,11 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
   // available only after launcher metadata positively identifies the product
   // as a game; a generic application can never dwell its way into detection.
   const bool stableProductWindow = confirmedProduct && largeRenderWindow &&
-                                   ctx.foregroundIntentMs >= 1500 &&
+                                   (ctx.foregroundIntentMs >= 1500 || ctx.visibleWindowMs >= 1500) &&
                                    !ctx.runtime.webRuntime;
   if (stableProductWindow) {
     result.reasons.push_back({"stable confirmed-game window", 25,
-                              "launcher-classified game owns the foreground capture window for >= 1.5 s"});
+                              "launcher-classified game owns a stable capture window for >= 1.5 s"});
     result.score += 25;
   }
 
@@ -267,19 +275,19 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
   // windows have the render surface but not the paired gaming APIs.
   const bool stableGameInputSurface =
       ctx.runtime.gameInput && ctx.runtime.graphicsApi && largeRenderWindow &&
-      (runtimeProduct || ctx.foregroundIntentMs >= 2500);
+      (runtimeProduct || ctx.foregroundIntentMs >= 2500 || ctx.visibleWindowMs >= 2500);
   if (stableGameInputSurface) {
     result.reasons.push_back({"stable game-input render surface", 30,
-                              "paired gaming-input APIs render in the foreground for >= 2.5 s"});
+                              "paired gaming-input APIs own a stable render window for >= 2.5 s"});
     result.score += 30;
   }
 
   const bool knownProductShape = confirmedProduct && (renderEvidence || stableProductWindow);
   const bool untrustedProduct = !product || runtimeProduct;
   const bool unknownShape = untrustedProduct && !ctx.runtime.webRuntime &&
-                            ((ctx.recentProcess && ctx.runtime.gameRuntime) ||
+                            (((ctx.recentProcess || runtimeProduct || ctx.visibleWindowMs >= 1500) && ctx.runtime.gameRuntime) ||
                              stableGameInputSurface);
-  const bool liveGameShape = ctx.window.captureable && ctx.window.foreground &&
+  const bool liveGameShape = ctx.window.captureable &&
                              (knownProductShape || unknownShape);
 
   if (liveGameShape) {
@@ -300,12 +308,12 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
     return result;
   }
 
-  // A foreground captureable process may still be loading its graphics DLLs.
+  // A captureable process may still be loading its graphics DLLs.
   // Keep it hot for the next monitor ticks instead of waiting 30 seconds or
   // promoting it merely because a launcher exists in its ancestor chain.
-  if (ctx.window.captureable && ctx.window.foreground)
+  if (ctx.window.captureable)
     result.decision = DetectionResult::Decision::Candidate;
   return result;
 }
 
-} // namespace clipforge
+} // namespace shard

@@ -137,6 +137,8 @@ if ($Clean) {
 
 New-Item -ItemType Directory -Force $stageDir | Out-Null
 
+& (Join-Path $PSScriptRoot "setup-obs-links.ps1") -Root $root
+
 Write-Host "==> Configuring (obs-deps auto-downloaded by obs-studio's CMake) =="
 cmake -S $coreDir -B $buildDir `
   -G "Visual Studio 17 2022" `

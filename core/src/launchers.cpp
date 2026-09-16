@@ -18,7 +18,7 @@
 #include <windows.h>
 #endif
 
-namespace clipforge {
+namespace shard {
 
 namespace fs = std::filesystem;
 
@@ -971,4 +971,4 @@ LauncherDiscovery::ScanOutput LauncherDiscovery::scanAll()
   return output;
 }
 
-} // namespace clipforge
+} // namespace shard

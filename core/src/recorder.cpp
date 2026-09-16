@@ -9,7 +9,7 @@
 #include <filesystem>
 #include <thread>
 
-namespace clipforge {
+namespace shard {
 
 namespace fs = std::filesystem;
 
@@ -24,15 +24,24 @@ Recorder::~Recorder()
 {
   if (active_.load())
     stop();
+  releaseOutput();
+}
+
+void Recorder::releaseOutput()
+{
   if (output_) {
     signal_handler_t* sh = obs_output_get_signal_handler(output_);
     signal_handler_disconnect(sh, "stop", onOutputStop, this);
     obs_output_release(output_);
+    output_ = nullptr;
   }
-  if (videoEncoder_)
+  if (videoEncoder_) {
     obs_encoder_release(videoEncoder_);
+    videoEncoder_ = nullptr;
+  }
   for (auto* e : audioEncoders_)
     obs_encoder_release(e);
+  audioEncoders_.clear();
 }
 
 void Recorder::onOutputStop(void* data, calldata_t* /*cd*/)
@@ -50,44 +59,7 @@ bool Recorder::start()
   if (active_.load())
     return true;
 
-  // Release a previous (stopped) output/encoders before creating new ones.
-  if (output_) {
-    signal_handler_t* sh = obs_output_get_signal_handler(output_);
-    signal_handler_disconnect(sh, "stop", onOutputStop, this);
-    obs_output_release(output_);
-    output_ = nullptr;
-  }
-  if (videoEncoder_) {
-    obs_encoder_release(videoEncoder_);
-    videoEncoder_ = nullptr;
-  }
-  for (auto* e : audioEncoders_)
-    obs_encoder_release(e);
-  audioEncoders_.clear();
-
-  const std::string videoId = encoders_.resolveVideoEncoderId(config_.video.encoder);
-  videoEncoder_ = obs_video_encoder_create(videoId.c_str(), "rec-video", encoders_.videoSettings(), nullptr);
-  if (!videoEncoder_) {
-    events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Could not create recording video encoder"}});
-    return false;
-  }
-  // Allocate one encoder for each configured row, even while that row is
-  // disabled. Source toggles then change the live mix without splitting the
-  // recording or restarting its output.
-  const int audioTracks = 1 + std::min(static_cast<int>(config_.audioSources.size()), 5);
-  for (int track = 0; track < audioTracks; track++) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "rec-audio-%d", track);
-    obs_encoder_t* aenc = obs_audio_encoder_create("ffmpeg_aac", name, encoders_.audioSettings(), track, nullptr);
-    if (!aenc) {
-      obs_encoder_release(videoEncoder_);
-      videoEncoder_ = nullptr;
-      events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Could not create recording audio encoder"}});
-      return false;
-    }
-    obs_encoder_set_audio(aenc, obs_get_audio());
-    audioEncoders_.push_back(aenc);
-  }
+  releaseOutput();
 
   // Fragmented mp4: crash-safe, no remux step needed.
   // Unique filename: recording-YYYYMMDD-HHMMSS-<microsec>.mp4
@@ -107,19 +79,53 @@ bool Recorder::start()
   fs::create_directories(config_.recordingsDir);
   currentPath_ = (fs::path(config_.recordingsDir) / name).string();
 
+  for (const auto& videoId : encoders_.videoEncoderCandidates(config_.video.encoder)) {
+    if (startWithVideoEncoder(videoId)) {
+      std::fprintf(stderr, "[encoder] recording using %s\n", videoId.c_str());
+      active_.store(true);
+      events_.emit("recording.state", {{"active", true}, {"path", currentPath_}});
+      return true;
+    }
+    std::fprintf(stderr, "[encoder] recording rejected %s; trying fallback\n", videoId.c_str());
+  }
+
+  events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "No supported video encoder could start recording"}});
+  return false;
+}
+
+bool Recorder::startWithVideoEncoder(const std::string& videoId)
+{
+  obs_data_t* videoSettings = encoders_.videoSettings(videoId);
+  videoEncoder_ = obs_video_encoder_create(videoId.c_str(), "rec-video", videoSettings, nullptr);
+  obs_data_release(videoSettings);
+  if (!videoEncoder_)
+    return false;
+
+  // Allocate one encoder for each configured row, even while that row is
+  // disabled. Source toggles then change the live mix without splitting the
+  // recording or restarting its output.
+  const int audioTracks = 1 + std::min(static_cast<int>(config_.audioSources.size()), 5);
+  for (int track = 0; track < audioTracks; track++) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "rec-audio-%d", track);
+    obs_data_t* audioSettings = encoders_.audioSettings();
+    obs_encoder_t* aenc = obs_audio_encoder_create("ffmpeg_aac", name, audioSettings, track, nullptr);
+    obs_data_release(audioSettings);
+    if (!aenc) {
+      releaseOutput();
+      return false;
+    }
+    obs_encoder_set_audio(aenc, obs_get_audio());
+    audioEncoders_.push_back(aenc);
+  }
+
   obs_data_t* s = obs_data_create();
   obs_data_set_string(s, "path", currentPath_.c_str());
   obs_data_set_string(s, "muxer_settings", "movflags=frag_keyframe+empty_moov");
-
   output_ = obs_output_create("ffmpeg_muxer", "recording", s, nullptr);
   obs_data_release(s);
   if (!output_) {
-    obs_encoder_release(videoEncoder_);
-    videoEncoder_ = nullptr;
-    for (auto* e : audioEncoders_)
-      obs_encoder_release(e);
-    audioEncoders_.clear();
-    events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Could not create recording output"}});
+    releaseOutput();
     return false;
   }
 
@@ -133,19 +139,9 @@ bool Recorder::start()
   signal_handler_connect(sh, "stop", onOutputStop, this);
 
   if (!obs_output_start(output_)) {
-    events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Recording failed to start"}});
-    obs_output_release(output_);
-    output_ = nullptr;
-    obs_encoder_release(videoEncoder_);
-    videoEncoder_ = nullptr;
-    for (auto* e : audioEncoders_)
-      obs_encoder_release(e);
-    audioEncoders_.clear();
+    releaseOutput();
     return false;
   }
-
-  active_.store(true);
-  events_.emit("recording.state", {{"active", true}, {"path", currentPath_}});
   return true;
 }
 
@@ -169,4 +165,4 @@ void Recorder::stopAndWait(int timeoutMs)
     std::this_thread::sleep_for(milliseconds(50));
 }
 
-} // namespace clipforge
+} // namespace shard

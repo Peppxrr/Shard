@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 enum class GameSource { Discovered, User };
 
@@ -160,4 +160,4 @@ private:
   int64_t lastSaveMs_ = 0;
 };
 
-} // namespace clipforge
+} // namespace shard

@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 namespace {
 
@@ -211,4 +211,4 @@ void registerX265Encoder()
   obs_register_encoder(&info);
 }
 
-} // namespace clipforge
+} // namespace shard

@@ -7,20 +7,20 @@
 
 :root {
   /* Surfaces (layered: 0 deepest → 2 raised) */
-  --bg-0: #07090f;
-  --bg-1: #0e121a;
-  --bg-2: #151b27;
-  --bg-3: #1c2332;
+  --bg-0: #0b0d12;
+  --bg-1: #12151c;
+  --bg-2: #1a1e27;
+  --bg-3: #232834;
   --bg-4: #252e40;
 
-  --stroke: #1f2735;
-  --stroke-2: #2a3346;
+  --stroke: #272d38;
+  --stroke-2: #343d4c;
   --stroke-3: #39445a;
 
   /* Text */
-  --fg: #eaeefb;
+  --fg: #edf0f7;
   --fg-2: #b1bacf;
-  --fg-3: #79839c;
+  --fg-3: #929db1;
   --fg-4: #565f78;
 
   /* Brand + semantic — blue signature */
@@ -29,7 +29,7 @@
   --accent-ink: #070a12;
   --accent-soft: rgba(102, 157, 255, 0.16);
   --accent-softer: rgba(102, 157, 255, 0.08);
-  --accent-grad: linear-gradient(135deg, #4f9cff 0%, #7c83ff 100%);
+  --accent-grad: linear-gradient(#74a8ff, #74a8ff);
   --accent-grad-soft: linear-gradient(135deg, rgba(79, 156, 255, 0.18), rgba(124, 131, 255, 0.10));
 
   color-scheme: dark;

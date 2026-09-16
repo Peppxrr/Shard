@@ -7,7 +7,7 @@
 #include <fstream>
 #include <filesystem>
 
-namespace clipforge {
+namespace shard {
 
 using namespace std::chrono;
 
@@ -581,6 +581,11 @@ bool GameRegistry::removeIgnoredExe(const std::string& exeLower)
   if (it == ignoredExes_.end())
     return false;
   ignoredExes_.erase(it);
+  // Ignored executable entries remain the authoritative suppression for every
+  // other removed game. Clearing the secondary product-id tombstones lets this
+  // executable qualify again immediately, including records created before
+  // executable-to-product restoration metadata existed.
+  hiddenDiscoveredIds_.clear();
   saveLocked();
   return true;
 }
@@ -598,4 +603,4 @@ std::vector<std::string> GameRegistry::ignoredExes() const
 }
 
 
-} // namespace clipforge
+} // namespace shard

@@ -52,6 +52,8 @@ function WindowControls({ floating = false }: { floating?: boolean }) {
 
 export function App() {
   const [tab, setTab] = useState<Tab>("capture");
+  const mainRef = useRef<HTMLElement>(null);
+  useEffect(() => { mainRef.current?.scrollTo({ top: 0 }); }, [tab]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [savedSettings, setSavedSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [pendingTab, setPendingTab] = useState<Tab | null>(null);
@@ -219,12 +221,15 @@ export function App() {
 
   if (booting) return <div className="boot app--frameless"><WindowControls floating /><Spinner size={22} /><span>Starting…</span></div>;
 
-  const usedBytes = clips.reduce((acc, c) => acc + c.sizeBytes, 0);
+  const usedBytes = clips.reduce(
+    (acc, clip) => acc + (clip.protected === 0 && (settings.storage.deleteEdited || clip.source !== "edited") ? clip.sizeBytes : 0),
+    0,
+  );
 
   return (
     <div className={`app${window.shard.windowControlsSupported ? " app--frameless" : ""}`}>
       <header className="app__bar">
-        <nav className="nav">
+        <nav className="nav" aria-label="Main navigation">
           {TABS.map((t) => (
             <button key={t.id} type="button" className="nav__item" aria-current={tab === t.id ? "page" : undefined} onClick={() => requestTab(t.id)}>
               <span className="ico"><Icon name={t.icon} size={16} /></span>{t.label}
@@ -232,17 +237,15 @@ export function App() {
           ))}
         </nav>
         <span className="spacer" />
-        <LiveStatus />
-        <StorageMeter usedBytes={usedBytes} limitGb={settings.storage.limitGb} />
         {tab === "settings" && (
           <Button variant="primary" size="sm" icon={<Icon name="check" size={15} />} onClick={() => void saveSettings()} disabled={!isDirty}>
-            {saved ? "Saved" : "Save"}
+            {saved && !isDirty ? "Saved" : "Save changes"}
           </Button>
         )}
         <WindowControls />
       </header>
 
-      <main className="app__main">
+      <main className="app__main" ref={mainRef}>
         {tab === "capture" && <CapturePage settings={settings} clips={clips} />}
         {tab === "library" && <LibraryPage clips={clips} onOpenEditor={setEditingClip} />}
         {tab === "games" && <GamesPage settings={settings} onChange={(next) => {
@@ -261,6 +264,11 @@ export function App() {
             });
           }} />}
       </main>
+      <footer className="app__status">
+        <LiveStatus />
+        <span className="spacer" />
+        <StorageMeter usedBytes={usedBytes} limitGb={settings.storage.limitGb} />
+      </footer>
 
       {editingClip && (
         <Editor
@@ -270,7 +278,7 @@ export function App() {
         />
       )}
 
-      {exportProgress && !exportProgress.done && (
+      {exportProgress && !exportProgress.done && editingClip?.id !== exportProgress.clipId && (
         <div className="exportbar">
           <Icon name="link" size={15} />
           <span className="exportbar__phase">{exportProgress.phase}</span>
@@ -284,12 +292,12 @@ export function App() {
       {showUnsaved && (
         <Modal open onClose={() => setShowUnsaved(false)} title="Unsaved changes" sub="You have unsaved settings changes.">
           <p className="field__hint" style={{ lineHeight: "1.6" }}>
-            Do you want to apply your changes or discard them? Apply saves to disk and updates the core.
+            Save your changes before leaving Settings, or discard them to keep your previous settings.
           </p>
           <div className="row" style={{ marginTop: "var(--sp-4)", justifyContent: "flex-end" }}>
             <Button variant="ghost" onClick={() => setShowUnsaved(false)}>Cancel</Button>
-            <Button variant="ghost" onClick={() => void declineAndLeave()}>Decline</Button>
-            <Button variant="primary" onClick={() => void applyAndLeave()}>Apply</Button>
+            <Button variant="ghost" onClick={() => void declineAndLeave()}>Discard changes</Button>
+            <Button variant="primary" onClick={() => void applyAndLeave()}>Save changes</Button>
           </div>
         </Modal>
       )}
@@ -336,12 +344,12 @@ function LiveStatus() {
       {recording && <span className="chip chip--rec"><span className="dot dot--rec" /> REC</span>}
       {capturing ? (
         <span className={`chip ${subject?.kind === "game" ? "chip--game" : "chip--monitor"}`}>
-          <Icon name={subject?.kind === "game" ? "box" : "screen"} size={12} /> {subject?.name ?? (subject?.kind === "game" ? "Game" : "Desktop")}
+          <Icon name={subject?.kind === "game" ? "box" : "screen"} size={12} /><span className="lv__subject" title={subject?.name ?? undefined}>{subject?.name ?? (subject?.kind === "game" ? "Game" : "Desktop")}</span>
         </span>
       ) : (
-        !recording && <span className="chip chip--idle">not capturing</span>
+        !recording && <span className="chip chip--idle">Waiting for capture</span>
       )}
-      {ring !== null && <span className="lv__ring num">{ring}s</span>}
+      {ring !== null && <span className="lv__ring num">{Math.floor(ring)}s buffered</span>}
     </div>
   );
 }
@@ -352,7 +360,7 @@ function StorageMeter({ usedBytes, limitGb }: { usedBytes: number; limitGb: numb
   const pct = limitBytes > 0 ? Math.min(100, (usedBytes / limitBytes) * 100) : 0;
   const cls = pct >= 100 ? "is-over" : pct >= 75 ? "is-warn" : "";
   return (
-    <div className="meter-sm" title={`${usedGb.toFixed(2)} GB of ${limitGb} GB used`}>
+    <div className="meter-sm" title={`${usedGb.toFixed(2)} GB of ${limitGb} GB auto-managed`}>
       <div className="meter-sm__track"><div className={`meter-sm__fill ${cls}`} style={{ width: `${pct}%` }} /></div>
       <span className="meter-sm__label num">{usedGb.toFixed(1)}/{limitGb} GB</span>
     </div>

@@ -42,8 +42,8 @@ if (-not $SkipCore) {
   if ($Clean) { $args += "-Clean" }
   & powershell @args
   if ($LASTEXITCODE -ne 0) { throw "core build failed ($LASTEXITCODE)" }
-} elseif (-not (Test-Path (Join-Path $coreBinDev "clipcore.exe"))) {
-  throw "core-bin-dev is missing clipcore.exe - run without -SkipCore first"
+} elseif (-not (Test-Path (Join-Path $coreBinDev "shardcore.exe"))) {
+  throw "core-bin-dev is missing shardcore.exe - run without -SkipCore first"
 }
 
 Write-Host "==> Starting dev app (Vite HMR + Electron main watch) =="

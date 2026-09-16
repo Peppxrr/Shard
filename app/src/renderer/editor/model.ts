@@ -327,6 +327,34 @@ export function chooseRulerStep(pxPerSecond: number): number {
   return candidates.find((step) => step * pxPerSecond >= 72) ?? 600;
 }
 
+export function createRulerTicks(duration: number, pxPerSecond: number): Array<{ time: number; label: string | null }> {
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(pxPerSecond) || pxPerSecond <= 0) return [];
+  const major = chooseRulerStep(pxPerSecond);
+  const divisions = major === 2 || major === 120 ? 4 : 5;
+  const minor = major / divisions;
+  return Array.from({ length: Math.floor((duration + 0.000001) / minor) + 1 }, (_, index) => {
+    const time = Math.round(index * minor * 1e6) / 1e6;
+    return { time, label: index % divisions === 0 ? formatRulerTime(time, major) : null };
+  });
+}
+
+export function formatRulerTime(time: number, step: number): string {
+  const precision = step >= 1 ? 0 : step === 0.25 ? 2 : 1;
+  const scale = 10 ** precision;
+  const units = Math.max(0, Math.round(time * scale));
+  const seconds = Math.floor(units / scale);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds / 60) % 60;
+  const whole = `${hours ? `${hours}:` : ""}${hours ? String(minutes).padStart(2, "0") : minutes}:${String(seconds % 60).padStart(2, "0")}`;
+  return precision ? `${whole}.${String(units % scale).padStart(precision, "0")}` : whole;
+}
+
+// Keep the source time beneath an anchor pixel fixed while zoom changes width.
+export function zoomScrollOffset(scroll: number, anchor: number, oldPx: number, newPx: number, viewport: number, duration: number): number {
+  const time = (scroll + anchor) / oldPx;
+  return clamp(time * newPx - anchor, 0, Math.max(0, duration * newPx - viewport));
+}
+
 function editorStatesEqual(a: EditorState, b: EditorState): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }

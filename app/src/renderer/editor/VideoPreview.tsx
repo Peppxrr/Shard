@@ -5,6 +5,7 @@ import { Icon, IconButton } from "../components/ui";
 interface VideoPreviewProps {
   videoRef: RefObject<HTMLVideoElement | null>;
   sourcePath: string;
+  posterPath?: string;
   playing: boolean;
   muted: boolean;
   nativeMuted?: boolean;
@@ -28,6 +29,7 @@ interface VideoPreviewProps {
 export function VideoPreview({
   videoRef,
   sourcePath,
+  posterPath,
   playing,
   muted,
   nativeMuted = false,
@@ -63,6 +65,8 @@ export function VideoPreview({
           ref={videoRef}
           className="editor-player__video"
           src={mediaFileUrl(sourcePath)}
+          poster={posterPath ? mediaFileUrl(posterPath) : undefined}
+          preload="auto"
           controls={false}
           playsInline
           autoPlay={autoPlay}
@@ -90,7 +94,7 @@ export function VideoPreview({
           <Icon name={playing ? "pause" : "play"} size={18} />
         </IconButton>
         <span className="editor-player__time num">
-          {formatEditorTime(resultTime)} <span>/</span> {formatEditorTime(resultDuration)}
+          {formatEditorTime(resultTime, true)} <span>/</span> {formatEditorTime(resultDuration)}
         </span>
         <input
           className="editor-player__seek"
@@ -212,13 +216,15 @@ export function StandaloneVideoPlayer({ sourcePath, loop = true }: { sourcePath:
 
 export function formatEditorTime(seconds: number, precise = false): string {
   const value = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
-  const hours = Math.floor(value / 3600);
-  const minutes = Math.floor((value % 3600) / 60);
-  const secs = Math.floor(value % 60);
+  const milliseconds = Math.round(value * 1000);
+  const whole = precise ? Math.floor(milliseconds / 1000) : Math.floor(value);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor(whole / 60) % 60;
+  const secs = whole % 60;
   const base = hours > 0
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
     : `${minutes}:${String(secs).padStart(2, "0")}`;
-  return precise ? `${base}.${String(Math.floor((value % 1) * 1000)).padStart(3, "0")}` : base;
+  return precise ? `${base}.${String(milliseconds % 1000).padStart(3, "0")}` : base;
 }
 
 export function mediaFileUrl(filePath: string): string {

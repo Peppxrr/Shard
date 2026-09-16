@@ -1,4 +1,5 @@
 #include "process_monitor.h"
+#include "runtime_roles.h"
 
 #include "game_util.h"
 
@@ -16,7 +17,7 @@
 
 #include <string>
 
-namespace clipforge {
+namespace shard {
 
 namespace {
 
@@ -532,6 +533,14 @@ ProcessRuntimeFacts ProcessMonitor::probeRuntime(uint32_t pid) const
   if (pid == 0)
     return facts;
   const ProcessInfo process = lookup(pid);
+  facts.editorRuntime = isEditorProcess(process.exe, process.commandLine);
+  const size_t separator = process.path.find_last_of("\\/");
+  if (separator != std::string::npos) {
+    const std::string root = process.path.substr(0, separator);
+    facts.editorRuntime = facts.editorRuntime ||
+        regularFile(root + "\\Data\\Managed\\UnityEditor.dll") ||
+        regularFile(root + "\\Data\\Managed\\UnityEngine\\UnityEditor.dll");
+  }
   // Electron's browser process does not consistently keep chrome_elf.dll
   // loaded. Its signed distribution layout and app.asar command line are
   // stable runtime evidence shared by CurseForge, Discord, launchers, and
@@ -560,6 +569,12 @@ ProcessRuntimeFacts ProcessMonitor::probeRuntime(uint32_t pid) const
     do {
       facts.graphicsApi = facts.graphicsApi || moduleMatches(module.szModule, kGraphicsModules);
       facts.gameRuntime = facts.gameRuntime || moduleMatches(module.szModule, kGameRuntimeModules);
+      // These editor-only DLLs override positive engine/input evidence.
+      facts.editorRuntime = facts.editorRuntime ||
+          _wcsicmp(module.szModule, L"unityeditor.dll") == 0 ||
+          moduleStartsWith(module.szModule, L"unityeditor.") ||
+          moduleStartsWith(module.szModule, L"unrealeditor-") ||
+          moduleStartsWith(module.szModule, L"ue4editor-");
       modernGameInput = modernGameInput || moduleMatches(module.szModule, kModernGameInputModules);
       controllerInput = controllerInput || moduleMatches(module.szModule, kControllerInputModules);
       facts.webRuntime = facts.webRuntime || moduleMatches(module.szModule, kWebRuntimeModules) ||
@@ -577,4 +592,4 @@ ProcessRuntimeFacts ProcessMonitor::probeRuntime(uint32_t pid) const
   return facts;
 }
 
-} // namespace clipforge
+} // namespace shard

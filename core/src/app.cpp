@@ -13,7 +13,7 @@
 #include <windows.h>
 #endif
 
-namespace clipforge {
+namespace shard {
 
 namespace fs = std::filesystem;
 
@@ -266,4 +266,4 @@ void App::shutdown()
   obs_shutdown();
 }
 
-} // namespace clipforge
+} // namespace shard

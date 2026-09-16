@@ -3,7 +3,8 @@
 // Builds/runs an animated D3D11 swapchain target and records it while focused,
 // unfocused, fully covered, and genuinely minimized. Each clip is decoded to
 // frame MD5s; changing hashes prove freshness rather than a repeated final
-// frame. The minimized row additionally requires the injected hook checkpoints.
+// frame. Host-side diagnostics prove official-payload verification and helper
+// lifecycle ordering without modifying the signed target-side binaries.
 //
 // Build first:
 //   cmake --build build_x64 --config Release --target shard_gc_d3d11_fixture
@@ -13,6 +14,7 @@
 // env: CF_COREBIN, CF_GC_FIXTURE, CF_KEEP_TEMP=1
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -31,20 +33,43 @@ const states = (process.env.CF_GC_STATES ?? "focused,unfocused,covered,minimized
   .filter(Boolean);
 const expectedBlockStage = process.env.CF_GC_EXPECT_BLOCK_STAGE;
 const diagnosticsOnly = Boolean(expectedBlockStage);
-const coreExe = path.join(coreBin, "clipcore.exe");
+const coreExe = path.join(coreBin, "shardcore.exe");
 const ffmpegExe = path.join(coreBin, "ffmpeg.exe");
+const privateHookDir = path.join(coreBin, "data/obs-plugins/win-capture");
+const payloadManifestPath = path.join(root, "vendor/obs-hook-payload/32.2.1/manifest.json");
+const payloadManifest = JSON.parse(fs.readFileSync(payloadManifestPath, "utf8"));
+const privatePayload = Object.fromEntries(
+  Object.keys(payloadManifest.files).map((name) => [name, path.join(privateHookDir, name)]),
+);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shard-gc-"));
 const keep = process.env.CF_KEEP_TEMP === "1";
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const log = (...args) => console.log("[game-capture]", ...args);
 
-for (const required of [coreExe, ffmpegExe, fixtureExe]) {
+for (const required of [coreExe, ffmpegExe, fixtureExe, ...Object.values(privatePayload)]) {
   if (!fs.existsSync(required)) throw new Error(`missing required binary: ${required}`);
 }
 
+function sha256(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+
+// This is a graphics-hook smoke fixture, not semantic evidence that a process
+// is a game. Register it explicitly so the test exercises capture rather than
+// depending on the detector's former generic-D3D false-positive path.
+const fixtureExeName = path.basename(fixtureExe).toLowerCase();
+const fixtureName = path.basename(fixtureExe, path.extname(fixtureExe));
 fs.writeFileSync(
   path.join(tmp, "games.json"),
-  JSON.stringify([{ exe: path.basename(fixtureExe).toLowerCase(), name: `Shard GC ${api} Fixture` }]),
+  JSON.stringify({
+    version: 10,
+    user: [{ id: `u:${fixtureName.toLowerCase()}`, name: fixtureName, executables: [fixtureExeName] }],
+    discovered: [],
+    customFolders: [],
+    ignoredExes: [],
+    verboseDetection: true,
+  }),
 );
 
 let core;
@@ -57,11 +82,12 @@ let nextId = 1;
 const pending = new Map();
 const waiters = [];
 
-function waitEvent(name, timeoutMs = 90_000) {
+function waitEvent(name, timeoutMs = 90_000, predicate = () => true) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`timeout waiting for ${name}`)), timeoutMs);
     waiters.push({
       name,
+      predicate,
       resolve: (params) => {
         clearTimeout(timer);
         resolve(params);
@@ -117,6 +143,24 @@ function runPowerShell(script) {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`PowerShell failed: ${result.stderr}`);
   return result.stdout.trim();
+}
+
+function authenticode(file) {
+  const escaped = file.replaceAll("'", "''");
+  return JSON.parse(
+    runPowerShell(`
+$signature = Get-AuthenticodeSignature -LiteralPath '${escaped}'
+$signer = if ($signature.SignerCertificate) {
+  $signature.SignerCertificate.GetNameInfo(
+    [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+    $false
+  )
+} else { '<missing>' }
+$thumbprint = if ($signature.SignerCertificate) { $signature.SignerCertificate.Thumbprint } else { '<missing>' }
+[pscustomobject]@{ status = [string]$signature.Status; signer = $signer; thumbprint = $thumbprint } |
+  ConvertTo-Json -Compress
+`),
+  );
 }
 
 function setTargetState(state) {
@@ -193,12 +237,32 @@ async function cleanup() {
 }
 
 try {
+  if (!diagnosticsOnly) {
+    for (const [name, file] of Object.entries(privatePayload)) {
+      const expected = payloadManifest.files[name];
+      const actualHash = sha256(file);
+      if (actualHash !== expected.sha256) {
+        throw new Error(`packaged ${name} hash mismatch: expected ${expected.sha256}, got ${actualHash}`);
+      }
+      const signature = authenticode(file);
+      if (
+        signature.status !== "Valid" ||
+        signature.signer !== payloadManifest.signer ||
+        signature.thumbprint !== expected.signerThumbprint
+      ) {
+        throw new Error(`packaged ${name} signer mismatch: ${JSON.stringify(signature)}`);
+      }
+    }
+  }
   core = spawn(
     coreExe,
     ["--config-dir", tmp, "--core-bin", coreBin, "--games", path.join(tmp, "games.json"), "--port", "0"],
     {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, SHARD_GAME_CAPTURE_DIAGNOSTICS: "1" },
+      env: {
+        ...process.env,
+        SHARD_GAME_CAPTURE_DIAGNOSTICS: "1",
+      },
     },
   );
   core.stdout.on("data", (data) => (stdoutBuf += data));
@@ -234,11 +298,20 @@ try {
       else request.resolve(message.result);
       return;
     }
-    const index = waiters.findIndex((waiter) => waiter.name === message.method);
+    const index = waiters.findIndex(
+      (waiter) => waiter.name === message.method && waiter.predicate(message.params),
+    );
     if (index >= 0) waiters.splice(index, 1)[0].resolve(message.params);
   });
   const readyEvent = waitEvent("ready", 15_000);
-  const subjectEvent = useExistingTarget ? undefined : waitEvent("capture.subject", 60_000);
+  const expectedSubjectName = path.basename(fixtureExe, ".exe").toLowerCase();
+  const subjectEvent = useExistingTarget
+    ? undefined
+    : waitEvent(
+        "capture.subject",
+        60_000,
+        (params) => params?.kind === "game" && params?.name?.toLowerCase() === expectedSubjectName,
+      );
   await readyEvent;
   if (targetLauncher) {
     fixture = spawn(targetLauncher, [], { cwd: path.dirname(targetLauncher), stdio: "ignore" });
@@ -246,9 +319,25 @@ try {
     fixture = spawn(fixtureExe, [], { stdio: "ignore" });
   }
   await focusTargetWhenReady();
-  const subject = subjectEvent ? await subjectEvent : { kind: "game", name: path.basename(fixtureExe, ".exe") };
+  const focusedAt = Date.now();
+  let focusPulse;
+  if (subjectEvent) {
+    focusPulse = setInterval(() => {
+      try { setTargetState("focused"); } catch {}
+    }, 1500);
+  }
+  let subject;
+  try {
+    subject = subjectEvent ? await subjectEvent : { kind: "game", name: path.basename(fixtureExe, ".exe") };
+  } finally {
+    clearInterval(focusPulse);
+  }
   if (subject.kind !== "game") throw new Error(`unexpected capture subject: ${JSON.stringify(subject)}`);
-  log(`capture subject: ${subject.name}`);
+  const detectionMs = Date.now() - focusedAt;
+  if (subjectEvent && detectionMs > 5_000) {
+    throw new Error(`unknown game detection took ${detectionMs}ms (expected <= 5000ms)`);
+  }
+  log(`capture subject: ${subject.name} (live detection ${detectionMs}ms)`);
 
   if (!diagnosticsOnly) {
     let buffered = 0;
@@ -284,31 +373,84 @@ try {
 
   await delay(500);
   const diagnostics = coreErr.split(/\r?\n/).filter((line) => line.includes("[GC]"));
-  if (expectedBlockStage) {
-    if (expectedBlockStage !== "TargetDllLoad") throw new Error(`unsupported expected block stage: ${expectedBlockStage}`);
-    for (const stage of ["stage=SetWindowsHookEx result=1", "stage=WindowLayer minimized=true"]) {
-      if (!diagnostics.some((line) => line.includes(stage))) {
-        throw new Error(`missing pre-block diagnostic: ${stage}\n${diagnostics.join("\n")}`);
+  if (!diagnosticsOnly && states.includes("minimized") &&
+      !diagnostics.some((line) => line.includes("stage=WindowLayer minimized=true wgc_visible=false"))) {
+    throw new Error(`minimized capture did not suppress the opaque WGC layer\n${diagnostics.join("\n")}`);
+  }
+  if (!expectedBlockStage) {
+    for (const expected of [
+      "stage=HelperPayloadVerification result=success",
+      "stage=HookDllPayloadVerification result=success",
+      "injection_hook_source=shard_private_official_obs",
+    ]) {
+      if (!diagnostics.some((line) => line.includes(expected))) {
+        throw new Error(`missing isolation diagnostic: ${expected}\n${diagnostics.join("\n")}`);
       }
     }
-    if (diagnostics.some((line) => line.includes("stage=TargetDllLoad"))) {
-      throw new Error(`capture unexpectedly progressed through ${expectedBlockStage}\n${diagnostics.join("\n")}`);
+    const injectionPathLine = diagnostics.find((line) => line.includes("injection_hook_path="));
+    if (!injectionPathLine || !injectionPathLine.toLowerCase().includes(privateHookDir.toLowerCase())) {
+      throw new Error(`Shard did not select its private hook: ${injectionPathLine ?? "<missing>"}`);
+    }
+  }
+
+  let helperActive = false;
+  let lastHelperLaunchAt;
+  for (const line of diagnostics) {
+    if (line.includes("stage=HelperLaunch result=success")) {
+      const timestamp = Number(line.match(/ts_ms=(\d+)/)?.[1]);
+      if (helperActive) throw new Error(`overlapping compatibility helper attempt: ${line}`);
+      if (lastHelperLaunchAt !== undefined && timestamp - lastHelperLaunchAt < 10_000) {
+        throw new Error(`compatibility helper relaunched before capture initialization timeout: ${line}`);
+      }
+      helperActive = true;
+      lastHelperLaunchAt = timestamp;
+    } else if (line.includes("stage=HelperExit")) {
+      helperActive = false;
+    }
+  }
+
+  if (expectedBlockStage) {
+    if (!["HookDllPayloadHash", "HelperPayloadHash"].includes(expectedBlockStage)) {
+      throw new Error(`unsupported expected block stage: ${expectedBlockStage}`);
+    }
+    if (!diagnostics.some((line) => line.includes(`stage=${expectedBlockStage}`))) {
+      throw new Error(`missing payload rejection diagnostic: ${expectedBlockStage}\n${diagnostics.join("\n")}`);
+    }
+    if (diagnostics.some((line) => line.includes("stage=HelperLaunch result=success"))) {
+      throw new Error(`unverified payload reached helper launch\n${diagnostics.join("\n")}`);
     }
     console.table(rows);
-    log(`PASS: capture stopped before ${expectedBlockStage} after successful SetWindowsHookEx/message posting`);
+    log(`PASS: injection failed closed at ${expectedBlockStage}`);
   } else {
-    const requiredStages = ["stage=SetWindowsHookEx", "stage=TargetDllLoad", `stage=GraphicsApiDetected api=${api}`, `stage=FirstFrameCopied api=${api}`, "stage=FrameImport result=success"];
+    const requiredStages = [
+      "stage=HelperLaunch result=success",
+      "stage=HelperExit result=success",
+      "stage=HookInfo result=opened",
+      "stage=IpcEvents result=opened",
+      "stage=HookInitializeSignal result=success",
+      "stage=HookReady result=signaled",
+      "stage=FrameImport result=success",
+    ];
     for (const stage of requiredStages) {
       if (!diagnostics.some((line) => line.includes(stage))) {
         throw new Error(`missing Game Capture diagnostic: ${stage}\n${diagnostics.join("\n")}`);
       }
     }
+    const firstFrameImport = diagnostics.findIndex((line) => line.includes("stage=FrameImport result=success"));
+    const initialLaunches = diagnostics
+      .slice(0, firstFrameImport)
+      .filter((line) => line.includes("stage=HelperLaunch result=success"));
+    if (initialLaunches.length !== 1) {
+      throw new Error(`expected one compatibility helper before capture initialization, got ${initialLaunches.length}`);
+    }
     console.table(rows.map(({ state, decodedFrames, uniqueFrames, fresh }) => ({ state, decodedFrames, uniqueFrames, fresh })));
-    log(`PASS: compatibility hook loaded and all requested states produced fresh ${api} frames`);
+    log(`PASS: official OBS compatibility payload loaded and all requested states produced fresh ${api} frames`);
   }
   for (const line of diagnostics) console.log(line);
 } catch (error) {
-  for (const line of coreErr.split(/\r?\n/).filter((line) => line.includes("[GC]"))) console.error(line);
+  for (const line of coreErr.split(/\r?\n/).filter(
+    (line) => line.includes("[GC]") || line.includes("[GameDetection]") || line.startsWith("  "),
+  )) console.error(line);
   throw error;
 } finally {
   await cleanup();

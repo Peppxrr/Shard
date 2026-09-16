@@ -12,12 +12,13 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <cstdint>
 #include <thread>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
-// RAM replay ring. Registers a custom encoded output type ("clipforge_ring")
+// RAM replay ring. Registers a custom encoded output type ("shard_ring")
 // whose encoded_packet callback keeps a RAM ring of keyframe-anchored encoded
 // packets (byte cap + time cap). save(durationSec) snapshots the tail of the
 // ring (keeping the keyframe that precedes the start), offsets timestamps to
@@ -68,11 +69,16 @@ private:
 
   // ---- ring internals ----
   bool startLocked(); // requires lifecycleMtx_
+  bool startWithVideoEncoderLocked(const std::string& videoId); // requires lifecycleMtx_
   void stopLocked();  // requires lifecycleMtx_
   void ingestPacket(Ring* r, struct encoder_packet* packet);
   bool purgeFront();
   void purge();
-  bool snapshotSave(int durationSec, std::vector<encoder_packet>& out, std::string& path, double& actualSec);
+  struct SaveRequest {
+    int durationSec = 0;
+    int64_t endTimeUs = 0;
+  };
+  bool snapshotSave(const SaveRequest& request, std::vector<encoder_packet>& out, std::string& path, double& actualSec);
   void saveWorker();
   void muxToFile(const std::vector<encoder_packet>& packets, const std::string& path, bool& success,
                  std::string& error);
@@ -91,8 +97,7 @@ private:
   std::atomic<bool> active_{false};
   std::atomic<bool> muxing_{false};
 
-  // Serializes start/stop/restart/setCaptureActive (watchdog thread vs RPC).
-  std::mutex lifecycleMtx_;
+  mutable std::mutex lifecycleMtx_;
   std::chrono::steady_clock::time_point inactiveSince_{};
   // True once the watchdog has reported healthy capture since the last start.
   // The ring is started eagerly at boot (and on config restarts) before any
@@ -102,9 +107,9 @@ private:
 
   std::mutex saveMtx_;
   std::condition_variable saveCv_;
-  std::deque<int> saveQueue_;
+  std::deque<SaveRequest> saveQueue_;
   std::thread saveThread_;
   std::atomic<bool> saveThreadRun_{true};
 };
 
-} // namespace clipforge
+} // namespace shard

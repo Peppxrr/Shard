@@ -14,7 +14,27 @@ export type EncoderChoice =
   | "obs_x265"
   | "obs_nvenc_h264_tex"
   | "obs_nvenc_hevc_tex"
-  | "obs_nvenc_av1_tex";
+  | "obs_nvenc_av1_tex"
+  | "h264_texture_amf"
+  | "h265_texture_amf"
+  | "av1_texture_amf"
+  | "obs_qsv11_v2"
+  | "obs_qsv11_hevc"
+  | "obs_qsv11_av1";
+export type ExportEncoderChoice =
+  | "auto"
+  | "libx264"
+  | "libx265"
+  | "libsvtav1"
+  | "h264_nvenc"
+  | "hevc_nvenc"
+  | "av1_nvenc"
+  | "h264_amf"
+  | "hevc_amf"
+  | "av1_amf"
+  | "h264_qsv"
+  | "hevc_qsv"
+  | "av1_qsv";
 export type VideoPreset = "low" | "medium" | "high" | "custom";
 export type NotificationStyle = "overlay" | "windows" | "off";
 
@@ -65,7 +85,7 @@ export interface HotkeyEntry {
 
 export interface ExportSettings {
   targetMb: number; // default 10 (Discord free cap)
-  codec: "h264" | "h265";
+  encoder: ExportEncoderChoice;
   resolution: "source" | "1080p" | "720p" | "480p" | "360p";
 }
 
@@ -131,6 +151,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
+  appearance: { theme: "default" },
   capture: { mode: "auto", monitor: 0 },
   video: { encoder: "auto", preset: "medium", custom: false, bitrateKbps: 0, fps: 60, width: 1920, height: 1080, x264Preset: "veryfast" },
   replay: { maxSeconds: 600, maxMb: 2048 },
@@ -142,18 +163,34 @@ export const DEFAULT_SETTINGS: Settings = {
   audio: { sources: [] },
   storage: { limitGb: 20, clipsDir: "", deleteEdited: false },
   app: { notificationStyle: "overlay", startWithWindows: false, minimizeToTray: true, clipSound: true, clipSoundVolume: 0.8, clipSoundPath: "", developerConsole: false, hardwareAcceleration: true },
-  appearance: { theme: "default" },
+  export: { targetMb: 10, encoder: "auto", resolution: "source" },
   hotkeys: [
     { id: "save_60", label: "Save last minute", accelerator: "F8", action: "save_clip", durationSec: 60, durationUnit: "min" },
     { id: "save_300", label: "Save last 5 minutes", accelerator: "F9", action: "save_clip", durationSec: 300, durationUnit: "min" },
     { id: "record", label: "Toggle recording", accelerator: "F10", action: "toggle_record" },
   ],
-  export: { targetMb: 10, codec: "h264", resolution: "source" },
 };
 
 // ---------------------------------------------------------------------------
 // Core RPC (mirrors core/src/rpc.cpp dispatch)
 // ---------------------------------------------------------------------------
+
+export interface VideoEncoderInfo {
+  id: Exclude<EncoderChoice, "auto">;
+  label: string;
+  codec: "h264" | "hevc" | "av1";
+  vendor: "cpu" | "nvidia" | "amd" | "intel";
+  hardware: boolean;
+}
+export interface ExportEncoderInfo {
+  id: Exclude<ExportEncoderChoice, "auto">;
+  label: string;
+  codec: "h264" | "hevc" | "av1";
+  vendor: "cpu" | "nvidia" | "amd" | "intel";
+  hardware: boolean;
+  preferred: boolean;
+}
+
 
 export type RpcMethod =
   | "config.set"
@@ -163,6 +200,7 @@ export type RpcMethod =
   | "clip.save"
   | "audio.listDevices"
   | "capture.listMonitors"
+  | "video.listEncoders"
   | "game.listKnown"
   | "game.addKnown"
   | "game.removeKnown"
@@ -366,7 +404,9 @@ export interface ShardApi {
   probeTracks(clipId: string): Promise<AudioTrackInfo[]>;
   prepareAudioPreview(clipId: string, streamIndex: number): Promise<string>;
   generateWaveform(clipId: string, streamIndex: number, points: number): Promise<WaveformData>;
-  generateTimelineFrames(clipId: string, count: number): Promise<string[]>;
+  generateTimelineFrames(clipId: string, count: number, requestId: string): Promise<string[]>;
+  onTimelineFrames(cb: (progress: { requestId: string; frames: string[] }) => void): () => void;
+  cancelTimelineFrames(requestId: string): void;
   onLibraryChanged(cb: () => void): () => void;
   revealInExplorer(path: string): void;
   openClip(path: string): void;
@@ -375,6 +415,7 @@ export interface ShardApi {
   // export
   startExport(clipId: string, project: EditorExportProject): Promise<void>;
   cancelExport(): Promise<void>;
+  listExportEncoders(): Promise<ExportEncoderInfo[]>;
   onExport(cb: (p: ExportProgress) => void): () => void;
   // misc
   version(): Promise<string>;

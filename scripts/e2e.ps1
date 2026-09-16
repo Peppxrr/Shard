@@ -1,12 +1,12 @@
-# ClipForge core end-to-end contract test (no app needed).
+# Shard core end-to-end contract test (no app needed).
 #
 # Usage:
 #   powershell -File scripts/e2e.ps1 [-CoreBin <staged core-bin dir>]
 #
-# Starts the core with a temp config dir, connects over WebSocket JSON-RPC,
-# warms the ring 70 s, saves 60 s, asserts clip.saved.actualSec in [58,62]
-# and the produced mp4's ffprobe duration in range; toggles capture mode via
-# config.set; asserts audio.listDevices reports Voicemeeter devices.
+# warms the ring 70 s, saves 60 s, asserts clip.saved.actualSec and ffprobe
+# duration are within one encoded frame of the requested duration, toggles
+# capture mode via config.set, and asserts audio.listDevices reports
+# Voicemeeter devices.
 param(
   [switch]$KeepTemp,
   [string]$CoreBin = (Join-Path (Split-Path $PSScriptRoot -Parent) "app/resources/core-bin")
@@ -14,8 +14,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path $PSScriptRoot -Parent
-$coreExe = Join-Path $CoreBin "clipcore.exe"
-if (-not (Test-Path $coreExe)) { throw "clipcore.exe not found in $CoreBin" }
+$coreExe = Join-Path $CoreBin "shardcore.exe"
+if (-not (Test-Path $coreExe)) { throw "shardcore.exe not found in $CoreBin" }
 
 $temp = Join-Path $env:TMP "cf-e2e-$(Get-Date -Format yyyyMMddHHmmss)"
 New-Item -ItemType Directory -Force $temp | Out-Null

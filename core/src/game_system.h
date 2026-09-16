@@ -3,8 +3,9 @@
 //
 // LauncherDiscovery -> GameRegistry provides product identity only. A process
 // enters GameSessionManager only after GameDetector sees an explicit user
-// mapping or a captureable foreground window with renderer/custom-folder
-// evidence. Qualified executables are then learned individually.
+// mapping or a captureable window with positive game identity and no editor
+// role. Qualified executables are then learned individually. Visible windows
+// on every monitor are scanned; focus independently selects the primary game.
 //
 // One owner loop (~2 Hz) drains WMI/toolhelp events, follows foreground intent,
 // rechecks windows/modules while a renderer loads, refreshes sessions, and
@@ -30,7 +31,7 @@
 #include <optional>
 #include <thread>
 
-namespace clipforge {
+namespace shard {
 
 class GameSystem {
 public:
@@ -77,6 +78,7 @@ private:
   void evaluateProcess(uint32_t pid);
   void reEvaluateCandidates();
   void evaluateForegroundProcess();
+  void evaluateVisibleProcesses();
   void probeSessions();
   void runDiscoveryScan();
   void updateCaptureSubject();
@@ -124,7 +126,9 @@ private:
   // Recently started or foreground candidates are re-evaluated while their
   // renderer modules and top-level window are still loading.
   std::map<uint32_t, int64_t> candidateSince_;
+  std::map<uint32_t, int64_t> visibleSince_;
   uint32_t observedForegroundPid_ = 0;
+  int64_t foregroundSinceMs_ = 0;
 
   // Active-game following: the game holding focus becomes primary after it
   // keeps focus for the debounce window (capture follows the active game).
@@ -148,4 +152,4 @@ private:
   bool autoRecording_ = false;
 };
 
-} // namespace clipforge
+} // namespace shard

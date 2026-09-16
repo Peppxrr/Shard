@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 struct ScanContext {
   // File roots (tests point these at fixture dirs).
@@ -91,4 +91,4 @@ private:
   ScanContext ctx_;
 };
 
-} // namespace clipforge
+} // namespace shard

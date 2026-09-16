@@ -27,15 +27,16 @@ export class StorageWatchdog extends EventEmitter {
   // Returns the number of clips deleted.
   async check(): Promise<number> {
     this.locked.clear(); // retry everything locked last cycle
-    const limitBytes = getSettings().storage.limitGb * 1024 * 1024 * 1024;
+    const settings = getSettings().storage;
+    const limitBytes = settings.limitGb * 1024 * 1024 * 1024;
     if (limitBytes <= 0) return 0;
 
-    let used = this.library.totalBytes();
+    let used = this.library.autoDeleteBytes(settings.deleteEdited);
     let deleted = 0;
     const target = limitBytes * 0.9;
 
     while (used > target) {
-      const oldest = this.library.oldestUnprotected(getSettings().storage.deleteEdited);
+      const oldest = this.library.oldestUnprotected(settings.deleteEdited);
       if (!oldest) break;
       if (this.locked.has(oldest.path)) break; // tried this cycle, still locked
 
@@ -43,7 +44,7 @@ export class StorageWatchdog extends EventEmitter {
         await fs.unlink(oldest.path);
         if (oldest.thumb) await fs.unlink(oldest.thumb).catch(() => {});
         this.library.delete(oldest.id);
-        used = this.library.totalBytes();
+        used = this.library.autoDeleteBytes(settings.deleteEdited);
         deleted++;
       } catch {
         // Locked (viewer/editor holds it): skip it this cycle, retry next.

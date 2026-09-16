@@ -1,8 +1,8 @@
 #pragma once
 
-namespace clipforge {
+namespace shard {
 
 // Registers the libavcodec-backed CPU HEVC encoder with libobs.
 void registerX265Encoder();
 
-} // namespace clipforge
+} // namespace shard

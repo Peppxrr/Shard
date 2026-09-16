@@ -35,6 +35,7 @@ app/resources/bin/
 /Todo.md
 /todo.md
 Thumbs.db
+/changelog.txt
 
 # Local toolchains
 vs_buildtools.exe
@@ -49,3 +50,19 @@ AGENTS.md
 
 # Fetched by scripts/fetch-ffmpeg.ps1 (pinned SHA-256)
 vendor/ffmpeg/
+
+# Required application branding assets (not generated build output)
+!app/build/
+app/build/*
+!app/build/icon.ico
+!app/build/icon-32.png
+!app/build/icon-256.png
+
+# Local diagnostics and UI review fixtures
+/tmp/
+/icon pack/
+/app/edtest.html
+/app/src/renderer/edtest.tsx
+/fix.js
+/get_fg*.ps1
+/probe*.ps1

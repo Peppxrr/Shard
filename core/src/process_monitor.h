@@ -19,7 +19,7 @@
 #include <string>
 #include <thread>
 
-namespace clipforge {
+namespace shard {
 
 struct ProcessInfo {
   uint32_t pid = 0;
@@ -37,6 +37,7 @@ struct ProcessRuntimeFacts {
   bool gameInput = false; // modern gaming input plus XInput/DirectInput corroboration
   bool webRuntime = false;
   bool mediaRuntime = false;
+  bool editorRuntime = false;
 };
 
 struct ProcessEvent {
@@ -90,4 +91,4 @@ private:
   std::atomic<bool> wmiOk_{false};
 };
 
-} // namespace clipforge
+} // namespace shard

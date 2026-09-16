@@ -1,0 +1,373 @@
+[
+  {
+    "file": "feather-aperture.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/aperture.svg",
+    "sha256": "3d6c859251f304def7b87c36fcd658a0df61d0c6892b671f6a9b8fd090b893de"
+  },
+  {
+    "file": "feather-circle.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/circle.svg",
+    "sha256": "8d4932d902c2a59c7ab573d727059cd7da329a25a50a993d6f169d3cb3ef0dff"
+  },
+  {
+    "file": "feather-square.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/square.svg",
+    "sha256": "f0e379ea210aeac63306055dec59dfc5b079bd81f383a57bd25769f465e5100f"
+  },
+  {
+    "file": "feather-play.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/play.svg",
+    "sha256": "b3cde412ae4265af95b9d3f2833ba674498a2c8c4eeefdf0d51e7e2ed9cbaeb5"
+  },
+  {
+    "file": "feather-pause.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/pause.svg",
+    "sha256": "1c5a5dea28076b4e4c0e0f9ee9dfd87eb1b17a01fc72788504ba5a7da2692fb1"
+  },
+  {
+    "file": "feather-scissors.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/scissors.svg",
+    "sha256": "9a44e077e60f863dcf23dd9d9add0e552d47cfbdaaa5824ae7f715190a9b07d1"
+  },
+  {
+    "file": "feather-help-circle.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/help-circle.svg",
+    "sha256": "0fe14a3e1e00e2941c1d57189fd1514a7ce171b5520f8671148fb89152248703"
+  },
+  {
+    "file": "feather-settings.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/settings.svg",
+    "sha256": "8fe83a7900335105bedd742225ac0d96454a96670a186774532df41414c9cfbb"
+  },
+  {
+    "file": "feather-upload.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/upload.svg",
+    "sha256": "064372f5e25f78f8187888761abd8c61fa6e6620ee68adc9871416363d1ff983"
+  },
+  {
+    "file": "feather-folder.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/folder.svg",
+    "sha256": "d479596013ee6703bb7bb30515c5306e8624499643d947d9b9576d9003650b33"
+  },
+  {
+    "file": "feather-trash-2.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/trash-2.svg",
+    "sha256": "d8bc68160668de5e1eea9ac399122e539658f1481d197f0dbea66e26e9afa12f"
+  },
+  {
+    "file": "feather-star.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/star.svg",
+    "sha256": "270f826c022a34610f8ce0d608503ecadfe8b6e5a873ee06006a9838e3a512e5"
+  },
+  {
+    "file": "feather-droplet.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/droplet.svg",
+    "sha256": "254957f2c4694de6f6e0b22cd408d128233411a3443a5e27915515e807037775"
+  },
+  {
+    "file": "feather-x.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/x.svg",
+    "sha256": "9d855cf8aab176e80a0448bee43c56338d28c59ec91637ce034cced006e282a2"
+  },
+  {
+    "file": "feather-search.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/search.svg",
+    "sha256": "5f27d6498c8d1746ef65458aedc42b51052a4ef1c52fb5d0cd900c19676a9db3"
+  },
+  {
+    "file": "feather-filter.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/filter.svg",
+    "sha256": "244d81a7bcb14546f2e5e4f6cbb48b0ce1a99172a91a865664f524d65fb0fb4d"
+  },
+  {
+    "file": "feather-sliders.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/sliders.svg",
+    "sha256": "59c71dcbe60e73e453a49139cc6cfbf9df0f908227b951b1739c88133e9ecb72"
+  },
+  {
+    "file": "feather-monitor.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/monitor.svg",
+    "sha256": "090983067d10480735aff75a22dd85314ca97cc266e6ca70db6d6676863acaac"
+  },
+  {
+    "file": "feather-chevron-right.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/chevron-right.svg",
+    "sha256": "e37a663fc7cc5d1a0540e27ecb567d70e4706eb32f07e47f212369881bd999bc"
+  },
+  {
+    "file": "feather-check.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/check.svg",
+    "sha256": "1df722c1758fb0cb4868c38eb038fecf64c3717fe09ceaeb43783b70d027a1c4"
+  },
+  {
+    "file": "feather-plus.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/plus.svg",
+    "sha256": "85779cf0106427ed7943bf3a296243b1cfa5dacc13d0f7683e96a0aa4e3176a8"
+  },
+  {
+    "file": "feather-video.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/video.svg",
+    "sha256": "34394850a913a2714fe58c1d56f2bdb1cc72fa288cfad6764e9a6b79087f5c17"
+  },
+  {
+    "file": "feather-bell.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/bell.svg",
+    "sha256": "8051ddb74439c1b1814a2d2307e95ae6a43786df1b6d46797d11974328f33ff1"
+  },
+  {
+    "file": "feather-link.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/link.svg",
+    "sha256": "49a50faa4dd66581290286e93b5437eef2eb53e5d2b1056b465819e90d13d06e"
+  },
+  {
+    "file": "feather-power.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/power.svg",
+    "sha256": "65e12b42d0af9ccb82de5870eec85a9b07eeafd8be18c0bd6b48c753ab478c8f"
+  },
+  {
+    "file": "feather-refresh-cw.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/refresh-cw.svg",
+    "sha256": "919af710371124a9af7bd719ca7cffa725011bb07431ae4345f4499c6d316b73"
+  },
+  {
+    "file": "feather-volume-2.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/volume-2.svg",
+    "sha256": "a030d363dfadf5d28639fefa2fad279b3098c30ca065b6c6388ba32922b682be"
+  },
+  {
+    "file": "feather-volume-x.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/volume-x.svg",
+    "sha256": "16fbc62feeeb9be90a4dd3488fd5e44e824c0ec5bde45c676bf48c72ad9ef2b5"
+  },
+  {
+    "file": "feather-maximize.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/maximize.svg",
+    "sha256": "965509978e1ddddb2508616c6b84f98e72b6afec0d9be8ea267c9e90059d986f"
+  },
+  {
+    "file": "feather-minus.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/minus.svg",
+    "sha256": "ce71ed3e13c6443c048a8d68d87e2b13228b2917b5d9ac7f8850ad09cf39997e"
+  },
+  {
+    "file": "feather-copy.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/copy.svg",
+    "sha256": "a32de6b675efb2d05a19455cde9d7350706257069e0a52d0a99fdf51a565fe91"
+  },
+  {
+    "file": "feather-zoom-in.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/zoom-in.svg",
+    "sha256": "a9ce220a9ecea75c623c9947ac47c88099852f17328d66e02326c280346e6ed6"
+  },
+  {
+    "file": "feather-zoom-out.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/zoom-out.svg",
+    "sha256": "878f22d4b1408fd5c3acdb4153acb111162696d472191fca92fdeb1eea66fa8b"
+  },
+  {
+    "file": "feather-crosshair.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/crosshair.svg",
+    "sha256": "f4ffa1e69a44f990e936628c6e9d1be254bd9efe7166d3e89cfd2bbd0ab4d563"
+  },
+  {
+    "file": "feather-target.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/target.svg",
+    "sha256": "64633eb86485fc63c02cec374ebdcc9fd82e3d20ad647e32bd13f4ec3f847e59"
+  },
+  {
+    "file": "feather-arrow-left.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/arrow-left.svg",
+    "sha256": "a71d26dae8d7bd2c172a502258e13793ecf3fa80935d42f7fa692b8d182d0794"
+  },
+  {
+    "file": "feather-terminal.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/terminal.svg",
+    "sha256": "50bd627b68b0ef3c1c5146ccc4a462f0705d566cdf0aa34f0e33b3d51a2ea13e"
+  },
+  {
+    "file": "feather-save.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/save.svg",
+    "sha256": "dd18a10ef788fadb8e504b773c6e52acbefa817ba7ae922d8f931367ea174336"
+  },
+  {
+    "file": "feather-film.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/film.svg",
+    "sha256": "cdc70078f11b09013e4e7c4cce6e4c672c6e712939f2b3b66477e7d3b481001a"
+  },
+  {
+    "file": "feather-mic.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/mic.svg",
+    "sha256": "851ae601ee1770cd607014492487d7d985d7567d07528e3b3ff37d1a39c698c5"
+  },
+  {
+    "file": "feather-disc.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/disc.svg",
+    "sha256": "15e7080672c999b97c9de65e3367758d92dba5ccb4302f887bced78574d35649"
+  },
+  {
+    "file": "feather-hard-drive.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/hard-drive.svg",
+    "sha256": "6ffc0d9a3b7c64970a2b2e57152b9a17f67164c3a2959cd8f44de2cd67572e88"
+  },
+  {
+    "file": "feather-chevron-down.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/chevron-down.svg",
+    "sha256": "f87ec5c0083b3c327ea98215231e77d642976263c9f2f57f182ef87cf071588e"
+  },
+  {
+    "file": "feather-zap.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/zap.svg",
+    "sha256": "85afd3069e5d060ee77624281756c923b972db40bef65e1d7a7669b58e185f1d"
+  },
+  {
+    "file": "feather-bell-off.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/bell-off.svg",
+    "sha256": "8d02f20eb56bc3d99b2ae80133b823877c5902d9dd73f8c2078b964a8412845a"
+  },
+  {
+    "file": "feather-edit-2.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/edit-2.svg",
+    "sha256": "36c3d3437075ba4a5c03b43646ce7548814b83bfcd46838ad898b9554e918d85"
+  },
+  {
+    "file": "feather-clock.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/clock.svg",
+    "sha256": "1c9bbf4c26cdb34f1eea393f6b151c2d962b7c252ce451ae58ae83621aeebcfc"
+  },
+  {
+    "file": "feather-rotate-ccw.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/rotate-ccw.svg",
+    "sha256": "bbd1916b01dca1c1b6cc411369c4f578c6e1126da171f17bd5ab4e5be421bcc1"
+  },
+  {
+    "file": "feather-rotate-cw.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/rotate-cw.svg",
+    "sha256": "9f231590e39c2d9b2a20a40bc9e3d5cc4a3fc06c424569bb43afd3316efe28c3"
+  },
+  {
+    "file": "lucide-keyboard.svg",
+    "project": "lucide",
+    "version": "0.468.0",
+    "source": "https://raw.githubusercontent.com/lucide-icons/lucide/0.468.0/icons/keyboard.svg",
+    "sha256": "f509925ca81964ed06251ad4702e989bb81a566ffc74d15c2226b4f07ded67be"
+  },
+  {
+    "file": "lucide-gamepad-2.svg",
+    "project": "lucide",
+    "version": "0.468.0",
+    "source": "https://raw.githubusercontent.com/lucide-icons/lucide/0.468.0/icons/gamepad-2.svg",
+    "sha256": "b0671de7afbebdafc4d655d867d9851947170b906fb187e749410039df867509"
+  },
+  {
+    "file": "lucide-paintbrush.svg",
+    "project": "lucide",
+    "version": "0.468.0",
+    "source": "https://raw.githubusercontent.com/lucide-icons/lucide/0.468.0/icons/paintbrush.svg",
+    "sha256": "b0a958ba9889f89c40df6e1c168b8a7aa20f6309780e795c5bce00a4bc11bff6"
+  },
+  {
+    "file": "lucide-picture-in-picture-2.svg",
+    "project": "lucide",
+    "version": "0.468.0",
+    "source": "https://raw.githubusercontent.com/lucide-icons/lucide/0.468.0/icons/picture-in-picture-2.svg",
+    "sha256": "eccce9ef362520bbb8904fbc1fc89f5d02fb0fbb7c6704cdd3b761dd4fc102b0"
+  }
+]

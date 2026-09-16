@@ -17,7 +17,7 @@
 // ourselves (config port, or a random high port when 0) and retry on failure.
 // The chosen port is printed as the first stdout line: "PORT <n>".
 // Events are pushed to every connected client as JSON-RPC notifications.
-namespace clipforge {
+namespace shard {
 
 class Server {
 public:
@@ -51,4 +51,4 @@ private:
   std::set<ix::WebSocket*> clients_;
 };
 
-} // namespace clipforge
+} // namespace shard

@@ -6,7 +6,17 @@
 
 #include <string>
 
-namespace clipforge {
+#include <vector>
+
+namespace shard {
+struct VideoEncoderInfo {
+  std::string id;
+  std::string label;
+  std::string codec;
+  std::string vendor;
+  bool hardware = false;
+};
+
 
 // Builds encoder settings and creates encoder instances. Encoders are created
 // per capture session: the replay ring owns the primary instance, manual
@@ -16,11 +26,14 @@ class EncoderManager {
 public:
   explicit EncoderManager(const Config& config);
 
-  // Resolve "auto" -> concrete encoder id ("obs_x264" unless NVENC exists).
+  // The OBS modules perform their hardware capability probes once while
+  // loading. This exposes only encoders that survived those probes.
+  std::vector<VideoEncoderInfo> availableVideoEncoders() const;
+  std::vector<std::string> videoEncoderCandidates(const std::string& requested) const;
   std::string resolveVideoEncoderId(const std::string& requested) const;
 
-  // Fully-populated settings for the configured preset (obs_data_t).
-  obs_data_t* videoSettings() const;
+  // Fully-populated settings for a concrete encoder id.
+  obs_data_t* videoSettings(const std::string& encoderId = {}) const;
   obs_data_t* audioSettings() const;
 
   // Effective output size/fps for the configured preset.
@@ -35,4 +48,4 @@ private:
   const Config& config_;
 };
 
-} // namespace clipforge
+} // namespace shard

@@ -1,4 +1,4 @@
-// ClipForge core: embeds OBS's libobs and exposes capture, replay ring,
+// Shard core: embeds OBS's libobs and exposes capture, replay ring,
 // recording, game detection, and a JSON-RPC WebSocket server.
 //
 // Version string lives here (placeholder rename point, see README).
@@ -31,7 +31,7 @@
 #include <string>
 #include <thread>
 
-namespace clipforge {
+namespace shard {
 
 namespace fs = std::filesystem;
 
@@ -317,9 +317,9 @@ int main(int argc, char** argv)
   return 0;
 }
 
-} // namespace clipforge
+} // namespace shard
 
 int main(int argc, char** argv)
 {
-  return clipforge::main(argc, argv);
+  return shard::main(argc, argv);
 }

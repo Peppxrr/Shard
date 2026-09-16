@@ -8,6 +8,7 @@ import type {
   DevConsoleLine,
   EditorExportProject,
   ExportProgress,
+  ExportEncoderInfo,
   Settings,
   WaveformData,
 } from "../shared/contracts";
@@ -37,8 +38,14 @@ const api: ShardApi = {
     ipcRenderer.invoke("editor:audio-preview", clipId, streamIndex) as Promise<string>,
   generateWaveform: (clipId: string, streamIndex: number, points: number) =>
     ipcRenderer.invoke("editor:waveform", clipId, streamIndex, points) as Promise<WaveformData>,
-  generateTimelineFrames: (clipId: string, count: number) =>
-    ipcRenderer.invoke("editor:timeline-frames", clipId, count) as Promise<string[]>,
+  generateTimelineFrames: (clipId: string, count: number, requestId: string) =>
+    ipcRenderer.invoke("editor:timeline-frames", clipId, count, requestId) as Promise<string[]>,
+  onTimelineFrames: (cb) => {
+    const listener = (_event: unknown, progress: { requestId: string; frames: string[] }) => cb(progress);
+    ipcRenderer.on("editor:timeline-progress", listener);
+    return () => ipcRenderer.removeListener("editor:timeline-progress", listener);
+  },
+  cancelTimelineFrames: (requestId: string) => ipcRenderer.send("editor:timeline-cancel", requestId),
   onLibraryChanged: (cb) => {
     const listener = () => cb();
     ipcRenderer.on("library:changed", listener);
@@ -51,6 +58,7 @@ const api: ShardApi = {
   startExport: (clipId: string, project: EditorExportProject) =>
     ipcRenderer.invoke("export:start", clipId, project) as Promise<void>,
   cancelExport: () => ipcRenderer.invoke("export:cancel") as Promise<void>,
+  listExportEncoders: () => ipcRenderer.invoke("export:listEncoders") as Promise<ExportEncoderInfo[]>,
   onExport: (cb) => {
     const listener = (_e: unknown, p: ExportProgress) => cb(p);
     ipcRenderer.on("export:progress", listener);

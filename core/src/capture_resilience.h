@@ -3,7 +3,7 @@
 #include <atomic>
 #include <cstdint>
 
-namespace clipforge {
+namespace shard {
 
 struct ClientAreaCrop {
   uint32_t left = 0;
@@ -81,4 +81,4 @@ private:
   std::atomic<bool> recoveryRequested_{false};
 };
 
-} // namespace clipforge
+} // namespace shard

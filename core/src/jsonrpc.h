@@ -11,7 +11,7 @@
 
 #include <string>
 
-namespace clipforge {
+namespace shard {
 
 // JSON-RPC 2.0 dispatch. handle() is thread-safe (server calls it from
 // connection threads); every method is executed inline on the caller thread.
@@ -54,4 +54,4 @@ private:
   std::atomic<bool> shutdownRequested_{false};
 };
 
-} // namespace clipforge
+} // namespace shard

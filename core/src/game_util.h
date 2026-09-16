@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 // ASCII-lowercase in place.
 inline std::string toLower(std::string s)
@@ -111,4 +111,4 @@ inline std::vector<std::string> split(const std::string& s, const std::string& d
   return out;
 }
 
-} // namespace clipforge
+} // namespace shard

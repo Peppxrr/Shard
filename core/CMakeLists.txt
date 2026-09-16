@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
-project(shard-core VERSION 0.1.2 LANGUAGES C CXX)
+project(shard-core VERSION 0.1.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,7 +119,7 @@ target_link_libraries(
           ixwebsocket::ixwebsocket
           nlohmann_json::nlohmann_json
 )
-target_compile_definitions(shardcore PRIVATE CLIPFORGE_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(shardcore PRIVATE SHARD_VERSION="${PROJECT_VERSION}")
 
 if(WIN32)
   target_compile_definitions(shardcore PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)

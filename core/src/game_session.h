@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 struct GameSession {
   std::string gameId;
@@ -52,7 +52,7 @@ public:
 
   // A detection fired for a process. Starts a session for the game if none is
   // active; otherwise folds the process into the existing session.
-  void onDetected(const DetectionResult& r, const ProcessInfo& p);
+  void onDetected(const DetectionResult& r, const ProcessInfo& p, bool preferPrimary = true);
 
   // Process exit. Ends the session when its last pid dies; otherwise the
   // active pid moves to the newest survivor.
@@ -87,4 +87,4 @@ private:
   nlohmann::json sessionJson(const GameSession& s) const;
 };
 
-} // namespace clipforge
+} // namespace shard

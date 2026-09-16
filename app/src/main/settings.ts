@@ -70,6 +70,12 @@ function normalizeSettings(next: Settings): Settings {
   // Backwards compat: hardwareAcceleration defaults to true when missing (older installs)
   if (typeof (next.app as unknown as Record<string, unknown>).hardwareAcceleration !== "boolean") (next.app as unknown as Record<string, unknown>).hardwareAcceleration = true;
   if ((next.export.resolution as string) === "auto") next.export.resolution = "source";
+  const exportSettings = next.export as unknown as Record<string, unknown>;
+  if (exportSettings.codec === "h264")
+    next.export.encoder = "libx264";
+  else if (exportSettings.codec === "h265")
+    next.export.encoder = "libx265";
+  delete exportSettings.codec;
   delete (next.game as unknown as Record<string, unknown>).gamesPath;
   delete (next.game as unknown as Record<string, unknown>).launchers;
   delete (next.export as unknown as Record<string, unknown>).audioBitrateKbps;

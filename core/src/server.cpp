@@ -13,7 +13,7 @@
 #include <ixwebsocket/IXWebSocketMessage.h>
 #include <ixwebsocket/IXWebSocketServer.h>
 
-namespace clipforge {
+namespace shard {
 
 Server::Server(Config& config, Rpc& rpc) : config_(config), rpc_(rpc) {}
 
@@ -164,4 +164,4 @@ void Server::broadcast(const char* type, const nlohmann::json& params)
   }
 }
 
-} // namespace clipforge
+} // namespace shard

@@ -8,13 +8,15 @@
 //
 // Launcher metadata identifies installed products; it never proves that every
 // executable under an install directory is the game. Product processes still
-// need a captureable foreground render surface. Protected games that deny
-// module enumeration may qualify after a stable foreground dwell, but only
+// need a captureable render surface on any monitor. Protected games that deny
+// module enumeration may qualify after a stable visible dwell, but only
 // when launcher metadata already identifies the containing product as a game.
 //
 // Runtime-discovered identities are deliberately non-authoritative across
 // launches. They must present recognized game-runtime evidence again, so an old
 // false positive cannot become a permanent executable allow rule.
+// Authoring/editor roles veto automatic admission even with engine/input DLLs.
+// Foreground focus selects the primary session; it is not required for identity.
 #pragma once
 
 #include "game_registry.h"
@@ -25,7 +27,7 @@
 #include <string>
 #include <vector>
 
-namespace clipforge {
+namespace shard {
 
 struct DetectionReason {
   std::string signal;
@@ -51,6 +53,7 @@ struct WindowFacts {
   bool fullscreen = false;
   bool foreground = false;
   int64_t area = 0;         // client pixels of the selected window
+  std::string windowClass;
 };
 
 struct RuntimeFacts {
@@ -60,6 +63,7 @@ struct RuntimeFacts {
   bool gameInput = false;   // paired modern gaming-input and controller APIs
   bool webRuntime = false;  // Chromium/CEF host; structural non-game evidence
   bool mediaRuntime = false; // dedicated media playback framework
+  bool editorRuntime = false; // authoring tools, including engine preview/play mode
 };
 
 struct DetectContext {
@@ -72,6 +76,7 @@ struct DetectContext {
   bool recentProcess = false;   // opened during the current launch episode
   int64_t nowMs = 0;
   int64_t foregroundIntentMs = 0;
+  int64_t visibleWindowMs = 0; // continuous captureable surface on any monitor
 };
 
 class GameDetector {
@@ -89,4 +94,4 @@ public:
   static bool canOwnQualifiedDescendant(const std::string& gameId);
 };
 
-} // namespace clipforge
+} // namespace shard

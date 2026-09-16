@@ -89,39 +89,37 @@ export function Editor({ clip, onClose, onExport }: Props) {
     setZoom(1);
     setHistory(createHistory(createEditorState(fallbackDuration, [])));
 
-    window.shard.generateTimelineFrames(clip.id, 36).then((frames) => {
-      if (!disposed) setFilmstrip(frames);
-    }).catch(() => {
-      // The timeline remains usable when thumbnail extraction is unavailable.
-    });
     window.shard.probeTracks(clip.id).then((tracks) => {
       if (disposed) return;
       const effectiveDuration = mediaDurationRef.current !== fallbackDuration ? mediaDurationRef.current : fallbackDuration;
       if (effectiveDuration !== fallbackDuration) mediaDurationAppliedRef.current = true;
       setHistory(createHistory(createEditorState(effectiveDuration, tracks)));
       setLoadingMedia(false);
-      for (const track of tracks) {
-        window.shard.prepareAudioPreview(clip.id, track.streamIndex).then((previewPath) => {
+      // Limit preparation to two tracks at a time. Thumbnail work and the
+      // native video player no longer compete with a burst of audio encoders.
+      const remaining = [...tracks];
+      const prepareTracks = async () => {
+        while (remaining.length && !disposed) {
+          const track = remaining.shift()!;
+          try {
+            const previewPath = await window.shard.prepareAudioPreview(clip.id, track.streamIndex);
+            if (disposed) return;
+            setAudioPreviewPaths((current) => new Map(current).set(track.streamIndex, previewPath));
+          } catch (error) {
+            if (!disposed) setMediaError(`Live preview for ${track.name} is unavailable: ${errorMessage(error)}`);
+          }
           if (disposed) return;
-          setAudioPreviewPaths((current) => {
-            const next = new Map(current);
-            next.set(track.streamIndex, previewPath);
-            return next;
-          });
-        }).catch((error: unknown) => {
-          if (!disposed) setMediaError(`Live preview for ${track.name} is unavailable: ${errorMessage(error)}`);
-        });
-        window.shard.generateWaveform(clip.id, track.streamIndex, 2400).then((waveform) => {
-          if (disposed) return;
-          setWaveforms((current) => {
-            const next = new Map(current);
-            next.set(track.streamIndex, waveform);
-            return next;
-          });
-        }).catch((error: unknown) => {
-          if (!disposed) setMediaError(`Waveform for ${track.name} is unavailable: ${errorMessage(error)}`);
-        });
-      }
+          try {
+            const waveform = await window.shard.generateWaveform(clip.id, track.streamIndex, 2400);
+            if (disposed) return;
+            setWaveforms((current) => new Map(current).set(track.streamIndex, waveform));
+          } catch (error) {
+            if (!disposed) setMediaError(`Waveform for ${track.name} is unavailable: ${errorMessage(error)}`);
+          }
+        }
+      };
+      void prepareTracks();
+      void prepareTracks();
     }).catch((error: unknown) => {
       if (disposed) return;
       setLoadingMedia(false);
@@ -138,6 +136,29 @@ export function Editor({ clip, onClose, onExport }: Props) {
       unsubscribe();
     };
   }, [clip.id, fallbackDuration]);
+
+
+  // Twelve samples cover the normal overview; zooming requests more detail
+  // without restarting playback, track preparation, or the edit history.
+  const previewCount = Math.min(48, Math.max(12, Math.ceil(zoom * 12)));
+  useEffect(() => {
+    let disposed = false;
+    const requestId = crypto.randomUUID();
+    const unsubscribe = window.shard.onTimelineFrames((progress) => {
+      if (!disposed && progress.requestId === requestId && progress.frames.some(Boolean)) setFilmstrip(progress.frames);
+    });
+    const timer = window.setTimeout(() => {
+      void window.shard.generateTimelineFrames(clip.id, previewCount, requestId).then((frames) => {
+        if (!disposed) setFilmstrip(frames);
+      }).catch(() => { /* Editing remains available if thumbnail extraction fails. */ });
+    }, previewCount === 12 ? 0 : 150);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      unsubscribe();
+      window.shard.cancelTimelineFrames(requestId);
+    };
+  }, [clip.id, previewCount]);
 
 
   // When actual video metadata arrives, upgrade the editor duration exactly once per clip
@@ -291,6 +312,70 @@ export function Editor({ clip, onClose, onExport }: Props) {
     }
   }, [history.present.segments, synchronizePreviewAudio]);
 
+  // Native timeupdate events can be hundreds of milliseconds apart. Read
+  // the media clock every animation frame, publishing at least every 50 ms.
+  const playbackSyncRef = useRef(synchronizePlayback);
+  playbackSyncRef.current = synchronizePlayback;
+  useEffect(() => {
+    if (!playing) return;
+    let frame = 0;
+    let lastUpdate = -Infinity;
+    const update = (now: number) => {
+      if (now - lastUpdate >= 50 && !timelineScrubbingRef.current && !videoRef.current?.seeking) {
+        playbackSyncRef.current();
+        lastUpdate = now;
+      }
+      frame = requestAnimationFrame(update);
+    };
+    frame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(frame);
+  }, [playing]);
+
+  // Keep the cursor responsive while the decoder catches up. Coalesce pointer
+  // movement to the latest target instead of restarting an in-flight seek.
+  const scrubSeekRef = useRef<{ frame: number; target: number | null; resume: boolean }>({ frame: 0, target: null, resume: false });
+  const seekSourceRef = useRef(seekSource);
+  seekSourceRef.current = seekSource;
+  const flushScrubSeek = useCallback(() => {
+    const pending = scrubSeekRef.current;
+    pending.frame = 0;
+    if (!timelineScrubbingRef.current || pending.target === null) return;
+    if (!videoRef.current?.seeking) {
+      seekSourceRef.current(pending.target);
+      pending.target = null;
+    } else {
+      pending.frame = requestAnimationFrame(flushScrubSeek);
+    }
+  }, []);
+  const handleScrub = useCallback((visual: number, playback: number) => {
+    const pending = scrubSeekRef.current;
+    if (!timelineScrubbingRef.current) {
+      pending.resume = !!videoRef.current && !videoRef.current.paused;
+      videoRef.current?.pause();
+    }
+    timelineScrubbingRef.current = true;
+    setVisualPlayhead(visual);
+    pending.target = playback;
+    if (!pending.frame) pending.frame = requestAnimationFrame(flushScrubSeek);
+  }, [flushScrubSeek]);
+  const handleScrubEnd = useCallback((visual: number, playback: number) => {
+    const pending = scrubSeekRef.current;
+    cancelAnimationFrame(pending.frame);
+    pending.frame = 0;
+    pending.target = null;
+    // Keep the visual source position in a deleted gap until playback resumes.
+    setVisualPlayhead(visual);
+    seekSourceRef.current(playback);
+    timelineScrubbingRef.current = false;
+    if (pending.resume) void videoRef.current?.play().catch(() => {});
+    pending.resume = false;
+  }, []);
+  useEffect(() => () => {
+    cancelAnimationFrame(scrubSeekRef.current.frame);
+    scrubSeekRef.current = { frame: 0, target: null, resume: false };
+    timelineScrubbingRef.current = false;
+  }, [clip.id]);
+
   const handlePlayingChange = useCallback((nextPlaying: boolean) => {
     setPlaying(nextPlaying);
     synchronizePreviewAudio(true, nextPlaying);
@@ -407,6 +492,7 @@ export function Editor({ clip, onClose, onExport }: Props) {
           <VideoPreview
             videoRef={videoRef}
             sourcePath={clip.path}
+            posterPath={clip.thumb}
             playing={playing}
             muted={muted}
             nativeMuted={externalAudioReady}
@@ -452,16 +538,8 @@ export function Editor({ clip, onClose, onExport }: Props) {
               canUndo={history.past.length > 0}
               canRedo={history.future.length > 0}
               onZoomChange={setZoom}
-              onScrub={(visualTime, playbackTime) => {
-                timelineScrubbingRef.current = true;
-                setVisualPlayhead(visualTime);
-                seekSource(playbackTime);
-              }}
-              onScrubEnd={(visualTime, playbackTime) => {
-                setVisualPlayhead(visualTime);
-                seekSource(playbackTime);
-                timelineScrubbingRef.current = false;
-              }}
+              onScrub={handleScrub}
+              onScrubEnd={handleScrubEnd}
               onSelectSegment={(segmentId) => setHistory((current) => ({ ...current, present: { ...current.present, selectedSegmentId: segmentId } }))}
               onSplit={splitAtPlayhead}
               onDelete={deleteSelected}

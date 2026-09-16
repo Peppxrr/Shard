@@ -3,9 +3,9 @@
 #include <cassert>
 #include <cstdio>
 
-using clipforge::CaptureRecoveryState;
-using clipforge::computeClientAreaCrop;
-using clipforge::captionBoundaryInset;
+using shard::CaptureRecoveryState;
+using shard::computeClientAreaCrop;
+using shard::captionBoundaryInset;
 
 int main()
 {

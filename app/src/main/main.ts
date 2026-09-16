@@ -15,7 +15,7 @@ import { HotkeyManager } from "./hotkeys";
 import { Library, clipsDir } from "./library";
 import { StorageWatchdog } from "./storage";
 import { ExportManager } from "./export";
-import { ffprobe, remuxToMp4, probeAudioTracks, prepareAudioPreview, generateWaveform, generateTimelineFrames } from "./ffmpeg";
+import { ffprobe, listExportEncoders, remuxToMp4, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews } from "./ffmpeg";
 import { SaveOverlay } from "./overlay";
 import { getDefaultSoundPath, playClipSound, previewClipSound, setSoundWindow } from "./sound";
 import { DevConsole } from "./dev-console";
@@ -205,7 +205,8 @@ let quitting = false;
 let coreFatal: string | null = null;
 const overlay = new SaveOverlay();
 const devConsole = new DevConsole();
-const editorProbeCache = new Map<string, { path: string; tracks: AudioTrackInfo[] }>();
+const editorProbeCache = new Map<string, { path: string; tracks: Promise<AudioTrackInfo[]> }>();
+const timelineRequests = new Map<string, AbortController>();
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -298,11 +299,8 @@ async function main(): Promise<void> {
   hotkeys.apply(getSettings());
 }
 
-// The ClipForge → Shard rename changed the packaged userData dir
-// (%APPDATA%\ClipForge → %APPDATA%\Shard), which silently orphaned every
-// saved setting on Start-menu launches. On first run under the new name,
-// carry the old profile over (settings, games.json, library.db, thumbs, core
-// config). No-op once the new dir has been initialized.
+// Import profiles from the former app name on first launch so existing
+// settings and clips remain available after upgrading.
 function migrateLegacyUserData(): void {
   const userData = app.getPath("userData");
   if (existsSync(path.join(userData, "settings.json"))) return;
@@ -396,24 +394,43 @@ function registerIpc(): void {
   ipcMain.handle("library:protect", (_e, id: string, prot: boolean) => {
     library.setProtected(id, prot);
     win?.webContents.send("library:changed");
+    void storage.check();
   });
   ipcMain.handle("editor:probe", (_e, clipId: string) => probeClipTracks(clipId));
-  ipcMain.handle("editor:waveform", (_e, clipId: string, streamIndex: number, points: number) => {
+  ipcMain.handle("editor:waveform", async (_e, clipId: string, streamIndex: number, points: number) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
-    const tracks = probeClipTracks(clipId);
+    const tracks = await probeClipTracks(clipId);
     if (!tracks.some((track) => track.streamIndex === streamIndex)) throw new Error("The requested audio stream does not exist");
     return generateWaveform(clip.path, streamIndex, clip.durationMs / 1000, points);
   });
-  ipcMain.handle("editor:timeline-frames", (_e, clipId: string, count: number) => {
+  ipcMain.handle("editor:timeline-frames", async (event, clipId: string, count: number, requestId: string) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
-    return generateTimelineFrames(clip.path, clip.durationMs / 1000, count);
+    if (typeof requestId !== "string" || requestId.length > 128) throw new Error("Invalid preview request");
+    const key = `${event.sender.id}:${requestId}`;
+    timelineRequests.get(key)?.abort();
+    const controller = new AbortController();
+    timelineRequests.set(key, controller);
+    const closed = () => controller.abort();
+    event.sender.once("destroyed", closed);
+    try {
+      return await editorTimelinePreviews().generate(clip.path, clip.durationMs / 1000, count, (frames) => {
+        if (!event.sender.isDestroyed() && !controller.signal.aborted)
+          event.sender.send("editor:timeline-progress", { requestId, frames });
+      }, controller.signal);
+    } finally {
+      event.sender.removeListener("destroyed", closed);
+      if (timelineRequests.get(key) === controller) timelineRequests.delete(key);
+    }
   });
-  ipcMain.handle("editor:audio-preview", (_e, clipId: string, streamIndex: number) => {
+  ipcMain.on("editor:timeline-cancel", (event, requestId: string) => {
+    timelineRequests.get(`${event.sender.id}:${requestId}`)?.abort();
+  });
+  ipcMain.handle("editor:audio-preview", async (_e, clipId: string, streamIndex: number) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
-    const tracks = probeClipTracks(clipId);
+    const tracks = await probeClipTracks(clipId);
     if (!tracks.some((track) => track.streamIndex === streamIndex)) throw new Error("The requested audio stream does not exist");
     return prepareAudioPreview(clip.path, streamIndex);
   });
@@ -428,8 +445,8 @@ function registerIpc(): void {
 
   ipcMain.handle("export:start", (_e, clipId: string, project: EditorExportProject) => doExport(clipId, project));
   ipcMain.handle("export:cancel", () => exporter.cancel());
-
-  ipcMain.handle("app:version", () => app.getVersion());
+  ipcMain.handle("export:listEncoders", () => listExportEncoders());
+  ipcMain.handle("app:version", () => app.getVersion().replace("+", "."));
   ipcMain.handle("app:restart", () => {
     quitting = true;
     app.relaunch();
@@ -512,19 +529,22 @@ async function doExport(clipId: string, project: EditorExportProject): Promise<v
   await exporter.export(clip, project, getSettings().export);
 }
 
-function probeClipTracks(clipId: string): AudioTrackInfo[] {
+function probeClipTracks(clipId: string): Promise<AudioTrackInfo[]> {
   const clip = library.get(clipId);
   if (!clip) throw new Error("The source clip is no longer in the library");
   const cached = editorProbeCache.get(clipId);
   if (cached?.path === clip.path) return cached.tracks;
-  const probed = probeAudioTracks(clip.path);
-  // Configured rows keep stable mix indexes while disabled so live toggles do
-  // not restart the ring. Use the same stable row order when naming streams.
-  const configuredSources = getSettings().audio.sources.slice(0, 5);
-  const sourceTracks = clip.source !== "edited" && probed.length > 1 ? probed.slice(1) : probed;
-  const tracks = sourceTracks.map((track, index) => identifyAudioTrack(track, configuredSources[index], sourceTracks.length));
-  editorProbeCache.set(clipId, { path: clip.path, tracks });
-  return tracks;
+  const pending = probeAudioTracks(clip.path).then((probed) => {
+    // Configured rows keep stable mix indexes while disabled so live toggles do
+    // not restart the ring. Use the same stable row order when naming streams.
+    const configuredSources = getSettings().audio.sources.slice(0, 5);
+    const sourceTracks = clip.source !== "edited" && probed.length > 1 ? probed.slice(1) : probed;
+    const tracks = sourceTracks.map((track, index) => identifyAudioTrack(track, configuredSources[index], sourceTracks.length));
+    return tracks;
+  });
+  editorProbeCache.set(clipId, { path: clip.path, tracks: pending });
+  void pending.catch(() => editorProbeCache.delete(clipId));
+  return pending;
 }
 
 function identifyAudioTrack(track: AudioTrackInfo, source: AudioSourceConfig | undefined, trackCount: number): AudioTrackInfo {
@@ -712,7 +732,7 @@ async function quit(): Promise<void> {
   app.quit();
 }
 
-app.on("before-quit", () => { quitting = true; });
+app.on("before-quit", () => { quitting = true; editorTimelinePreviews().dispose(); });
 app.on("window-all-closed", () => {
   // With close-to-tray the window is only hidden, so this only fires when the
   // window really closed (setting off or Quit): shut down fully.

@@ -4,7 +4,7 @@
 
 #include <filesystem>
 
-namespace clipforge {
+namespace shard {
 
 namespace fs = std::filesystem;
 
@@ -232,4 +232,4 @@ void FfmpegMuxWriter::close()
   }
 }
 
-} // namespace clipforge
+} // namespace shard

@@ -24,7 +24,7 @@
 #include <iterator>
 #include <set>
 
-namespace clipforge {
+namespace shard {
 
 namespace {
 
@@ -969,4 +969,4 @@ nlohmann::json SourceManager::listMonitors() const
   return out;
 }
 
-} // namespace clipforge
+} // namespace shard

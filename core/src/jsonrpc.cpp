@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <atomic>
 
-namespace clipforge {
+namespace shard {
 
 Rpc::Rpc(App& app, Config& config, Events& events, SourceManager& sources, EncoderManager& encoders,
          ReplayRing& ring, Recorder& recorder, GameSystem& games)
@@ -47,7 +47,7 @@ nlohmann::json Rpc::buildState() const
       {"sessions", games_.sessionsJson()},
       {"storage", {{"limitGb", config_.storageLimitGb}, {"clipsDir", config_.clipsBaseDir}}},
       {"dirs", {{"clips", config_.clipsDir}, {"recordings", config_.recordingsDir}}},
-      {"version", CLIPFORGE_VERSION},
+      {"version", SHARD_VERSION},
   };
 }
 
@@ -110,6 +110,17 @@ nlohmann::json Rpc::dispatch(const nlohmann::json& req)
     return {{"result", sources_.listDevices()}};
   if (method == "capture.listMonitors")
     return {{"result", sources_.listMonitors()}};
+  if (method == "video.listEncoders") {
+    nlohmann::json encoders = nlohmann::json::array();
+    for (const auto& encoder : encoders_.availableVideoEncoders()) {
+      encoders.push_back({{"id", encoder.id},
+                          {"label", encoder.label},
+                          {"codec", encoder.codec},
+                          {"vendor", encoder.vendor},
+                          {"hardware", encoder.hardware}});
+    }
+    return {{"result", encoders}};
+  }
   // ---- game registry / detection ----
   if (method == "game.listKnown")
     return {{"result", games_.listKnown()}};
@@ -200,6 +211,11 @@ nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
     if (key == "capture") {
       if (!fullRestart)
         sources_.applyVideoSource();
+      // A concrete monitor/game subject is capture-active while its backend
+      // acquires the first frame. Keep the eager ring alive across that warmup
+      // instead of exposing a false inactive state immediately after config.set.
+      if (sources_.subject().kind != SourceManager::Subject::Kind::None)
+        ring_.start();
     } else if (key == "audio") {
       if (!fullRestart) {
         sources_.applyAudioSources();
@@ -279,4 +295,4 @@ nlohmann::json Rpc::methodClipSave(const nlohmann::json& params)
   return {{"ok", true}, {"queued", true}};
 }
 
-} // namespace clipforge
+} // namespace shard

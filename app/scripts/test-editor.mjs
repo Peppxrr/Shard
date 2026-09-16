@@ -5,6 +5,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   commitHistory,
+  createRulerTicks,
+  formatRulerTime,
+  zoomScrollOffset,
+  createTimelineGeometry,
+  pixelsPerSecond,
   createEditorState,
   createHistory,
   deleteSegment,
@@ -73,6 +78,34 @@ assert.equal(editedDuration(state.segments), 49);
 const px = timeToPixel(12.5, 20, 40);
 assert.equal(px, 210);
 assert.equal(pixelToTime(px, 20, 40), 12.5);
+
+// Ruler subdivisions and labels must stay unique at fractional zoom scales.
+for (const duration of [3, 60, 300, 3605]) {
+  for (const zoom of [1, 1.4, 3.84, 8, 16]) {
+    const scale = pixelsPerSecond(duration, 1000, zoom);
+    const ticks = createRulerTicks(duration, scale);
+    const labels = ticks.filter((tick) => tick.label !== null);
+    assert.equal(new Set(labels.map((tick) => tick.label)).size, labels.length, "fractional ticks never repeat whole-second labels");
+    assert.equal(new Set(ticks.map((tick) => tick.time)).size, ticks.length);
+    assert(ticks.some((tick) => tick.label === null), "minor ticks are always present");
+    assert(ticks.every((tick) => tick.time <= duration + 0.000001));
+    // Coordinates remain continuous through scrolling and zoom, without snapping.
+    const scroll = 0.4 * duration * scale;
+    const geometry = createTimelineGeometry(() => ({ left: 180 - scroll, width: duration * scale }), duration, scale);
+    const target = duration * 0.43 + 0.123;
+    assert(Math.abs(geometry.clientXToTime(180 - scroll + target * scale) - target) < 1e-8);
+  }
+}
+const overview = createRulerTicks(60, 16);
+assert.deepEqual(overview.filter((tick) => tick.time <= 5).map((tick) => tick.time), [0, 1, 2, 3, 4, 5]);
+assert.deepEqual(overview.filter((tick) => tick.time <= 5 && tick.label !== null).map((tick) => tick.label), ["0:00", "0:05"]);
+assert.equal(formatRulerTime(0.25, 0.25), "0:00.25");
+assert.equal(formatRulerTime(59.999999999, 0.1), "1:00.0");
+assert.equal(formatRulerTime(3600.25, 0.25), "1:00:00.25");
+const anchoredScroll = zoomScrollOffset(400, 250, 20, 40, 1000, 300);
+assert.equal((400 + 250) / 20, (anchoredScroll + 250) / 40, "Ctrl-wheel keeps the time under the cursor fixed");
+assert.equal(zoomScrollOffset(anchoredScroll, 250, 40, 20, 1000, 300), 400, "zoom round trip preserves scroll position");
+assert.equal(zoomScrollOffset(4000, 900, 40, 1000 / 300, 1000, 300), 0, "fit clears horizontal scroll");
 
 let history = createHistory(createEditorState(30, audioTracks));
 const split = splitSegment(history.present, history.present.selectedSegmentId, 10);

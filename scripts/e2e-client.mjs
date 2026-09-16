@@ -1,4 +1,4 @@
-// ClipForge core E2E client (Node >= 22, global WebSocket).
+// Shard core E2E client (Node >= 22, global WebSocket).
 // Runs against a live core started by e2e.ps1 (env: CF_PORT, CF_TEMP, CF_COREBIN).
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -92,14 +92,14 @@ async function main() {
   const savedP = waitEvent("clip.saved", 120000);
   await call("clip.save", { durationSec: want });
   const clip = await savedP;
-  console.log(`  clip.saved: requested=${clip.requestedSec} actual=${clip.actualSec.toFixed(2)}`);
-  assert(Math.abs(clip.actualSec - want) <= 2, `clip.saved.actualSec in [${want - 2},${want + 2}] (got ${clip.actualSec.toFixed(2)})`);
+  console.log(`  clip.saved: requested=${clip.requestedSec} actual=${clip.actualSec.toFixed(3)}`);
+  assert(Math.abs(clip.actualSec - want) <= 0.05, `clip.saved.actualSec within one encoded frame of ${want}s (got ${clip.actualSec.toFixed(3)})`);
   assert(fs.existsSync(clip.path), "clip file exists");
 
   const fmt = ffprobe(clip.path);
   const dur = Number(fmt.duration);
   console.log(`  ffprobe duration=${dur}`);
-  assert(dur >= want - 5 && dur <= want + 5, `ffprobe duration in [${want - 5},${want + 5}] (got ${dur})`);
+  assert(Math.abs(dur - want) <= 0.05, `ffprobe duration within one encoded frame of ${want}s (got ${dur})`);
 
   // Capture mode toggle back to auto
   st = await call("config.set", { capture: { mode: "auto" } });

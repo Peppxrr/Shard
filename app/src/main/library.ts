@@ -8,7 +8,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { ClipRecord } from "../shared/contracts";
-import { ffprobe, ffprobeAsync, makeThumbnail, makeThumbnailAsync, remuxToMp4 } from "./ffmpeg";
+import { ffprobe, ffprobeAsync, makeThumbnail, makeThumbnailAsync, remuxToMp4, editorTimelinePreviews } from "./ffmpeg";
 import { getSettings } from "./settings";
 
 // SQLite columns are snake_case; the renderer contract is camelCase.
@@ -71,6 +71,7 @@ export class Library extends EventEmitter {
     if (!row) return;
     this.db.prepare("DELETE FROM clips WHERE id = ?").run(id);
     // File deletion is best-effort (may be locked by the viewer).
+    void editorTimelinePreviews().remove(row.path);
     fs.unlink(row.path).catch(() => {});
     if (row.thumb) fs.unlink(row.thumb).catch(() => {});
   }
@@ -79,8 +80,10 @@ export class Library extends EventEmitter {
     this.db.prepare("UPDATE clips SET protected = ? WHERE id = ?").run(prot ? 1 : 0, id);
   }
 
-  totalBytes(): number {
-    const row = this.db.prepare("SELECT COALESCE(SUM(size_bytes),0) AS s FROM clips").get() as { s: number };
+  autoDeleteBytes(includeEdited: boolean): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(size_bytes),0) AS s FROM clips WHERE protected = 0 AND (? = 1 OR source != 'edited')")
+      .get(includeEdited ? 1 : 0) as { s: number };
     return row.s;
   }
 
@@ -121,6 +124,7 @@ export class Library extends EventEmitter {
       )
       .run(rec);
     this.emit("added", rec);
+    editorTimelinePreviews().warm(file, probe.durationSec);
     return rec;
   }
 
@@ -149,6 +153,7 @@ export class Library extends EventEmitter {
       )
       .run(rec);
     this.emit("added", rec);
+    editorTimelinePreviews().warm(file, probe.durationSec);
     return rec;
   }
 

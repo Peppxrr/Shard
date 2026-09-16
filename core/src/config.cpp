@@ -3,7 +3,7 @@
 #include <fstream>
 #include <filesystem>
 
-namespace clipforge {
+namespace shard {
 
 namespace fs = std::filesystem;
 
@@ -223,4 +223,4 @@ std::vector<std::string> Config::applyPartial(const nlohmann::json& j)
   return touched;
 }
 
-} // namespace clipforge
+} // namespace shard

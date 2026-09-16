@@ -5,7 +5,7 @@
 
 #include <string>
 
-namespace clipforge {
+namespace shard {
 
 // Wire protocol shared with the obs-ffmpeg-mux helper (see
 // vendor/obs-studio/plugins/obs-ffmpeg/ffmpeg-mux/ffmpeg-mux.h).
@@ -57,4 +57,4 @@ private:
   std::string lastError_;
 };
 
-} // namespace clipforge
+} // namespace shard

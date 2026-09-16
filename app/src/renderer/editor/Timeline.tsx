@@ -1,9 +1,10 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { WaveformData } from "../../shared/contracts";
 import { Button, ContextMenu, Icon, IconButton } from "../components/ui";
 import {
-  chooseRulerStep,
+  createRulerTicks,
+  zoomScrollOffset,
   createTimelineGeometry,
   editedDuration,
   pixelsPerSecond,
@@ -11,7 +12,6 @@ import {
   timeToPixel,
   type EditorAudioTrack,
   type EditorState,
-  type TimelineGeometry,
   type TimelineSegment,
 } from "./model";
 import { formatEditorTime, mediaFileUrl } from "./VideoPreview";
@@ -139,7 +139,7 @@ export function Timeline({
 
   const pxPerSecond = pixelsPerSecond(state.duration, Math.max(1, viewportWidth - LABEL_WIDTH), zoom);
   const timelineWidth = Math.max(viewportWidth - LABEL_WIDTH, state.duration * pxPerSecond);
-  const rulerStep = chooseRulerStep(pxPerSecond);
+  const rulerTicks = useMemo(() => createRulerTicks(state.duration, pxPerSecond), [state.duration, pxPerSecond]);
 
   // The canonical coordinate system: rect of any track surface — one
   // formula shared by scrubbing, trimming, menus, playhead. The surface
@@ -189,59 +189,73 @@ export function Timeline({
     return () => cancelAnimationFrame(id);
   }, [timelineWidth, pxPerSecond, state.duration, zoom]);
 
-  // ------------------------------------------------------------------
-  // Unified scrub controller — the ONLY pointer-drag system on the
-  // timeline. Trim handles own their gesture separately and stop
-  // propagation; everything else scrubs through here.
-  //
-  // Drag state lives in refs so React re-renders cannot detach the
-  // gesture; seeking happens synchronously per event (no rAF lag), and
-  // the final position is committed once at pointer-up.
-  // ------------------------------------------------------------------
-  const scrubRef = useRef<{ active: boolean }>({ active: false });
-  const beginScrub = useCallback(
-    (event: ReactPointerEvent<Element>) => {
-      if (!event.isPrimary || event.button !== 0 || scrubRef.current.active) return;
-      // Clicking a segment selects it AND starts the scrub (one gesture).
-      const segmentEl = (event.target as Element).closest?.(".timeline-segment[data-segment-id]");
-      if (segmentEl) onSelectSegment(segmentEl.getAttribute("data-segment-id")!);
-      event.preventDefault();
-      const visual = clientXToTimelineTime(event.clientX);
-      const playback = nearestSeekableSourceTime(state.segments, visual);
-      scrubRef.current = { active: true };
-      try {
-        event.currentTarget.setPointerCapture(event.pointerId);
-      } catch {
-        // Capture is best-effort; moves still arrive while over the element.
-      }
-      onScrub(visual, playback);
-    },
-    [clientXToTimelineTime, onSelectSegment, onScrub, state.segments],
-  );
-  const updateScrub = useCallback(
-    (event: ReactPointerEvent<Element>) => {
-      if (!scrubRef.current.active || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-      const visual = clientXToTimelineTime(event.clientX);
-      const playback = nearestSeekableSourceTime(state.segments, visual);
-      onScrub(visual, playback);
-    },
-    [clientXToTimelineTime, onScrub, state.segments],
-  );
-  const endScrub = useCallback(
-    (event: ReactPointerEvent<Element>) => {
-      if (!scrubRef.current.active || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-      const visual = clientXToTimelineTime(event.clientX);
-      const playback = nearestSeekableSourceTime(state.segments, visual);
-      scrubRef.current = { active: false };
-      try {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      } catch {
-        // Already released implicitly by pointer-up.
-      }
-      onScrubEnd(visual, playback);
-    },
-    [clientXToTimelineTime, onScrubEnd, state.segments],
-  );
+  // One capture owner for the ruler, tracks, and playhead. Only timeline
+  // surfaces start a seek: labels, controls, and native scrollbars keep theirs.
+  const [scrubbing, setScrubbing] = useState(false);
+  const scrubRef = useRef<{ pointerId: number; visual: number; playback: number } | null>(null);
+  const scrubCallbacks = useRef({ geometry, segments: state.segments, onScrub, onScrubEnd });
+  scrubCallbacks.current = { geometry, segments: state.segments, onScrub, onScrubEnd };
+  const finishScrub = useCallback(() => {
+    const drag = scrubRef.current;
+    if (!drag) return;
+    scrubRef.current = null;
+    setScrubbing(false);
+    const host = scrollRef.current;
+    if (host?.hasPointerCapture(drag.pointerId)) host.releasePointerCapture(drag.pointerId);
+    scrubCallbacks.current.onScrubEnd(drag.visual, drag.playback);
+  }, []);
+  const moveScrub = useCallback((event: Pick<PointerEvent, "pointerId" | "clientX" | "buttons">) => {
+    const drag = scrubRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!(event.buttons & 1)) { finishScrub(); return; }
+    const current = scrubCallbacks.current;
+    drag.visual = current.geometry.clientXToTime(event.clientX);
+    drag.playback = nearestSeekableSourceTime(current.segments, drag.visual);
+    current.onScrub(drag.visual, drag.playback);
+  }, [finishScrub]);
+  const beginScrub = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.isPrimary || event.button !== 0) return;
+    const target = event.target as Element;
+    const handle = target.closest(".timeline__playhead-handle");
+    if (!handle && (!target.closest(".timeline__surface") || target.closest("button, input, select, textarea, [role=button]"))) return;
+    // A fresh down also recovers if the OS swallowed a previous release.
+    finishScrub();
+    const segment = target.closest(".timeline-segment[data-segment-id]");
+    if (segment) onSelectSegment(segment.getAttribute("data-segment-id")!);
+    event.preventDefault();
+    const visual = geometry.clientXToTime(event.clientX);
+    const playback = nearestSeekableSourceTime(state.segments, visual);
+    scrubRef.current = { pointerId: event.pointerId, visual, playback };
+    setScrubbing(true);
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Window listeners remain a fallback. */ }
+    onScrub(visual, playback);
+  }, [finishScrub, geometry, onSelectSegment, onScrub, state.segments]);
+
+  useEffect(() => {
+    const end = (event: PointerEvent) => {
+      const drag = scrubRef.current;
+      if (drag?.pointerId !== event.pointerId) return;
+      if (event.type === "pointerup") moveScrub({ pointerId: event.pointerId, clientX: event.clientX, buttons: 1 });
+      finishScrub();
+    };
+    const hidden = () => { if (document.hidden) finishScrub(); };
+    window.addEventListener("pointermove", moveScrub);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("blur", finishScrub);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      window.removeEventListener("pointermove", moveScrub);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      window.removeEventListener("blur", finishScrub);
+      document.removeEventListener("visibilitychange", hidden);
+    };
+  }, [finishScrub, moveScrub]);
+
+  // A geometry change ends the gesture at its last valid source position;
+  // old screen coordinates must never be applied to a new zoom level.
+  useLayoutEffect(() => { finishScrub(); }, [pxPerSecond, finishScrub]);
 
   // ------------------------------------------------------------------
   // Trim drag: separate gesture. Owns the pointer via capture on the
@@ -262,6 +276,7 @@ export function Timeline({
   });
   const beginTrim = useCallback(
     (segment: TimelineSegment, edge: "start" | "end", event: ReactPointerEvent<HTMLButtonElement>) => {
+      if (!event.isPrimary || event.button !== 0) return;
       event.preventDefault();
       event.stopPropagation();
       const pointerTime = clientXToTimelineTime(event.clientX);
@@ -315,7 +330,7 @@ export function Timeline({
   );
   useEffect(() => () => {
     // Unmount safety: never leave stale gesture flags.
-    scrubRef.current = { active: false };
+    scrubRef.current = null;
     trimDragRef.current = {
       active: false,
       segmentId: "",
@@ -323,6 +338,11 @@ export function Timeline({
       pointerOffsetTime: 0,
     };
   }, []);
+
+  useLayoutEffect(() => {
+    trimDragRef.current.active = false;
+    setDraftTrim(null);
+  }, [zoom]);
 
   const selectedSegment = state.segments.find((segment) => segment.id === state.selectedSegmentId) ?? null;
   const activeTrack = state.audioTracks.find((track) => track.streamIndex === activeAudio) ?? null;
@@ -339,34 +359,51 @@ export function Timeline({
     return gaps.filter((gap) => gap.end > gap.start);
   }, [state.segments, state.duration]);
 
-  const handleZoom = (nextZoom: number) => {
+  const pendingScroll = useRef<number | null>(null);
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const handleZoom = useCallback((nextZoom: number, clientX?: number) => {
     const clamped = Math.max(1, Math.min(16, nextZoom));
-    if (clamped === zoom) return;
+    if (clamped === zoomRef.current) return;
+    finishScrub();
     const host = scrollRef.current;
-    if (!host) {
-      onZoomChange(clamped);
-      return;
+    if (host) {
+      const viewport = Math.max(1, host.clientWidth - LABEL_WIDTH);
+      const oldPx = pixelsPerSecond(state.duration, viewport, zoomRef.current);
+      const newPx = pixelsPerSecond(state.duration, viewport, clamped);
+      const scrollLeft = pendingScroll.current ?? host.scrollLeft;
+      const pointerOffset = clientX === undefined ? undefined : Math.max(0, Math.min(viewport, clientX - host.getBoundingClientRect().left - LABEL_WIDTH));
+      const visiblePlayhead = playhead * oldPx - scrollLeft;
+      const anchorOffset = pointerOffset ?? (visiblePlayhead >= 0 && visiblePlayhead <= viewport ? visiblePlayhead : viewport / 2);
+      pendingScroll.current = zoomScrollOffset(scrollLeft, anchorOffset, oldPx, newPx, viewport, state.duration);
     }
-    const viewport = Math.max(1, host.clientWidth - LABEL_WIDTH);
-    const oldPx = pxPerSecond;
-    const newPx = pixelsPerSecond(state.duration, viewport, clamped);
-    const scrollLeft = host.scrollLeft;
-    const visibleStart = scrollLeft / oldPx;
-    const visibleEnd = (scrollLeft + viewport) / oldPx;
-    const playheadVisible = playhead >= visibleStart && playhead <= visibleEnd;
-    const anchorTime = playheadVisible ? playhead : (scrollLeft + viewport / 2) / oldPx;
-    const newScroll = Math.max(0, anchorTime * newPx - viewport / 2);
+    zoomRef.current = clamped;
     onZoomChange(clamped);
-    requestAnimationFrame(() => {
-      if (scrollRef.current) scrollRef.current.scrollLeft = newScroll;
-    });
-  };
-
+  }, [finishScrub, onZoomChange, playhead, state.duration]);
+  useLayoutEffect(() => {
+    if (pendingScroll.current !== null && scrollRef.current) {
+      scrollRef.current.scrollLeft = pendingScroll.current;
+      pendingScroll.current = null;
+    }
+  }, [zoom, timelineWidth]);
+  useEffect(() => {
+    const host = scrollRef.current;
+    if (!host) return;
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault(); // Prevent Chromium page zoom; ordinary wheel still scrolls.
+      const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? host.clientHeight : 1);
+      handleZoom(zoomRef.current * Math.exp(-Math.max(-240, Math.min(240, delta)) * 0.003), event.clientX);
+    };
+    host.addEventListener("wheel", wheel, { passive: false });
+    return () => host.removeEventListener("wheel", wheel);
+  }, [handleZoom]);
   const handleFit = () => {
+    finishScrub();
+    pendingScroll.current = zoomRef.current === 1 ? null : 0;
+    zoomRef.current = 1;
     onZoomChange(1);
-    requestAnimationFrame(() => {
-      if (scrollRef.current) scrollRef.current.scrollLeft = 0;
-    });
+    if (scrollRef.current) scrollRef.current.scrollLeft = 0;
   };
 
   return (
@@ -391,20 +428,11 @@ export function Timeline({
       </header>
 
       <div
-        className={`timeline__scroll${scrubRef.current.active ? " is-scrubbing" : ""}`}
+        className={`timeline__scroll${scrubbing ? " is-scrubbing" : ""}`}
         ref={scrollRef}
         onPointerDown={beginScrub}
-        onPointerMove={updateScrub}
-        onPointerUp={endScrub}
-        onPointerCancel={endScrub}
         onLostPointerCapture={(event) => {
-          // Capture loss without up/cancel (alt-tab, OS gesture): end cleanly.
-          if (scrubRef.current.active && !event.currentTarget.hasPointerCapture(event.pointerId)) {
-            scrubRef.current = { active: false };
-            const visual = clientXToTimelineTime(event.clientX);
-            const playback = nearestSeekableSourceTime(state.segments, visual);
-            onScrubEnd(visual, playback);
-          }
+          if (event.target === event.currentTarget && scrubRef.current?.pointerId === event.pointerId) finishScrub();
         }}
         onContextMenu={(event) => event.preventDefault()}
       >
@@ -412,10 +440,10 @@ export function Timeline({
           <div className="timeline__row timeline__row--ruler">
             <div className="timeline__label timeline__label--ruler">SOURCE TIME</div>
             <div className="timeline__surface timeline__ruler" style={{ width: timelineWidth }}>
-              {ticks(rulerStep, state.duration).map((time) => (
-                <span key={time} className="timeline__tick" style={{ left: timeToPixel(time, pxPerSecond) }}>
+              {rulerTicks.map(({ time, label }) => (
+                <span key={time} className={`timeline__tick${label === null ? " is-minor" : ""}`} style={{ left: timeToPixel(time, pxPerSecond) }}>
                   <i />
-                  <b className="num">{formatEditorTime(time)}</b>
+                  {label !== null && <b className="num">{label}</b>}
                 </span>
               ))}
             </div>
@@ -430,7 +458,9 @@ export function Timeline({
               {filmstrip.length > 0 && (
                 <span className="timeline__filmstrip">
                   {filmstrip.map((frame, index) => (
-                    <img key={frame} src={mediaFileUrl(frame)} alt="" draggable={false} style={{ order: index }} />
+                    <span key={index} className="timeline__frame">
+                      {frame && <img src={mediaFileUrl(frame)} alt="" draggable={false} />}
+                    </span>
                   ))}
                 </span>
               )}
@@ -463,7 +493,8 @@ export function Timeline({
                         onPointerDown={(event) => beginTrim(segment, "start", event)}
                         onPointerMove={(event) => moveTrim(event, segment.id, "start")}
                         onPointerUp={(event) => finishTrim(event, segment.id, "start")}
-                        onPointerCancel={(event) => finishTrim(event, segment.id, "start")}
+                        onPointerCancel={() => { trimDragRef.current.active = false; setDraftTrim(null); }}
+                        onLostPointerCapture={() => { trimDragRef.current.active = false; setDraftTrim(null); }}
                       />
                     )}
                     <span className="timeline-segment__index">{index + 1}</span>
@@ -475,7 +506,8 @@ export function Timeline({
                         onPointerDown={(event) => beginTrim(segment, "end", event)}
                         onPointerMove={(event) => moveTrim(event, segment.id, "end")}
                         onPointerUp={(event) => finishTrim(event, segment.id, "end")}
-                        onPointerCancel={(event) => finishTrim(event, segment.id, "end")}
+                        onPointerCancel={() => { trimDragRef.current.active = false; setDraftTrim(null); }}
+                        onLostPointerCapture={() => { trimDragRef.current.active = false; setDraftTrim(null); }}
                       />
                     )}
                   </div>
@@ -561,7 +593,7 @@ export function Timeline({
               transform — otherwise the playhead leads/trails the pointer
               by exactly the label width. */}
           <div
-            className={`timeline__playhead${scrubRef.current.active ? " is-dragging" : ""}`}
+            className={`timeline__playhead${scrubbing ? " is-dragging" : ""}`}
             style={{ transform: `translateX(${LABEL_WIDTH + playhead * pxPerSecond}px)` }}
           >
             <span className="timeline__playhead-line" />
@@ -570,50 +602,6 @@ export function Timeline({
               className="timeline__playhead-handle"
               aria-label="Playhead — drag to reposition"
               title="Playhead — drag to reposition"
-              onPointerDown={(event) => {
-                if (!event.isPrimary || event.button !== 0 || scrubRef.current.active) return;
-                event.preventDefault();
-                event.stopPropagation();
-                const visual = clientXToTimelineTime(event.clientX);
-                const playback = nearestSeekableSourceTime(state.segments, visual);
-                scrubRef.current = { active: true };
-                try {
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                } catch {
-                  // Capture best-effort
-                }
-                onScrub(visual, playback);
-              }}
-              onPointerMove={(event) => {
-                if (!scrubRef.current.active || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-                const visual = clientXToTimelineTime(event.clientX);
-                const playback = nearestSeekableSourceTime(state.segments, visual);
-                onScrub(visual, playback);
-              }}
-              onPointerUp={(event) => {
-                if (!scrubRef.current.active || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-                const visual = clientXToTimelineTime(event.clientX);
-                const playback = nearestSeekableSourceTime(state.segments, visual);
-                scrubRef.current = { active: false };
-                try {
-                  event.currentTarget.releasePointerCapture(event.pointerId);
-                } catch {
-                  // Implicit release
-                }
-                onScrubEnd(visual, playback);
-              }}
-              onPointerCancel={(event) => {
-                if (!scrubRef.current.active || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-                const visual = clientXToTimelineTime(event.clientX);
-                const playback = nearestSeekableSourceTime(state.segments, visual);
-                scrubRef.current = { active: false };
-                try {
-                  event.currentTarget.releasePointerCapture(event.pointerId);
-                } catch {
-                  // Implicit
-                }
-                onScrubEnd(visual, playback);
-              }}
             />
           </div>
         </div>
@@ -652,12 +640,6 @@ export function Timeline({
       )}
     </section>
   );
-}
-
-function ticks(step: number, duration: number): number[] {
-  const values: number[] = [];
-  for (let time = 0; time <= duration + 0.0001; time += step) values.push(time);
-  return values;
 }
 
 function volumeSliderStyle(value: number, max: number): CSSProperties {

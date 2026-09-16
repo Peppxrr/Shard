@@ -1,7 +1,9 @@
+import { KeyCaps } from "./HotkeyControls";
 import { useEffect, useState } from "react";
 import type { ClipRecord, CoreState, Settings } from "../../shared/contracts";
 import { fmtDuration, fmtSize, relativeDate, Viewer } from "./LibraryPage";
 import { Button, Card, EmptyState, Icon, Segmented, StatusDot } from "./ui";
+import { mediaFileUrl } from "../editor/VideoPreview";
 
 interface Props {
   settings: Settings;
@@ -14,7 +16,7 @@ const MODE_LABEL: Record<string, string> = {
   game: "Game only",
 };
 const ENC_LABEL: Record<string, string> = {
-  auto: "Auto · NVENC→x264",
+  auto: "Automatic",
   obs_x264: "x264 (CPU)",
   obs_x265: "x265 / HEVC (CPU)",
   obs_nvenc_h264_tex: "NVENC H.264",
@@ -77,15 +79,22 @@ export function CapturePage({ settings, clips }: Props) {
     void window.shard.invoke(recording ? "recording.stop" : "recording.start").catch(() => {});
   };
 
-  const usedBytes = clips.reduce((s, c) => s + c.sizeBytes, 0);
+  const usedBytes = clips.reduce(
+    (sum, clip) => sum + (clip.protected === 0 && (settings.storage.deleteEdited || clip.source !== "edited") ? clip.sizeBytes : 0),
+    0,
+  );
   const limitBytes = settings.storage.limitGb * 1024 * 1024 * 1024;
   const usedGb = usedBytes / 1024 / 1024 / 1024;
   const pct = limitBytes > 0 ? Math.min(100, (usedBytes / limitBytes) * 100) : 0;
   const fillClass = pct >= 100 ? "is-over" : pct >= 75 ? "is-warn" : "";
-  const lastClips = [...clips].sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
+  const lastClips = [...clips].sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
 
   return (
     <div className="capture">
+      <header className="page__head">
+        <h1 className="page__title">Capture</h1>
+        <p className="dim page__sub">Keep the moments worth saving.</p>
+      </header>
       <section className="capture__hero card">
         <div className="capture__hero-main">
           <span className="eyebrow">Replay buffer</span>
@@ -100,7 +109,7 @@ export function CapturePage({ settings, clips }: Props) {
           </p>
         </div>
         <div className="capture__ring">
-          <div className="capture__ring-num num">{ringSeconds ?? "—"}</div>
+          <div className="capture__ring-num num">{ringSeconds === null ? "—" : Math.floor(ringSeconds)}</div>
           <div className="eyebrow" style={{ marginTop: 2 }}>sec buffered</div>
           {recording && <span className="chip chip--rec"><span className="dot dot--rec" /> REC</span>}
         </div>
@@ -113,12 +122,12 @@ export function CapturePage({ settings, clips }: Props) {
             onChange={setDur}
             options={[{ value: "30", label: "30s" }, { value: "60", label: "60s" }, { value: "120", label: "2m" }, { value: "300", label: "5m" }]}
           />
-          <Button size="lg" variant="primary" icon={<Icon name="save" size={18} />} loading={saving} onClick={saveClip}>Save clip</Button>
+          <Button variant="primary" icon={<Icon name="save" size={16} />} loading={saving} onClick={saveClip}>Save clip</Button>
         </div>
-        <Button size="lg" variant={recording ? "danger" : "soft"}
+        <Button variant={recording ? "danger" : "soft"}
           icon={recording ? <Icon name="stop" size={16} /> : <Icon name="record" size={16} />}
           onClick={toggleRecord}>
-          {recording ? "Stop" : "Record"}
+          {recording ? "Stop recording" : "Start recording"}
         </Button>
       </section>
 
@@ -128,7 +137,7 @@ export function CapturePage({ settings, clips }: Props) {
             {settings.hotkeys.map((h) => (
               <li key={h.id} className="hotkey-list__row">
                 <span className="hotkey-list__label">{h.label || "Untitled"}</span>
-                <span className="kb">{h.accelerator}</span>
+                <span className="capture-shortcut" aria-label={h.accelerator || "Not assigned"}><KeyCaps value={h.accelerator} /></span>
               </li>
             ))}
             {settings.hotkeys.length === 0 && <li className="dim">No hotkeys configured.</li>}
@@ -150,8 +159,8 @@ export function CapturePage({ settings, clips }: Props) {
           <div className="meter">
             <div className="meter__track"><div className={`meter__fill ${fillClass}`} style={{ width: `${pct}%` }} /></div>
           </div>
-          <p className="kv__line num dim"><strong>{usedGb.toFixed(2)} GB</strong> of {settings.storage.limitGb} GB used</p>
-          <p className="kv__line dim">Oldest unprotected clips auto-delete at the limit.</p>
+          <p className="kv__line num dim"><strong>{usedGb.toFixed(2)} GB</strong> of {settings.storage.limitGb} GB auto-managed</p>
+          <p className="kv__line dim">Favorites never count. Edited clips count only when their auto-delete setting is enabled.</p>
         </Card>
       </div>
 
@@ -161,7 +170,7 @@ export function CapturePage({ settings, clips }: Props) {
             {lastClips.map((c) => (
               <button key={c.id} className="recent" onClick={() => setRecent(c)} title={c.game ?? "Untagged"}>
                 <div className="recent__thumb">
-                  {c.thumb ? <img src={`file://${c.thumb}`} alt="" /> : <div className="recent__nothumb"><Icon name="film" size={20} /></div>}
+                  {c.thumb ? <img src={mediaFileUrl(c.thumb)} alt="" /> : <div className="recent__nothumb"><Icon name="film" size={20} /></div>}
                   {c.protected === 1 && <span className="badge badge--fav"><Icon name="star" size={10} /></span>}
                   <span className="badge badge--dur num">{fmtDuration(c.durationMs)}</span>
                 </div>

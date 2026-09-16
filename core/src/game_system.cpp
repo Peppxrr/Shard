@@ -6,13 +6,15 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <set>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <dwmapi.h>
 #endif
 
-namespace clipforge {
+namespace shard {
 
 namespace fs = std::filesystem;
 
@@ -105,6 +107,7 @@ void GameSystem::onConfigChanged()
 void GameSystem::loop()
 {
   int64_t lastTick = 0;
+  int64_t lastVisibleScan = 0;
   while (run_.load()) {
     const int64_t now = unixNowMs();
     if (now - lastTick >= 500) {
@@ -120,6 +123,10 @@ void GameSystem::loop()
         lastDiscovery_ = steady_clock::now();
       }
       evaluateForegroundProcess();
+      if (now - lastVisibleScan >= 2000) {
+        lastVisibleScan = now;
+        evaluateVisibleProcesses();
+      }
       reEvaluateCandidates();
       applyFocusPrimary();
       probeSessions();
@@ -155,6 +162,7 @@ void GameSystem::handleProcessEvent(const ProcessEvent& e)
   std::lock_guard<std::mutex> lock(stateMtx_);
   knownPids_.erase(e.info.pid);
   candidateSince_.erase(e.info.pid);
+  visibleSince_.erase(e.info.pid);
   if (observedForegroundPid_ == e.info.pid)
     observedForegroundPid_ = 0;
   sessions_.onProcessExited(e.info.pid);
@@ -178,6 +186,11 @@ void GameSystem::evaluateProcess(uint32_t pid)
   process = monitor_.lookup(pid);
   const auto productHint = productHintForPath(process.path);
   const WindowProbe probe = probeWindow(pid);
+  if (!probe.captureable) {
+    std::lock_guard<std::mutex> lock(stateMtx_);
+    visibleSince_.erase(pid);
+    return;
+  }
   const ProcessRuntimeFacts runtime = monitor_.probeRuntime(pid);
 
   DetectContext context;
@@ -192,19 +205,22 @@ void GameSystem::evaluateProcess(uint32_t pid)
   context.window.fullscreen = probe.fullscreen;
   context.window.foreground = probe.foreground;
   context.window.area = probe.area;
+  context.window.windowClass = probe.cls;
   context.runtime.probeSucceeded = runtime.probeSucceeded;
   context.runtime.graphicsApi = runtime.graphicsApi;
   context.runtime.gameRuntime = runtime.gameRuntime;
   context.runtime.webRuntime = runtime.webRuntime;
   context.runtime.mediaRuntime = runtime.mediaRuntime;
   context.runtime.gameInput = runtime.gameInput;
+  context.runtime.editorRuntime = runtime.editorRuntime;
   context.recentProcess = process.startMs > 0 && context.nowMs >= process.startMs &&
                           context.nowMs - process.startMs <= kCandidateTimeoutMs;
-  if (probe.foreground) {
+  {
     std::lock_guard<std::mutex> lock(stateMtx_);
-    const auto candidate = candidateSince_.find(pid);
-    if (candidate != candidateSince_.end())
-      context.foregroundIntentMs = context.nowMs - candidate->second;
+    const auto [visible, inserted] = visibleSince_.try_emplace(pid, context.nowMs);
+    context.visibleWindowMs = context.nowMs - visible->second;
+    if (probe.foreground && observedForegroundPid_ == pid)
+      context.foregroundIntentMs = context.nowMs - foregroundSinceMs_;
   }
 
   DetectionResult result = GameDetector::detect(process, context);
@@ -251,8 +267,9 @@ void GameSystem::evaluateProcess(uint32_t pid)
       std::lock_guard<std::mutex> lock(stateMtx_);
       knownPids_[pid] = result.gameId;
       candidateSince_.erase(pid);
+      visibleSince_.erase(pid);
     }
-    sessions_.onDetected(result, process);
+    sessions_.onDetected(result, process, probe.foreground);
 
     // The process passed positive game qualification. Persist only this
     // executable, never its unobserved directory siblings.
@@ -292,16 +309,15 @@ void GameSystem::reEvaluateCandidates()
 void GameSystem::evaluateForegroundProcess()
 {
   const uint32_t pid = foregroundPid();
-  if (pid == 0)
-    return;
 
   bool shouldEvaluate = false;
   {
     std::lock_guard<std::mutex> lock(stateMtx_);
-    if (knownPids_.count(pid))
-      return;
     if (pid != observedForegroundPid_) {
       observedForegroundPid_ = pid;
+      foregroundSinceMs_ = unixNowMs();
+      if (pid == 0 || knownPids_.count(pid))
+        return;
       candidateSince_[pid] = unixNowMs();
       shouldEvaluate = true;
     } else {
@@ -310,6 +326,33 @@ void GameSystem::evaluateForegroundProcess()
   }
   if (shouldEvaluate)
     evaluateProcess(pid);
+}
+
+void GameSystem::evaluateVisibleProcesses()
+{
+#ifdef _WIN32
+  // One window enumeration discovers surfaces that appear after WMI's start
+  // event, including games already open when Shard starts and second monitors.
+  // Module enumeration remains limited to processes with captureable windows.
+  std::set<uint32_t> visible;
+  EnumWindows([](HWND window, LPARAM param) -> BOOL {
+    if (IsWindowVisible(window) && !IsIconic(window)) {
+      DWORD pid = 0;
+      GetWindowThreadProcessId(window, &pid);
+      reinterpret_cast<std::set<uint32_t>*>(param)->insert(pid);
+    }
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&visible));
+  {
+    std::lock_guard<std::mutex> lock(stateMtx_);
+    for (auto it = visibleSince_.begin(); it != visibleSince_.end();) {
+      if (!visible.count(it->first)) it = visibleSince_.erase(it);
+      else ++it;
+    }
+  }
+  for (uint32_t pid : visible)
+    evaluateProcess(pid);
+#endif
 }
 
 std::string GameSystem::createRuntimeProduct(const ProcessInfo& process, const DetectionResult& result)
@@ -434,7 +477,7 @@ void GameSystem::probeSessions()
       ctx.window.foreground = bestProbe.foreground;
       ctx.window.area = bestProbe.area;
       ctx.runtime = {runtime.probeSucceeded, runtime.graphicsApi, runtime.gameRuntime, runtime.gameInput,
-                     runtime.webRuntime, runtime.mediaRuntime};
+                     runtime.webRuntime, runtime.mediaRuntime, runtime.editorRuntime};
       DetectionResult r = GameDetector::detect(bestInfo, ctx);
       if (r.decision == DetectionResult::Decision::Detected) {
         sessions_.onDetected(r, bestInfo);
@@ -467,7 +510,7 @@ void GameSystem::probeSessions()
   ctx.window.foreground = bestProbe.foreground;
   ctx.window.area = bestProbe.area;
   ctx.runtime = {runtime.probeSucceeded, runtime.graphicsApi, runtime.gameRuntime, runtime.gameInput,
-                 runtime.webRuntime, runtime.mediaRuntime};
+                 runtime.webRuntime, runtime.mediaRuntime, runtime.editorRuntime};
   DetectionResult r = GameDetector::detect(p, ctx);
   if (r.decision != DetectionResult::Decision::Ignored)
     sessions_.onDetected(r, p); // refreshes score/launcher, never restarts
@@ -510,6 +553,9 @@ GameSystem::WindowProbe GameSystem::probeWindow(uint32_t pid, const std::string&
         DWORD wpid = 0;
         GetWindowThreadProcessId(h, &wpid);
         if (wpid != c->pid || !IsWindowVisible(h))
+          return TRUE;
+        DWORD cloaked = 0;
+        if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
           return TRUE;
         const LONG_PTR exStyles = GetWindowLongPtr(h, GWL_EXSTYLE);
         if ((exStyles & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0)
@@ -829,7 +875,22 @@ bool GameSystem::ignoreExe(const std::string& exe)
 
 bool GameSystem::unignoreExe(const std::string& exe)
 {
-  return registry_.removeIgnoredExe(exe);
+  const std::string target = toLower(exe);
+  if (!registry_.removeIgnoredExe(target))
+    return false;
+
+  // A running process does not emit another Started event. Put every matching
+  // live pid back into the owner loop's candidate set so restoring an entry is
+  // effective without restarting either the process or Shard.
+  const int64_t now = unixNowMs();
+  std::lock_guard<std::mutex> lock(stateMtx_);
+  for (uint32_t pid : monitor_.allPids()) {
+    if (monitor_.lookup(pid).exe == target)
+      candidateSince_[pid] = now;
+  }
+  if (monitor_.lookup(observedForegroundPid_).exe == target)
+    observedForegroundPid_ = 0;
+  return true;
 }
 
 
@@ -884,15 +945,18 @@ nlohmann::json GameSystem::detectExplain(const nlohmann::json& params) const
   ctx.window.fullscreen = probe.fullscreen;
   ctx.window.foreground = probe.foreground;
   ctx.window.area = probe.area;
+  ctx.window.windowClass = probe.cls;
   ctx.runtime = {runtime.probeSucceeded, runtime.graphicsApi, runtime.gameRuntime, runtime.gameInput,
-                 runtime.webRuntime, runtime.mediaRuntime};
+                 runtime.webRuntime, runtime.mediaRuntime, runtime.editorRuntime};
   ctx.recentProcess = p.startMs > 0 && ctx.nowMs >= p.startMs &&
                       ctx.nowMs - p.startMs <= kCandidateTimeoutMs;
-  if (probe.foreground) {
+  {
     std::lock_guard<std::mutex> lock(stateMtx_);
-    const auto candidate = candidateSince_.find(pid);
-    if (candidate != candidateSince_.end())
-      ctx.foregroundIntentMs = ctx.nowMs - candidate->second;
+    if (probe.foreground && observedForegroundPid_ == pid)
+      ctx.foregroundIntentMs = ctx.nowMs - foregroundSinceMs_;
+    const auto visible = visibleSince_.find(pid);
+    if (probe.captureable && visible != visibleSince_.end())
+      ctx.visibleWindowMs = ctx.nowMs - visible->second;
   }
   const DetectionResult r = GameDetector::detect(p, ctx);
 
@@ -951,4 +1015,4 @@ void GameSystem::logDetection(const ProcessInfo& p, const DetectionResult& r)
   std::fprintf(stderr, "  Decision: %s\n", decision);
 }
 
-} // namespace clipforge
+} // namespace shard
