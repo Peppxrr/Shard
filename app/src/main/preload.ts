@@ -10,10 +10,21 @@ import type {
   ExportProgress,
   ExportEncoderInfo,
   Settings,
+  UpdateState,
   WaveformData,
 } from "../shared/contracts";
 
 const api: ShardApi = {
+  getUpdateState: () => ipcRenderer.invoke("updates:state") as Promise<UpdateState>,
+  checkForUpdates: () => ipcRenderer.invoke("updates:check") as Promise<UpdateState>,
+  downloadUpdate: () => ipcRenderer.invoke("updates:download") as Promise<UpdateState>,
+  installUpdate: () => ipcRenderer.invoke("updates:install") as Promise<UpdateState>,
+  openUpdateRelease: () => ipcRenderer.invoke("updates:release") as Promise<UpdateState>,
+  onUpdateState: (cb) => {
+    const listener = (_e: unknown, state: UpdateState) => cb(state);
+    ipcRenderer.on("updates:state", listener);
+    return () => ipcRenderer.removeListener("updates:state", listener);
+  },
   invoke: (method: string, params?: Record<string, unknown>) =>
     ipcRenderer.invoke("core:invoke", method, params ?? {}),
 
@@ -65,6 +76,7 @@ const api: ShardApi = {
     return () => ipcRenderer.removeListener("export:progress", listener);
   },
   version: () => ipcRenderer.invoke("app:version") as Promise<string>,
+  copyPlaybackReport: (sampleJson: string) => ipcRenderer.invoke("playback:copy-report", sampleJson) as Promise<void>,
   restartApp: () => ipcRenderer.invoke("app:restart") as Promise<void>,
   windowControlsSupported: process.platform === "win32",
   minimizeWindow: () => ipcRenderer.invoke("window:minimize") as Promise<void>,

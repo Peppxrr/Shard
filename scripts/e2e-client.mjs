@@ -81,6 +81,12 @@ async function main() {
 
   st = await call("state.get");
   assert(st.video.encoder === "auto", "state.get video defaults");
+  // WGC initialization is asynchronous; a successful config.set is not a
+  // promise that its first frame has already reached the replay output.
+  for (let attempt = 0; !st.ring.active && attempt < 40; attempt++) {
+    await sleep(250);
+    st = await call("state.get");
+  }
   assert(st.ring.active === true, "ring active");
 
   const warmStart = Date.now();
@@ -101,16 +107,25 @@ async function main() {
   console.log(`  ffprobe duration=${dur}`);
   assert(Math.abs(dur - want) <= 0.05, `ffprobe duration within one encoded frame of ${want}s (got ${dur})`);
 
+  // Cover the old playable-but-black/silent regression in this same capture
+  // run, so callers do not need a separate selftest + manual content probe.
+  const streams = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-show_entries", "stream=codec_type", "-of", "json", clip.path], { encoding: "utf8" });
+  assert(streams.status === 0 && JSON.parse(streams.stdout).streams.some(s => s.codec_type === "audio"), "clip has an audio track");
+  const content = spawnSync(path.join(coreBin, "ffmpeg.exe"), ["-hide_banner", "-ss", "1", "-i", clip.path,
+    "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-frames:v", "3", "-an", "-f", "null", "-"], { encoding: "utf8" });
+  const luma = [...content.stderr.matchAll(/lavfi\.signalstats\.YAVG=([\d.]+)/g)].map(m => Number(m[1]));
+  assert(content.status === 0 && luma.some(value => value > 16), "clip contains nonblack video (keep the test display visible)");
+
   // Capture mode toggle back to auto
   st = await call("config.set", { capture: { mode: "auto" } });
   assert(Array.isArray(st.applied) && st.applied.includes("capture"), "config.set capture->auto applied");
 
-  // Devices: Voicemeeter present on this machine per plan.
+  // Check the contract without requiring the developer's audio hardware.
   const devices = await call("audio.listDevices");
   assert(Array.isArray(devices), "audio.listDevices is an array");
   const vm = devices.filter((d) => d.isVoicemeeter);
   console.log(`  devices: ${devices.length} total, ${vm.length} voicemeeter`);
-  assert(vm.length > 0, "Voicemeeter devices listed");
+  assert(devices.every(device => typeof device.isVoicemeeter === "boolean"), "audio device flags have the expected type");
 
   // Games
   const games = await call("game.listKnown");

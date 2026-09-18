@@ -611,23 +611,39 @@ void SourceManager::watchdogLoop()
 {
   constexpr auto kRetryDelay = std::chrono::seconds(3);
   constexpr auto kNoFramesDelay = std::chrono::seconds(10);
-  constexpr int kHookMaxRetries = 20;
   constexpr int kHookAttemptsBeforeFallback = 3;
   CaptureRecoveryState recoveryState;
+  CaptureRecoverySchedule recoverySchedule;
 #ifdef _WIN32
+  // Shared hook textures may fail to reopen during a D3D11 device reset
+  // while game_capture still reports its previous dimensions. Recreate the
+  // sources after OBS has rebuilt its device, outside the graphics callback.
+  gs_device_loss graphicsRecovery = {};
+  graphicsRecovery.data = &recoveryState;
+  graphicsRecovery.device_loss_release = [](void*) {};
+  graphicsRecovery.device_loss_rebuild = [](void*, void* data) {
+    static_cast<CaptureRecoveryState*>(data)->onGraphicsRebuilt();
+  };
+  obs_enter_graphics();
+  gs_register_loss_callbacks(&graphicsRecovery);
+  obs_leave_graphics();
   DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS powerSubscription = {};
   powerSubscription.Callback = capturePowerCallback;
   powerSubscription.Context = &recoveryState;
   HPOWERNOTIFY displayNotification = nullptr;
   HPOWERNOTIFY suspendNotification = nullptr;
-  if (PowerSettingRegisterNotification(&GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_CALLBACK,
+  const DWORD displayResult = PowerSettingRegisterNotification(&GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_CALLBACK,
                                        reinterpret_cast<HANDLE>(&powerSubscription),
-                                       &displayNotification) != ERROR_SUCCESS) {
+                                       &displayNotification);
+  if (displayResult != ERROR_SUCCESS) {
+    std::fprintf(stderr, "capture: display notification registration failed (%lu)\n", displayResult);
     displayNotification = nullptr;
   }
-  if (PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK,
+  const DWORD suspendResult = PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK,
                                              reinterpret_cast<HANDLE>(&powerSubscription),
-                                             &suspendNotification) != ERROR_SUCCESS) {
+                                             &suspendNotification);
+  if (suspendResult != ERROR_SUCCESS) {
+    std::fprintf(stderr, "capture: suspend notification registration failed (%lu)\n", suspendResult);
     suspendNotification = nullptr;
   }
 #endif
@@ -636,9 +652,14 @@ void SourceManager::watchdogLoop()
   while (watchdogRun_.load()) {
     const auto tickNow = std::chrono::steady_clock::now();
     const bool resumedAfterLongPause = tickNow - lastWatchdogTick >= std::chrono::seconds(5);
-    lastWatchdogTick = tickNow;
-    if (resumedAfterLongPause || recoveryState.consumeRecovery()) {
-      std::fprintf(stderr, "capture: display or system resumed; rebuilding video capture sources\n");
+    // Always consume the notification, even when the scheduling-gap fallback
+    // fires on this tick. Short-circuiting here used to rebuild twice.
+    const bool notified = recoveryState.consumeRecovery();
+    const uint64_t tickMs = duration_ms_now();
+    if (resumedAfterLongPause || notified)
+      recoverySchedule.request(tickMs);
+    if (recoverySchedule.consumeDue(tickMs)) {
+      std::fprintf(stderr, "capture: recovering after display/system wake or graphics reset; rebuilding video capture sources\n");
       std::fflush(stderr);
       // Recreate only video sources. Audio capture remains continuous, while
       // fresh WGC sessions and a fresh hook source replace stale black textures.
@@ -721,8 +742,6 @@ void SourceManager::watchdogLoop()
           active = true;
           captureHealthyAt_ = now;
           lastWindowRetry_ = now;
-          lastHookRetry_ = now;
-          hookRetryCount_ = 0;
           wgcRetryCount_ = 0;
           windowNoFramesReported_ = false;
           if (gameReady)
@@ -756,12 +775,6 @@ void SourceManager::watchdogLoop()
           if (lastHookRetry_.time_since_epoch().count() == 0)
             lastHookRetry_ = now;
 
-          if (now - lastHookRetry_ >= kRetryDelay && hookRetryCount_ < kHookMaxRetries) {
-            retryGameCaptureLocked();
-            lastHookRetry_ = now;
-            hookRetryCount_++;
-          }
-
           const bool hookOnly = isHookOnlyGame(subject_.exe);
           const bool wgcFallbackEnabled =
               !hookOnly &&
@@ -784,11 +797,26 @@ void SourceManager::watchdogLoop()
             windowNoFramesReported_ = true;
           }
         }
+        // Recover the hook independently of WGC. A fallback with dimensions
+        // can still be black (notably for protected titles), and must not
+        // prevent the preferred backend from ever getting another attempt.
+        if (gameReady) {
+          lastHookRetry_ = now;
+          hookRetryCount_ = 0;
+        } else if (now - lastHookRetry_ >= std::chrono::milliseconds(captureHookRetryDelayMs(hookRetryCount_))) {
+          retryGameCaptureLocked();
+          lastHookRetry_ = now;
+          if (hookRetryCount_ < 1000000)
+            hookRetryCount_++;
+        }
       }
     }
 
     if (captureActivityCb_)
       captureActivityCb_(active);
+    // Source teardown/re-injection can itself take seconds. Do not mistake
+    // our own recovery work for another sleep and continuously rebuild.
+    lastWatchdogTick = std::chrono::steady_clock::now();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 #ifdef _WIN32
@@ -796,6 +824,9 @@ void SourceManager::watchdogLoop()
     PowerSettingUnregisterNotification(displayNotification);
   if (suspendNotification)
     PowerUnregisterSuspendResumeNotification(suspendNotification);
+  obs_enter_graphics();
+  gs_unregister_loss_callbacks(&recoveryState);
+  obs_leave_graphics();
 #endif
 }
 

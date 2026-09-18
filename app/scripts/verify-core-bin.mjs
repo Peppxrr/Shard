@@ -13,13 +13,14 @@
 // Run via `npm run package` (wired in package.json) or directly:
 //   node scripts/verify-core-bin.mjs [path-to-core-bin]
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 const appRoot = join(import.meta.dirname, "..");
 const repoRoot = join(appRoot, "..");
 const coreBin = process.argv[2]
-  ? join(process.cwd(), process.argv[2])
+  ? resolve(process.argv[2])
   : join(appRoot, "resources", "core-bin");
 
 const ROOT_FILES = [
@@ -54,7 +55,6 @@ const STALE_AT_DATA_ROOT = [
 ];
 
 const errors = [];
-const warn = (msg) => console.error(`  ! ${msg}`);
 const fail = (msg) => { errors.push(msg); console.error(`  x ${msg}`); };
 
 function sha256(file) {
@@ -95,8 +95,7 @@ if (!existsSync(coreBin)) {
   const payloadDir = join(repoRoot, "vendor/obs-hook-payload/32.2.1");
   const manifestPath = join(payloadDir, "manifest.json");
   if (!existsSync(manifestPath)) {
-    warn("vendor/obs-hook-payload/32.2.1/manifest.json not found — skipping hook hash check");
-    warn("(fresh clones must fetch the pinned payload before building; installers are unaffected)");
+    fail("vendor/obs-hook-payload/32.2.1/manifest.json missing — cannot verify official hook payload");
   } else {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
     for (const [name, expected] of Object.entries(manifest.files)) {
@@ -139,6 +138,20 @@ if (!existsSync(coreBin)) {
     newestName = "core/CMakeLists.txt";
   }
   const shardcore = join(coreBin, "shardcore.exe");
+  // Version bumps now live in package.json instead of changing CMakeLists.
+  // Check the actual PE version so an old core cannot pass the mtime gate.
+  if (process.platform === "win32" && existsSync(shardcore)) {
+    try {
+      const version = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        "(Get-Item -LiteralPath $env:SHARD_VERIFY_CORE).VersionInfo.ProductVersion"], {
+        env: { ...process.env, SHARD_VERIFY_CORE: shardcore }, encoding: "utf8", windowsHide: true, timeout: 15000,
+      }).trim();
+      const expected = JSON.parse(readFileSync(join(appRoot, "package.json"), "utf8")).version;
+      if (version !== expected) fail(`core version ${version} does not match app version ${expected} — rebuild the core`);
+    } catch {
+      fail("could not read the core's Windows version resource");
+    }
+  }
   if (existsSync(shardcore) && statSync(shardcore).mtimeMs < newestSource) {
     fail(`staged shardcore.exe is older than ${newestName} — re-run scripts/build.ps1 before packaging`);
   }

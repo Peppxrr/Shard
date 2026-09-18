@@ -385,7 +385,26 @@ export interface DevConsoleLine {
 // Renderer bridge surface (window.shard, provided by preload.ts)
 // ---------------------------------------------------------------------------
 
+export type UpdateStatus = "disabled" | "idle" | "checking" | "available" | "up-to-date" | "downloading" | "downloaded" | "installing" | "error";
+export interface UpdateState {
+  revision: number;
+  status: UpdateStatus;
+  mode: "installed" | "portable" | "disabled";
+  currentVersion: string;
+  version?: string;
+  releaseNotes?: string;
+  progress?: { percent: number; transferred: number; total: number; bytesPerSecond: number };
+  message?: string;
+  retry?: "check" | "download" | "install";
+}
+
 export interface ShardApi {
+  getUpdateState(): Promise<UpdateState>;
+  checkForUpdates(): Promise<UpdateState>;
+  downloadUpdate(): Promise<UpdateState>;
+  installUpdate(): Promise<UpdateState>;
+  openUpdateRelease(): Promise<UpdateState>;
+  onUpdateState(cb: (state: UpdateState) => void): () => void;
   // core RPC passthrough
   invoke(method: string, params?: Record<string, unknown>): Promise<unknown>;
   // Electron-side display enumeration (no core needed) — settings fallback
@@ -419,6 +438,7 @@ export interface ShardApi {
   onExport(cb: (p: ExportProgress) => void): () => void;
   // misc
   version(): Promise<string>;
+  copyPlaybackReport(sampleJson: string): Promise<void>;
   restartApp(): Promise<void>;
   onToast(cb: (message: string) => void): () => void;
   // Frameless Windows shell controls. Other platforms retain their native frame.

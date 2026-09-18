@@ -68,11 +68,12 @@ public:
   void onDisplayState(int state) noexcept
   {
     const int previous = displayState_.exchange(state);
-    if (state == 1 && previous == 0)
+    if ((state == 1 || state == 2) && previous == 0)
       recoveryRequested_.store(true);
   }
 
   void onResume() noexcept { recoveryRequested_.store(true); }
+  void onGraphicsRebuilt() noexcept { recoveryRequested_.store(true); }
 
   bool consumeRecovery() noexcept { return recoveryRequested_.exchange(false); }
 
@@ -80,5 +81,39 @@ private:
   std::atomic<int> displayState_{-1};
   std::atomic<bool> recoveryRequested_{false};
 };
+
+// Watchdog-thread state. Let display/driver wake notifications settle before
+// rebuilding; retain late requests while preventing rapid source destruction.
+class CaptureRecoverySchedule {
+public:
+  void request(uint64_t nowMs) noexcept
+  {
+    pending_ = true;
+    dueMs_ = nowMs + 1500;
+  }
+
+  bool consumeDue(uint64_t nowMs) noexcept
+  {
+    if (!pending_ || nowMs < dueMs_ || (rebuilt_ && nowMs - lastRebuildMs_ < 5000))
+      return false;
+    pending_ = false;
+    rebuilt_ = true;
+    lastRebuildMs_ = nowMs;
+    return true;
+  }
+
+private:
+  bool pending_ = false;
+  bool rebuilt_ = false;
+  uint64_t dueMs_ = 0;
+  uint64_t lastRebuildMs_ = 0;
+};
+
+// A slow wake or a temporary injection failure must never exhaust recovery.
+// Back off after the initial attempts instead of permanently giving up.
+inline uint64_t captureHookRetryDelayMs(int attempts) noexcept
+{
+  return attempts < 20 ? 3000 : 15000;
+}
 
 } // namespace shard

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
-import { Icon, IconButton } from "../components/ui";
+import { ContextMenu, Icon, IconButton } from "../components/ui";
+import { measurePlayback } from "./playbackDiagnostics";
 
 interface VideoPreviewProps {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -50,6 +51,55 @@ export function VideoPreview({
   onLoadedMetadata,
 }: VideoPreviewProps) {
   const safeDuration = Math.max(resultDuration, 0.001);
+  const previousPlayback = useRef({ playing, sourcePath });
+  const [feedback, setFeedback] = useState<{ name: "play" | "pause"; sequence: number } | null>(null);
+  const feedbackSequence = useRef(0);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [reportStatus, setReportStatus] = useState("");
+  const reportAbort = useRef<AbortController | null>(null);
+  const reportTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    setMenu(null);
+    setReportStatus("");
+    return () => {
+      reportAbort.current?.abort();
+      reportAbort.current = null;
+      window.clearTimeout(reportTimer.current);
+    };
+  }, [sourcePath]);
+
+  const copyReport = async () => {
+    setMenu(null);
+    const video = videoRef.current;
+    if (!video || reportAbort.current) return;
+    const controller = new AbortController();
+    reportAbort.current = controller;
+    window.clearTimeout(reportTimer.current);
+    setReportStatus("Measuring playback for 5 seconds — keep the video playing.");
+    try {
+      const sample = await measurePlayback(video, controller.signal);
+      if (controller.signal.aborted) return;
+      await window.shard.copyPlaybackReport(JSON.stringify(sample));
+      if (!controller.signal.aborted) setReportStatus("Playback report copied.");
+    } catch (error) {
+      if (!controller.signal.aborted) setReportStatus(`Report failed: ${errorMessage(error)}`);
+    } finally {
+      if (!controller.signal.aborted) {
+        reportAbort.current = null;
+        reportTimer.current = window.setTimeout(() => setReportStatus(""), 5000);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const previous = previousPlayback.current;
+    previousPlayback.current = { playing, sourcePath };
+    if (previous.sourcePath !== sourcePath || videoRef.current?.ended) {
+      setFeedback(null);
+    } else if (previous.playing !== playing) {
+      setFeedback({ name: playing ? "play" : "pause", sequence: ++feedbackSequence.current });
+    }
+  }, [playing, sourcePath, videoRef]);
 
   const toggleFullscreen = async () => {
     const stage = videoRef.current?.closest(".editor-player") as HTMLElement | null;
@@ -60,7 +110,8 @@ export function VideoPreview({
 
   return (
     <section className={["editor-player", className].filter(Boolean).join(" ")} aria-label="Video preview">
-      <div className="editor-player__stage" onClick={onTogglePlayback}>
+      <div className="editor-player__stage" onClick={onTogglePlayback}
+        onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }}>
         <video
           ref={videoRef}
           className="editor-player__video"
@@ -82,12 +133,25 @@ export function VideoPreview({
             onMediaError(code ? `The clip could not be decoded (media error ${code}).` : "The clip could not be loaded.");
           }}
         />
-        {!playing && (
-          <span className="editor-player__big-play" aria-hidden="true">
-            <Icon name="play" size={28} />
+        {feedback && (
+          <span
+            key={feedback.sequence}
+            className="editor-player__feedback"
+            aria-hidden="true"
+            onAnimationEnd={() => setFeedback(null)}
+          >
+            <Icon name={feedback.name} size={42} />
           </span>
         )}
+        {reportStatus && <span className="editor-player__report-status" role="status">{reportStatus}</span>}
       </div>
+
+      {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+        <button type="button" role="menuitem" disabled={!!reportAbort.current} onClick={() => void copyReport()}
+          onKeyDown={(event) => { if (event.key === "Escape") setMenu(null); }}>
+          Copy playback diagnostics
+        </button>
+      </ContextMenu>}
 
       <div className="editor-player__controls" onClick={(event) => event.stopPropagation()}>
         <IconButton label={playing ? "Pause (Space)" : "Play (Space)"} onClick={onTogglePlayback}>
@@ -140,6 +204,28 @@ export function StandaloneVideoPlayer({ sourcePath, loop = true }: { sourcePath:
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  const synchronizeTime = useCallback(() => {
+    setCurrentTime(videoRef.current?.currentTime ?? 0);
+  }, []);
+
+  // Match the editor's 50 ms playback clock instead of waiting for the
+  // browser's much less frequent timeupdate events. Read the actual media
+  // position so buffering, looping, and playback-rate changes stay accurate.
+  useEffect(() => {
+    if (!playing) return;
+    let frame = 0;
+    let lastUpdate = -Infinity;
+    const update = (now: number) => {
+      if (now - lastUpdate >= 50 && !videoRef.current?.seeking) {
+        synchronizeTime();
+        lastUpdate = now;
+      }
+      frame = requestAnimationFrame(update);
+    };
+    frame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(frame);
+  }, [playing, synchronizeTime]);
 
   const togglePlayback = useCallback(() => {
     const video = videoRef.current;
@@ -203,9 +289,12 @@ export function StandaloneVideoPlayer({ sourcePath, loop = true }: { sourcePath:
         onSeekResult={seek}
         onMutedChange={changeMuted}
         onVolumeChange={changeVolume}
-        onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime ?? 0)}
-        onSeeked={() => setCurrentTime(videoRef.current?.currentTime ?? 0)}
-        onPlayingChange={setPlaying}
+        onTimeUpdate={synchronizeTime}
+        onSeeked={synchronizeTime}
+        onPlayingChange={(nextPlaying) => {
+          synchronizeTime();
+          setPlaying(nextPlaying);
+        }}
         onLoadedMetadata={() => setDuration(videoRef.current?.duration ?? 0)}
         onMediaError={setError}
       />

@@ -3,7 +3,15 @@
 # already cross-platform via obs-studio).
 appId: com.shard.app
 productName: Shard
-buildVersion: 0.1.2.1
+buildNumber: "0"
+publish:
+  provider: github
+  owner: Peppxrr
+  repo: Shard
+  releaseType: release
+electronUpdaterCompatibility: ">=2.16"
+releaseInfo:
+  releaseNotesFile: release/release-notes.md
 directories:
   output: release
   buildResources: build
@@ -31,6 +39,8 @@ extraResources:
 asar: true
 win:
   icon: build/icon.ico
+  # Signing is intentionally off. Never re-sign the official OBS payload.
+  signExecutable: false
   target:
     - target: nsis
       arch: [x64]
@@ -38,10 +48,10 @@ win:
       arch: [x64]
 nsis:
   oneClick: false
-  artifactName: ${productName}-Setup-${buildVersion}.${ext}
+  artifactName: ${productName}-Setup-${version}.${ext}
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: always
   shortcutName: Shard
 portable:
-  artifactName: ${productName}-${buildVersion}-portable.${ext}
+  artifactName: ${productName}-${version}-portable.${ext}

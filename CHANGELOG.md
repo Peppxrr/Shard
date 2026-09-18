@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3
+
+- Made the playback timeline smoother and added brief play/pause feedback.
+- Improved capture recovery after display wake and graphics resets, and kept retrying unavailable game hooks.
+- Added “Copy playback diagnostics” to the player’s right-click menu to help investigate playback problems without sharing clip paths or contents.
+- Added manual update checks in Settings → App, with release notes, download progress, and an explicit restart to install for installed Windows builds.
+- Portable builds can check for updates and open the GitHub release for a safe manual replacement.
+- Standardized version numbers and added a verified GitHub Releases build pipeline. Existing users must install this version manually once to receive the new updater.
+
 ## 0.1.2.1
 
 - Refreshed the interface, settings, hotkeys, and Games page with consistent controls and icons.

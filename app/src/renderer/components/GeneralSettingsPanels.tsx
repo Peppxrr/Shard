@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ExportEncoderInfo, MonitorInfo, Settings } from "../../shared/contracts";
 import { Button, Card, Confirm, Icon, ShardSelect } from "./ui";
 import { ChoiceCards, NumberControl, SettingRow, SwitchRow } from "./SettingControls";
+import { UpdatesSettings } from "./UpdatesSettings";
 
 type Props = { settings: Settings; onChange: (settings: Settings) => void };
 
@@ -78,7 +79,7 @@ export function AppSettingsPanel({ settings, onChange, version }: Props & { vers
     <SwitchRow title="Hardware acceleration" description="Use GPU acceleration for the app. Changing this requires a restart." checked={settings.app.hardwareAcceleration ?? true} onChange={setPending} />
     <SwitchRow title="Developer console" description="Show detailed logs in a separate window." checked={settings.app.developerConsole} onChange={developerConsole => patch({ developerConsole })} />
     {error && <p className="form-error" role="alert">{error}</p>}
-  </Card><div className="settings-credits">{version && <p className="settings-version">Shard <span className="num">{version}</span></p>}<p>Icons by Feather (MIT) and Lucide (ISC). Licenses included with the app.</p></div>
+  </Card><UpdatesSettings version={version} /><div className="settings-credits"><p>Icons by Feather (MIT) and Lucide (ISC). Licenses included with the app.</p></div>
     <Confirm open={pending !== null} title="Save and restart?" message="Your settings will be saved before the app restarts to apply hardware acceleration." confirmLabel="Save and restart" onConfirm={() => void restart()} onCancel={() => setPending(null)} />
   </div>;
 }

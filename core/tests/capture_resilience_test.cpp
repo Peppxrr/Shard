@@ -4,6 +4,8 @@
 #include <cstdio>
 
 using shard::CaptureRecoveryState;
+using shard::CaptureRecoverySchedule;
+using shard::captureHookRetryDelayMs;
 using shard::computeClientAreaCrop;
 using shard::captionBoundaryInset;
 
@@ -44,6 +46,38 @@ int main()
   assert(!recovery.consumeRecovery());
   recovery.onResume();
   assert(recovery.consumeRecovery());
+  recovery.onDisplayState(0);
+  recovery.onDisplayState(2); // Some displays first wake into the dimmed state.
+  assert(recovery.consumeRecovery());
+  recovery.onDisplayState(1);
+  assert(!recovery.consumeRecovery()); // Dimmed -> on does not require another rebuild.
+  recovery.onGraphicsRebuilt();
+  assert(recovery.consumeRecovery());
+
+  CaptureRecoverySchedule schedule;
+  assert(!schedule.consumeDue(10000));
+  recovery.onResume();
+  recovery.onGraphicsRebuilt();
+  assert(recovery.consumeRecovery());
+  assert(!recovery.consumeRecovery());
+  schedule.request(10000);
+  assert(!schedule.consumeDue(11000)); // Give the driver time to settle.
+  schedule.request(11000); // Interactive wake follows automatic wake.
+  assert(!schedule.consumeDue(11500));
+  assert(schedule.consumeDue(12500));
+  assert(!schedule.consumeDue(13000));
+  schedule.request(13000); // A later GPU reset is retained, not discarded.
+  assert(!schedule.consumeDue(14500));
+  assert(schedule.consumeDue(17500)); // No repeated rebuild inside five seconds.
+  assert(!schedule.consumeDue(18000));
+  schedule.request(3600000); // A later full sleep/wake still recovers.
+  assert(!schedule.consumeDue(3601000));
+  assert(schedule.consumeDue(3601500));
+
+  assert(captureHookRetryDelayMs(0) == 3000);
+  assert(captureHookRetryDelayMs(19) == 3000);
+  assert(captureHookRetryDelayMs(20) == 15000);
+  assert(captureHookRetryDelayMs(1000000) == 15000); // Never exhaust retries.
 
   std::puts("capture resilience tests passed");
   return 0;

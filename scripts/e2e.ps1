@@ -5,8 +5,7 @@
 #
 # warms the ring 70 s, saves 60 s, asserts clip.saved.actualSec and ffprobe
 # duration are within one encoded frame of the requested duration, toggles
-# capture mode via config.set, and asserts audio.listDevices reports
-# Voicemeeter devices.
+# capture mode via config.set, validates video/audio content and device flags.
 param(
   [switch]$KeepTemp,
   [string]$CoreBin = (Join-Path (Split-Path $PSScriptRoot -Parent) "app/resources/core-bin")

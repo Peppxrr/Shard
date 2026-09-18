@@ -19,6 +19,8 @@ import { ffprobe, listExportEncoders, remuxToMp4, probeAudioTracks, prepareAudio
 import { SaveOverlay } from "./overlay";
 import { getDefaultSoundPath, playClipSound, previewClipSound, setSoundWindow } from "./sound";
 import { DevConsole } from "./dev-console";
+import { copyPlaybackReport } from "./playback-diagnostics";
+import { registerUpdater } from "./updater";
 import type { AudioSourceConfig, AudioTrackInfo, ClipRecord, DevConsoleLine, EditorExportProject, ExportProgress, Settings } from "../shared/contracts";
 
 const execFileAsync = promisify(execFile);
@@ -290,6 +292,21 @@ async function main(): Promise<void> {
 
   createWindow();
   registerIpc();
+  registerUpdater({
+    window: () => win,
+    prepareInstall: async () => {
+      if (exporter.busy) return "Wait for your export to finish before restarting.";
+      // A crashed/disconnected capture core must not prevent updating Shard.
+      if (core.ready) {
+        const state = await core.invoke("state.get") as { recording?: { active?: boolean } };
+        if (state.recording?.active) return "Stop your recording before restarting to update.";
+      }
+      // quitAndInstall can close windows before before-quit is emitted.
+      quitting = true;
+      return null;
+    },
+    installFailed: () => { quitting = false; },
+  });
   setupTray();
   applyAppSettings(getSettings());
   // Restore the developer console window when the setting was left enabled.
@@ -446,7 +463,8 @@ function registerIpc(): void {
   ipcMain.handle("export:start", (_e, clipId: string, project: EditorExportProject) => doExport(clipId, project));
   ipcMain.handle("export:cancel", () => exporter.cancel());
   ipcMain.handle("export:listEncoders", () => listExportEncoders());
-  ipcMain.handle("app:version", () => app.getVersion().replace("+", "."));
+  ipcMain.handle("app:version", () => app.getVersion());
+  ipcMain.handle("playback:copy-report", (event, sampleJson: string) => copyPlaybackReport(event.sender, sampleJson));
   ipcMain.handle("app:restart", () => {
     quitting = true;
     app.relaunch();
@@ -722,21 +740,37 @@ async function toggleRecording(): Promise<void> {
 }
 
 async function quit(): Promise<void> {
-  quitting = true;
-  hotkeys.dispose();
-  storage.stop();
-  overlay.destroy();
-  devConsole.close();
-  await core.shutdown();
-  library.close();
   app.quit();
 }
 
-app.on("before-quit", () => { quitting = true; editorTimelinePreviews().dispose(); });
+let shutdownStarted = false;
+let shutdownComplete = false;
+app.on("before-quit", (event) => {
+  quitting = true;
+  if (shutdownComplete) return;
+  event.preventDefault();
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  void (async () => {
+    try {
+      hotkeys?.dispose();
+      storage?.stop();
+      exporter?.cancel();
+      editorTimelinePreviews().dispose();
+      overlay.destroy();
+      devConsole.close();
+      await core?.shutdown();
+      library?.close();
+    } finally {
+      shutdownComplete = true;
+      app.quit();
+    }
+  })().catch(error => console.error("[shutdown]", error));
+});
 app.on("window-all-closed", () => {
   // With close-to-tray the window is only hidden, so this only fires when the
   // window really closed (setting off or Quit): shut down fully.
-  if (!getSettings().app.minimizeToTray) void quit();
+  if (!quitting && !getSettings().app.minimizeToTray) void quit();
 });
 app.on("quit", () => {
   if (!quitting) {

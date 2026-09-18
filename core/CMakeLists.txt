@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
-project(shard-core VERSION 0.1.2.1 LANGUAGES C CXX)
+# Application and core share one stable SemVer. CMake's configure dependency
+# ensures `npm version` also rebuilds the core and its Windows resources.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../app/package.json")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../app/package.json" SHARD_PACKAGE_JSON)
+string(JSON SHARD_APP_VERSION GET "${SHARD_PACKAGE_JSON}" version)
+if(NOT SHARD_APP_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+  message(FATAL_ERROR "Shard version must be stable major.minor.patch SemVer")
+endif()
+project(shard-core VERSION ${SHARD_APP_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

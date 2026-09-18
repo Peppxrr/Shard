@@ -34,17 +34,12 @@ Do not include private data, authentication credentials, personal recordings, AP
 
 Follow the build instructions in `README.md`.
 
-Depending on the area changed, useful verification includes:
-
-```powershell
-powershell -File scripts/build.ps1 -Config Debug
-powershell -File scripts/e2e.ps1
-cmake --build build_x64 --config Debug --target shard_tests --parallel
-build_x64\Debug\shard_tests.exe
-node scripts/game-capture-test.mjs
-```
-
-Not every change requires every test. In your pull request, state which checks you ran and whether any relevant checks were not run.
+Run `npm --prefix app run verify` for ordinary app changes. Use `-- editor`,
+`-- updater`, `-- core`, or `-- capture` when that behavior changes. Run the
+smallest relevant scope once; documentation edits need only a diff review.
+See [Verification](docs/VERIFYING.md) for scope selection and short-log behavior.
+Full packaging verification belongs to releases/build-pipeline changes and runs
+in CI. In your pull request, state the scope passed and any relevant blocker.
 
 ## Capture and anti-cheat changes
 

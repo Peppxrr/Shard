@@ -18,6 +18,7 @@ Shard keeps recent gameplay in a RAM replay buffer so you can save the last few 
 - **Editor** — fast cached timeline previews, split/trim/delete, undo/redo, per-track audio controls, smooth seeking, and Ctrl+scroll zoom.
 - **Size-limited exports** — hardware or CPU encoding, progress and cancellation, and automatic adjustment to fit the selected file-size limit.
 - **Customizable interface** — themes, shortcuts, capture notifications, and clip-save sounds.
+- **Manual updates** — check GitHub Releases in Settings → App, download when ready, then restart to install. Portable builds link to the release for manual replacement.
 
 Windows is supported today. Platform-specific core code is isolated to make future Linux support possible.
 
@@ -57,8 +58,7 @@ powershell -File scripts/fetch-ffmpeg.ps1
 powershell -File scripts/build.ps1
 cd app
 npm ci
-npm run build
-npm run package -- --publish never
+npm run package
 ```
 
 The build fetches pinned dependencies, applies the Shard OBS patch, creates the required directory junctions, and stages the core under `app/resources/core-bin/`. The official signed OBS injection payload is included in the repository and verified during building and packaging. Do not rebuild or re-sign those helper/hook files.
@@ -83,15 +83,14 @@ powershell -File scripts/dev.ps1 -SkipCore # Reuse an existing Debug core
 The development runtime is staged separately in `app/resources/core-bin-dev/`.
 
 ```powershell
-cmake --build build_x64 --config Debug --target shard_tests --parallel
-build_x64\Debug\shard_tests.exe
-powershell -File scripts/e2e.ps1
-cd app
-npm run test:editor
-npm run test:previews
+npm --prefix app run verify                  # normal app changes
+npm --prefix app run verify -- editor        # editor/export changes
+npm --prefix app run verify -- updater       # updater changes
+npm --prefix app run verify -- core          # C++ logic changes
+npm --prefix app run verify -- capture       # capture/replay changes
 ```
 
-The core also provides `--selftest` for a short capture/save check. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and additional verification guidance.
+Choose one relevant scope; do not run the whole list. [Verification](docs/VERIFYING.md) explains how to combine scopes, preview checks, and read the compact results. Full release verification runs in CI; local release builds use `npm --prefix app run verify -- release`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow.
 
 ## Repository layout
 
@@ -107,10 +106,12 @@ The core also provides `--selftest` for a short capture/save check. See [CONTRIB
 | `vendor/` | OBS submodule and verified official capture payload |
 
 Custom CSS themes are documented in [docs/THEMES.md](docs/THEMES.md).
+Versioning, release artifacts, GitHub Actions, and update testing are documented in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Data and privacy
 
 Capture, indexing, editing, and export run locally. The core listens only on `127.0.0.1`. Settings and the game registry live in the app configuration directory; clip metadata uses a local SQLite database. Shard does not upload clips or telemetry.
+Update checks and downloads contact GitHub only when requested in Settings. Nothing updates automatically at startup or on normal exit.
 
 ## Contributing and security
 
