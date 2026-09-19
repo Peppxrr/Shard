@@ -20,7 +20,9 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     defaults:
       run:
-        shell: pwsh
+        # Match build.ps1 and its child processes; inheriting PowerShell 7's
+        # PSModulePath breaks Windows PowerShell's Get-FileHash on clean runners.
+        shell: powershell
     steps:
       - uses: actions/checkout@v4
         with:

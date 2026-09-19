@@ -5,6 +5,7 @@
 # Usage: powershell -File scripts/fetch-ffmpeg.ps1
 param()
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 # Versioned release asset, not a moving latest URL or a short-lived daily build.
 # Update URL and digest together after reviewing the upstream release.
