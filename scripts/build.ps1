@@ -231,6 +231,10 @@ foreach ($p in $shipPlugins) {
 # source: overwrite any incremental rundir copies with the exact official,
 # signed OBS 32.2.1 release files from Shard's pinned payload directory.
 $dataDest = Join-Path $stageDir "data/obs-plugins"
+# Copy-Item renames the first plugin directory to the destination when that
+# destination does not exist. Create it first so clean and incremental builds
+# both keep each plugin's data under its own directory.
+New-Item -ItemType Directory -Force $dataDest | Out-Null
 foreach ($p in $shipPlugins) {
   $src = Join-Path $dataDir "obs-plugins/$p"
   if (Test-Path $src) {
