@@ -27,6 +27,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # OBS's nested architecture configure derives its version from tags.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
