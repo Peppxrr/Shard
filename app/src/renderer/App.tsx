@@ -9,10 +9,12 @@ import { Editor } from "./components/Editor";
 import { Button, Icon, Modal, Spinner, Toasts, type ToastItem } from "./components/ui";
 import { setTheme } from "./themeManager";
 
+import { UpdateNotice } from "./components/UpdateNotice";
+
 type Tab = "capture" | "library" | "games" | "settings";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: "capture", label: "Capture", icon: "video" },
+  { id: "capture", label: "Capture", icon: "capture" },
   { id: "library", label: "Library", icon: "film" },
   { id: "games", label: "Games", icon: "box" },
   { id: "settings", label: "Settings", icon: "settings" },
@@ -227,11 +229,11 @@ export function App() {
   );
 
   return (
-    <div className={`app${window.shard.windowControlsSupported ? " app--frameless" : ""}`}>
-      <header className="app__bar">
-        <nav className="nav" aria-label="Main navigation">
+    <div data-shard-component="app" className={`app${window.shard.windowControlsSupported ? " app--frameless" : ""}`}>
+      <header className="app__bar" data-shard-slot="titlebar">
+        <nav data-shard-component="navigation" className="nav" aria-label="Main navigation">
           {TABS.map((t) => (
-            <button key={t.id} type="button" className="nav__item" aria-current={tab === t.id ? "page" : undefined} onClick={() => requestTab(t.id)}>
+            <button key={t.id} type="button" className="nav__item" data-shard-nav={t.id} aria-current={tab === t.id ? "page" : undefined} onClick={() => requestTab(t.id)}>
               <span className="ico"><Icon name={t.icon} size={16} /></span>{t.label}
             </button>
           ))}
@@ -245,7 +247,7 @@ export function App() {
         <WindowControls />
       </header>
 
-      <main className="app__main" ref={mainRef}>
+      <main data-shard-slot="content" className="app__main" ref={mainRef}>
         {tab === "capture" && <CapturePage settings={settings} clips={clips} />}
         {tab === "library" && <LibraryPage clips={clips} onOpenEditor={setEditingClip} />}
         {tab === "games" && <GamesPage settings={settings} onChange={(next) => {
@@ -264,9 +266,9 @@ export function App() {
             });
           }} />}
       </main>
-      <footer className="app__status">
+      <footer data-shard-slot="statusbar" className="app__status">
         <LiveStatus />
-        <span className="spacer" />
+        <UpdateNotice />
         <StorageMeter usedBytes={usedBytes} limitGb={settings.storage.limitGb} />
       </footer>
 

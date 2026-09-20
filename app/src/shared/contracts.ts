@@ -1,3 +1,5 @@
+import type { ThemeMeta, ThemeDocument } from "./themes";
+export type { ThemeMeta } from "./themes";
 // Shard cross-language contract: the single definition of settings JSON,
 // RPC methods/events, and the hotkey schema. Mirrors core/src/config.h and the
 // core's JSON-RPC handlers exactly. Keep both in sync.
@@ -123,14 +125,6 @@ export interface AppSettings {
 
 
 
-export interface ThemeMeta {
-  id: string;
-  name: string;
-  author?: string;
-  version?: string;
-  description?: string;
-  kind: "builtin" | "custom";
-}
 export interface AppearanceSettings {
   // Selected theme id — builtin (default/oled/midnight) or custom folder name.
   // Persisted in settings.json and mirrored to localStorage for early paint.
@@ -376,8 +370,9 @@ export interface ExportProgress {
 
 // One line in the developer console stream.
 export interface DevConsoleLine {
+  id?: number;
   t: number; // epoch ms
-  level: "core" | "app" | "rpc" | "event";
+  level: "core" | "app" | "rpc" | "event" | "updates";
   text: string;
 }
 
@@ -396,6 +391,10 @@ export interface UpdateState {
   progress?: { percent: number; transferred: number; total: number; bytesPerSecond: number };
   message?: string;
   retry?: "check" | "download" | "install";
+  dismissed?: boolean;
+  installOnNextLaunch?: boolean;
+  lastCheckedAt?: number;
+  downloadKind?: "changes" | "full";
 }
 
 export interface ShardApi {
@@ -403,6 +402,9 @@ export interface ShardApi {
   checkForUpdates(): Promise<UpdateState>;
   downloadUpdate(): Promise<UpdateState>;
   installUpdate(): Promise<UpdateState>;
+  scheduleUpdate(): Promise<UpdateState>;
+  cancelScheduledUpdate(): Promise<UpdateState>;
+  dismissUpdate(): Promise<UpdateState>;
   openUpdateRelease(): Promise<UpdateState>;
   onUpdateState(cb: (state: UpdateState) => void): () => void;
   // core RPC passthrough
@@ -450,6 +452,7 @@ export interface ShardApi {
   onWindowMaximized(cb: (maximized: boolean) => void): () => void;
   // developer console stream + window toggle (returns new open state)
   onDevConsoleLine(cb: (line: DevConsoleLine) => void): () => void;
+  getDevConsoleHistory(): Promise<DevConsoleLine[]>;
   toggleDevConsole(): Promise<boolean>;
   // Clip sound: pick custom file (dialog) and preview
   pickClipSound(): Promise<string | null>;
@@ -458,8 +461,8 @@ export interface ShardApi {
   onPlayClipSound(cb: (data: { path: string; volume: number }) => void): () => void;
   // Themes — custom themes live in %APPDATA%/Shard/Themes/<id>/theme.css
   listCustomThemes(): Promise<ThemeMeta[]>;
-  readTheme(id: string): Promise<{ css: string; dir: string } | null>;
-  readCustomCss(): Promise<{ css: string; dir: string } | null>;
+  readTheme(id: string): Promise<ThemeDocument | null>;
+  readCustomCss(): Promise<string | null>;
   getThemesDir(): Promise<string>;
   openThemesFolder(): Promise<void>;
   // Temporarily release all global shortcuts so the rebind UI can capture

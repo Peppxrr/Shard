@@ -66,6 +66,7 @@ if (command === "notes") {
   const resources = join(dir, "win-unpacked/resources");
   const feed = yaml.load(readFileSync(join(resources, "app-update.yml"), "utf8"));
   assert.equal(feed.provider, "github");
+  assert.equal(feed.updaterCacheDirName, "shard-updater", "Keep the differential installer cache stable across releases");
   assert.equal(feed.owner, "Peppxrr");
   assert.equal(feed.repo, "Shard");
   assert.ok(!feed.token && !feed.private, "Public clients must not embed credentials");

@@ -22,6 +22,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path $PSScriptRoot -Parent
+$pinsPath = Join-Path $root "runtime-dependencies.json"
+$pins = Get-Content $pinsPath -Raw | ConvertFrom-Json
 $coreDir = Join-Path $root "core"
 $buildDir = Join-Path $root "build_x64"
 if ($Config -eq "Debug") {
@@ -35,14 +37,14 @@ $config = $Config
 # Capture changes are carried as a reproducible patch in the parent repo.
 $obsDir = Join-Path $root "vendor/obs-studio"
 $obsPatch = Join-Path $root "patches/obs-game-capture.patch"
-$hookPayloadDir = Join-Path $root "vendor/obs-hook-payload/32.2.1"
+$hookPayloadDir = Join-Path $root $pins.obs.hookPayload
 $hookPayloadManifestPath = Join-Path $hookPayloadDir "manifest.json"
 if (-not (Test-Path $hookPayloadManifestPath)) {
   throw "Official OBS Game Capture payload manifest not found: $hookPayloadManifestPath"
 }
 $hookPayloadManifest = Get-Content $hookPayloadManifestPath -Raw | ConvertFrom-Json
-if ($hookPayloadManifest.obsVersion -ne "32.2.1") {
-  throw "OBS Game Capture payload version mismatch: expected 32.2.1, got $($hookPayloadManifest.obsVersion)"
+if ($hookPayloadManifest.obsVersion -ne $pins.obs.version) {
+  throw "OBS Game Capture payload version mismatch: expected $($pins.obs.version), got $($hookPayloadManifest.obsVersion)"
 }
 
 $obsCommit = (git -C $obsDir rev-parse HEAD).Trim()
@@ -132,9 +134,22 @@ function Invoke-ObsPatch([string]$Path, [string]$Label) {
 Invoke-ObsPatch $obsPatch "OBS Game Capture"
 
 if ($Clean) {
-  Remove-Item -Recurse -Force $buildDir, (Join-Path $root "build_x86") -ErrorAction SilentlyContinue
+  foreach ($target in @($buildDir, (Join-Path $root "build_x86"))) {
+    $resolved = [IO.Path]::GetFullPath($target)
+    if (-not $resolved.StartsWith([IO.Path]::GetFullPath($root) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe build cleanup: $resolved" }
+    if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+  }
 }
 
+# Build into a fresh sibling so retired DLLs/data cannot survive a dependency
+# upgrade. Keep the previous usable stage until the new tree passes its gate.
+$finalStageDir = $stageDir
+$stageDir = "$finalStageDir.staging"
+$stageParent = [IO.Path]::GetFullPath((Join-Path $root "app/resources")) + [IO.Path]::DirectorySeparatorChar
+foreach ($target in @($stageDir, $finalStageDir, "$finalStageDir.previous")) {
+  if (-not [IO.Path]::GetFullPath($target).StartsWith($stageParent, [StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe staging target: $target" }
+}
+if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
 New-Item -ItemType Directory -Force $stageDir | Out-Null
 
 & (Join-Path $PSScriptRoot "setup-obs-links.ps1") -Root $root
@@ -149,7 +164,7 @@ cmake -S $coreDir -B $buildDir `
   -DENABLE_BROWSER=OFF `
   -DENABLE_WEBSOCKET=OFF `
   -DENABLE_VLC=OFF `
-  "-DOBS_VERSION_OVERRIDE=32.2.1"
+  "-DOBS_VERSION_OVERRIDE=$($pins.obs.version)"
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
 
 Write-Host "==> Building core + OBS plugins =="
@@ -209,8 +224,8 @@ if ($Config -eq "Debug") {
 }
 
 # 3. obs-deps runtime DLLs (FFmpeg, zlib, x264) that libobs/encoders import
-$depsBin = Join-Path $root "vendor/obs-studio/.deps/obs-deps-2026-07-15-x64/bin"
-foreach ($dll in @("avcodec-62.dll", "avformat-62.dll", "avutil-60.dll", "avdevice-62.dll", "avfilter-11.dll", "swscale-9.dll", "swresample-6.dll", "zlib.dll", "libx264-164.dll", "librist.dll", "datachannel.dll", "libcurl.dll", "srt.dll")) {
+$depsBin = Join-Path $root "vendor/obs-studio/.deps/$($pins.obs.depsDirectory)/bin"
+foreach ($dll in $pins.obs.runtimeDlls) {
   $src = Join-Path $depsBin $dll
   if (Test-Path $src) { Copy-Item $src (Join-Path $stageDir $dll) -Force }
 }
@@ -265,13 +280,7 @@ foreach ($name in $hookPayloadFiles) {
   Assert-ObsHookPayload (Join-Path $winCaptureDataDest $name) $expected $hookPayloadManifest.signer
 }
 
-# The staging dir is never wiped (incremental builds depend on it), so old
-# layouts and build symbols accumulate. Strip everything the packaged app
-# must not carry: *.pdb anywhere (the payload's official binaries ship
-# symbol-free; pdbs next to them are stale from-source build leftovers) and
-# pre-patch layout copies at the data/obs-plugins root, which can register a
-# second hook. verify-core-bin.mjs (wired into npm run package) enforces this
-# at packaging time.
+# Strip upstream build symbols and old-layout copies from the fresh stage.
 Get-ChildItem $stageDir -Recurse -Filter *.pdb | Remove-Item -Force
 foreach ($name in @("obs-vulkan32.json", "obs-vulkan64.json", "compatibility.json", "locale",
                     "graphics-hook32.dll", "graphics-hook64.dll", "inject-helper32.exe", "inject-helper64.exe",
@@ -287,11 +296,33 @@ if (Test-Path $libobsDataSrc) {
 
 # 5. ffmpeg binaries (static win64 build) if fetched
 $ffmpegBin = Join-Path $root "vendor/ffmpeg/bin"
+$ffmpegPinsPath = Join-Path $root "vendor/ffmpeg/pins.json"
+if (-not (Test-Path $ffmpegPinsPath) -or
+    ((Get-Content $ffmpegPinsPath -Raw | ConvertFrom-Json | ConvertTo-Json -Compress) -ne ($pins.ffmpeg | ConvertTo-Json -Compress))) {
+  throw "FFmpeg pins changed or provenance missing. Run scripts/fetch-ffmpeg.ps1 first."
+}
+Copy-Item $ffmpegPinsPath (Join-Path $stageDir "ffmpeg-pins.json") -Force
 if (Test-Path (Join-Path $ffmpegBin "ffmpeg.exe")) {
   Copy-Item (Join-Path $ffmpegBin "ffmpeg.exe") (Join-Path $stageDir "ffmpeg.exe") -Force
   Copy-Item (Join-Path $ffmpegBin "ffprobe.exe") (Join-Path $stageDir "ffprobe.exe") -Force
 }
 
+Copy-Item $pinsPath (Join-Path $stageDir "runtime-dependencies.json") -Force
+node (Join-Path $root "app/scripts/verify-core-bin.mjs") $stageDir
+if ($LASTEXITCODE -ne 0) { throw "Fresh runtime staging verification failed; previous stage retained" }
+$previousStage = "$finalStageDir.previous"
+if (-not (Test-Path -LiteralPath $finalStageDir) -and (Test-Path -LiteralPath $previousStage)) {
+  Move-Item -LiteralPath $previousStage -Destination $finalStageDir
+}
+if (Test-Path -LiteralPath $previousStage) { Remove-Item -LiteralPath $previousStage -Recurse -Force }
+if (Test-Path -LiteralPath $finalStageDir) { Move-Item -LiteralPath $finalStageDir -Destination $previousStage }
+try { Move-Item -LiteralPath $stageDir -Destination $finalStageDir }
+catch {
+  if (Test-Path -LiteralPath $previousStage) { Move-Item -LiteralPath $previousStage -Destination $finalStageDir }
+  throw
+}
+if (Test-Path -LiteralPath $previousStage) { Remove-Item -LiteralPath $previousStage -Recurse -Force }
+$stageDir = $finalStageDir
 Write-Host "==> core-bin staged at $stageDir =="
 $files = Get-ChildItem $stageDir -Recurse -File
 $sum = ($files | Measure-Object Length -Sum).Sum

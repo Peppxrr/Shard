@@ -24,6 +24,10 @@ vendor/obs-studio/.deps/
 app/release/
 app/resources/core-bin/
 app/resources/core-bin-dev/
+app/resources/core-bin.staging/
+app/resources/core-bin.previous/
+app/resources/core-bin-dev.staging/
+app/resources/core-bin-dev.previous/
 app/resources/bin/
 
 # Logs & temp
@@ -57,6 +61,7 @@ app/build/*
 !app/build/icon.ico
 !app/build/icon-32.png
 !app/build/icon-256.png
+!app/build/installer.nsh
 
 # Local diagnostics and UI review fixtures
 /tmp/

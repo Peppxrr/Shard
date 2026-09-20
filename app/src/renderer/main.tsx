@@ -15,6 +15,7 @@ const themeReady = initTheme();
 const rootEl = document.getElementById("root")!;
 
 if (location.hash === "#console") {
+  rootEl.dataset.shardPage = "console";
   // Console window does not need theme persistence; still apply for consistency
   themeReady.catch(() => {}).finally(() => {
     const root = createRoot(rootEl);

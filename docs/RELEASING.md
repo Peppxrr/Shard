@@ -86,34 +86,52 @@ never execute an installer or publish a release.
 
 ## User experience and end-to-end acceptance
 
-Settings → App → Updates shows the installed version. Nothing is checked,
-downloaded, or installed at startup. Users choose **Check for updates**, then
-**Download update**, then **Restart & update**. Closing normally after a
-download does not install it. A later session must check/download again; the
-updater may reuse a verified cached download. Release notes are plain text.
-Downloads use electron-updater's GitHub provider and SHA-512 validation.
+Settings → App → Updates checks at startup and every 12 hours; downloads still
+require an explicit click. A dismissible status-bar notice opens the update panel.
+Dismissal persists for that version without hiding future versions. Release notes,
+version, transferred bytes, speed and progress remain visible in the panel.
 
-Portable and extracted `win-unpacked` builds check the same release metadata
-but only offer **Open GitHub release**. Download the new portable EXE, close
-Shard, and replace the old EXE manually. They never download or launch an
-installer from the updater. Development builds show updating as disabled.
+**Update & restart** stops capture and starts NSIS silently, then opens the updated
+app. **Install on next launch** saves the choice without installing during exit or
+Windows shutdown. On the next launch, a compact progress window appears before
+capture starts. Shard rechecks GitHub metadata and verifies the cached installer
+before installing. Offline/slow metadata checks return to normal startup within
+12 seconds and retain the choice. Missing/corrupt cached files require a fresh
+user-requested download. An interrupted installation does not trigger an endless
+automatic retry loop. Save editor work before requesting an immediate restart.
 
-This acceptance checklist is for initial updater rollout and subsequent changes
-to installer/signing/update lifecycle, not every routine app edit or release.
-After publishing `0.1.3`, verify **up to date** from the installed build. A full
-production update test requires a subsequent higher, real release (for example
-`0.1.4`) with generated metadata:
+The installed updater keeps `%LOCALAPPDATA%/shard-updater/installer.exe` and its
+matching `current.blockmap` as the next differential baseline. Successful-install
+confirmation removes pending installers and temporary download files. A protected
+copy of the old block map survives interrupted downloads. A full installer is a
+fallback when the old bytes differ, the cache is unavailable, or range download or
+verification fails. Local and CI installers of the *same version* are not identical:
+install the published artifact when testing a published differential update.
 
-1. Install `0.1.3` on a test Windows account/VM; create settings and a clip.
-2. Publish the higher release with this workflow.
-3. Launch `0.1.3`: no network check should occur until the button is clicked.
-4. Check, inspect notes/version, download, and verify progress and ready state.
-5. Quit normally: it must not install. Reopen, check/download again, then use
-   **Restart & update**, with close-to-tray enabled. Stop recording/export first.
-6. Confirm the old app/core exit, NSIS runs, Shard restarts at the new version,
-   and settings, custom clip locations, library entries, and playback survive.
-7. Check the portable build: a newer release opens on GitHub and the running
-   EXE is never overwritten. Test offline/retry and low-disk-space behavior.
+Update/install diagnostics are in `%APPDATA%/Shard/logs/updates.log`, with one rotated
+backup and a 2 MB limit per file. Developer Console → **Updates** filters the live
+and startup history; text search, pause/resume and copying filtered messages are
+available. Signed download query strings are omitted from persistent logs.
+
+Portable and extracted `win-unpacked` builds check release metadata but only offer
+**View GitHub release**. Development builds disable updates. The installer is a
+branded one-click per-user installer; updates use its silent mode. Bundled runtime
+upgrades are owner-controlled; see [Updating dependencies](DEPENDENCIES.md).
+
+For changes to installer/signing/update lifecycle, verify on an isolated Windows
+account or test installation using two increasing versions:
+
+1. Install the earlier version; keep representative settings and a clip.
+2. Start it and inspect the startup notice, notes, dismissal, and download progress.
+3. Update immediately with close-to-tray enabled. Confirm no installer wizard,
+   app/core shutdown, relaunch at the new version, and preserved user data.
+4. Repeat with **Install on next launch**. Exit normally (no installation), then
+   launch again and confirm the progress window and automatic completion.
+5. Repeat deferred startup offline, with a missing/corrupt download, and after
+   interrupted installation. Confirm normal startup/retry instead of a loop.
+6. Confirm only the current installer/block map remain after successful cleanup;
+   verify differential reconstruction against the published baseline, SHA-512
+   rejection of corrupted bytes, portable behavior, and installer fallback logs.
 
 ## Signing
 

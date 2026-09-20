@@ -39,6 +39,7 @@ export class CoreClient extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    this.shuttingDown = false;
     await seedGamesJson();
     this.spawnCore();
   }
@@ -181,16 +182,21 @@ export class CoreClient extends EventEmitter {
       /* core already gone */
     }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.proc && !this.proc.killed) {
-      await new Promise<void>((res) => {
+    this.reconnectTimer = null;
+    const proc = this.proc;
+    if (proc && proc.exitCode === null && proc.signalCode === null) {
+      await new Promise<void>((res, reject) => {
+        let hardTimeout: ReturnType<typeof setTimeout> | undefined;
+        const done = () => { clearTimeout(t); clearTimeout(hardTimeout); res(); };
         const t = setTimeout(() => {
-          this.proc?.kill("SIGKILL");
-          res();
+          try { proc.kill("SIGKILL"); }
+          catch (error) { proc.removeListener("exit", done); reject(error); return; }
+          hardTimeout = setTimeout(() => {
+            proc.removeListener("exit", done);
+            reject(new Error("Capture core did not exit; refusing to replace its runtime files"));
+          }, 3000);
         }, 3000);
-        this.proc?.once("exit", () => {
-          clearTimeout(t);
-          res();
-        });
+        proc.once("exit", done);
       });
     }
     this.ws?.close();

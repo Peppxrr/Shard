@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, readdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { UpdateController } from "../src/main/update-controller.ts";
+import { UpdateCache, UpdatePreferencesFile, sha512 as fileSha512, versionAtLeast } from "../src/main/update-storage.ts";
 
 const require = createRequire(import.meta.url);
 const { NsisUpdater } = require("electron-updater");
@@ -26,7 +27,7 @@ class FakeUpdater extends EventEmitter {
   downloadImpl = async () => { this.emit("update-downloaded", info); };
   async checkForUpdates() { this.checks++; return this.checkImpl(); }
   async downloadUpdate() { this.downloads++; return this.downloadImpl(); }
-  quitAndInstall(silent, runAfter) { assert.equal(silent, false); assert.equal(runAfter, true); this.installs++; }
+  quitAndInstall(silent, runAfter) { assert.equal(silent, true); assert.equal(runAfter, true); this.installs++; }
 }
 function fixture(mode = "installed", backend = new FakeUpdater(), overrides = {}) {
   const states = [], urls = [];
@@ -58,13 +59,13 @@ try {
     assert.equal(calls, 1);
     off(); assert.equal(ipc.listenerCount("updates:state"), 0);
   }
-  for (const method of ["getUpdateState", "checkForUpdates", "downloadUpdate", "installUpdate", "openUpdateRelease"])
+  for (const method of ["getUpdateState", "checkForUpdates", "downloadUpdate", "installUpdate", "openUpdateRelease", "scheduleUpdate", "cancelScheduledUpdate", "dismissUpdate"])
     await bridges.shard[method]("https://untrusted.test/installer.exe");
-  assert.deepEqual(invokes.map(args => args.length), [1, 1, 1, 1, 1]);
+  assert.deepEqual(invokes.map(args => args.length), Array(8).fill(1));
 
   const f = fixture();
   assert.equal(f.controller.getState().status, "idle");
-  assert.equal(f.backend.checks, 0, "No startup check");
+  assert.equal(f.backend.checks, 0, "Service schedules checks after the app starts");
   assert.equal(f.backend.autoDownload, false);
   assert.equal(f.backend.autoInstallOnAppQuit, false);
   assert.equal(f.backend.allowPrerelease, false);
@@ -140,7 +141,184 @@ try {
   assert.equal(busy.controller.getState().status, "downloaded");
   assert.equal(busy.backend.installs, 0);
   assert.match(busy.controller.getState().message, /recording/);
+
+  let choices = {};
+  const scheduled = fixture("installed", new FakeUpdater(), { saveChoice: choice => { choices = choice; } });
+  scheduled.controller.schedule();
+  assert.equal(choices.scheduledVersion, undefined, "Cannot schedule before download");
+  await scheduled.controller.check(); await scheduled.controller.download();
+  scheduled.controller.schedule(); scheduled.controller.dismiss();
+  assert.equal(choices.scheduledVersion, "0.1.4");
+  assert.equal(scheduled.controller.getState().dismissed, true);
+  const resumed = fixture("installed", new FakeUpdater(), { ...choices, saveChoice: choice => { choices = choice; } });
+  await resumed.controller.check();
+  assert.equal(resumed.controller.getState().installOnNextLaunch, true);
+  assert.equal(resumed.controller.getState().dismissed, true);
+  await resumed.controller.download(); await resumed.controller.install();
+  assert.equal(choices.scheduledVersion, undefined, "Install consumes scheduling before execution");
+  assert.equal(resumed.backend.autoInstallOnAppQuit, false, "PC shutdown never launches an installer");
+  const cancel = fixture("installed", new FakeUpdater(), { scheduledVersion: "0.1.4", saveChoice: choice => { choices = choice; } });
+  cancel.controller.unschedule(); assert.equal(choices.scheduledVersion, undefined);
+  const newer = fixture("installed", new FakeUpdater(), { dismissedVersion: "0.1.3" });
+  await newer.controller.check(); assert.equal(newer.controller.getState().dismissed, false);
+  newer.backend.checkImpl = async () => { newer.backend.emit("error", new Error("offline")); throw new Error("offline"); };
+  await newer.controller.check(true);
+  assert.equal(newer.controller.getState().status, "available", "Background failure retains available update without alarming UI");
+  assert.ok(newer.controller.getState().lastCheckedAt);
+  const order = [];
+  const ordered = fixture("installed", new FakeUpdater(), {
+    beforeDownload: async () => { order.push("preserve"); }, afterDownload: async () => { order.push("restore"); },
+    prepareInstall: async () => { order.push("core stopped"); return null; }, beforeInstall: async () => { order.push("persist"); },
+  });
+  ordered.backend.quitAndInstall = () => order.push("installer");
+  await ordered.controller.check(); await ordered.controller.download(); await ordered.controller.install();
+  assert.deepEqual(order, ["preserve", "restore", "core stopped", "persist", "installer"]);
+  const failedChoice = fixture("installed", new FakeUpdater(), { saveChoice: () => { throw new Error("disk full"); } });
+  await failedChoice.controller.check(); await failedChoice.controller.download();
+  assert.throws(() => failedChoice.controller.schedule(), /disk full/);
+  assert.ok(!failedChoice.controller.getState().installOnNextLaunch);
   console.log("Updater state/lifecycle tests passed");
+
+  const cacheDir = await mkdtemp(path.join(tmpdir(), "shard-cache-test-"));
+  try {
+    const cache = new UpdateCache(cacheDir, () => {});
+    const p = (...names) => path.join(cacheDir, ...names);
+    await mkdir(p("pending"));
+    await writeFile(p("installer.exe"), "old installer");
+    await writeFile(p("current.blockmap"), "old map");
+    await cache.preserveBaseline();
+    await writeFile(p("current.blockmap"), "new map");
+    await cache.recover("0.1.3");
+    assert.equal(await readFile(p("current.blockmap"), "utf8"), "old map", "Interrupted downloads restore the baseline");
+    await cache.preserveBaseline();
+    await writeFile(p("current.blockmap"), "new map");
+    await cache.restoreBaseline();
+    assert.equal(await readFile(p("current.blockmap"), "utf8"), "old map");
+    await writeFile(p("pending", "Shard-Setup-0.1.4.exe"), "new installer");
+    const pendingInfo = { fileName: "Shard-Setup-0.1.4.exe", sha512: await fileSha512(p("pending", "Shard-Setup-0.1.4.exe")) };
+    await writeFile(p("pending", "update-info.json"), JSON.stringify(pendingInfo));
+    await writeFile(p("pending", "current.blockmap"), "new map");
+    await cache.recover("0.1.3");
+    assert.ok(await cache.verifyPending("0.1.4"), "Pending update is kept before successful installation");
+    await copyFile(p("pending", pendingInfo.fileName), p("installer.exe"));
+    await cache.recover("0.1.4");
+    assert.deepEqual(await readdir(p("pending")), []);
+    assert.equal(await readFile(p("installer.exe"), "utf8"), "new installer");
+    assert.equal(await readFile(p("current.blockmap"), "utf8"), "new map");
+    await writeFile(p("pending", "update-info.json"), JSON.stringify({ ...pendingInfo, fileName: "../../outside.exe" }));
+    assert.equal(await cache.pending(), null, "Reject cache path traversal");
+    const preferences = new UpdatePreferencesFile(p("preferences.json"));
+    preferences.save({ scheduledVersion: "0.1.4", dismissedVersion: "0.1.3" });
+    assert.deepEqual(new UpdatePreferencesFile(p("preferences.json")).value, preferences.value);
+    assert.equal(versionAtLeast("0.1.10", "0.1.9"), true);
+    assert.equal(versionAtLeast("0.1.3", "0.1.4"), false);
+  } finally { await rm(cacheDir, { recursive: true, force: true }); }
+  console.log("Updater persistence/cache tests passed: interruption, matching baseline, completed-install cleanup, path validation");
+
+  // Run the real startup service with Electron/timers replaced. Disk/cache and
+  // controller code stay real; these tests never spawn a process or installer.
+  const serviceDir = await mkdtemp(path.join(tmpdir(), "shard-startup-test-"));
+  try {
+    const source = require("typescript").transpileModule(readFileSync(new URL("../src/main/updater.ts", import.meta.url), "utf8"), {
+      compilerOptions: { module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
+    }).outputText;
+    async function service(name, scheduledVersion, checkImpl) {
+      const data = path.join(serviceDir, name), cache = path.join(data, "shard-updater");
+      await mkdir(path.join(cache, "pending"), { recursive: true });
+      await writeFile(path.join(data, "Uninstall Shard.exe"), "test installation marker");
+      const prefs = new UpdatePreferencesFile(path.join(data, "updates.json"));
+      prefs.save({ scheduledVersion });
+      if (scheduledVersion) {
+        const file = path.join(cache, "pending", "Shard-Setup-0.1.4.exe");
+        await writeFile(file, "test bytes, never executable");
+        await writeFile(path.join(cache, "pending", "update-info.json"), JSON.stringify({ fileName: path.basename(file), sha512: await fileSha512(file) }));
+      }
+      const backend = new FakeUpdater();
+      if (checkImpl) backend.checkImpl = checkImpl;
+      const timers = [], intervals = [], handlers = new Map(), exports = {};
+      class Window extends EventEmitter {
+        destroyed = false;
+        webContents = { executeJavaScript: async () => {} };
+        constructor(options) { super(); assert.equal(options.webPreferences.nodeIntegration, false); }
+        show() {} isDestroyed() { return this.destroyed; } destroy() { this.destroyed = true; }
+        async loadURL() { this.emit("ready-to-show"); }
+      }
+      vm.runInNewContext(source, { exports, console, URL, Date,
+        process: { platform: "win32", env: { LOCALAPPDATA: data } },
+        setTimeout: (fn, ms) => { timers.push({ fn, ms }); return 1; }, clearTimeout: () => {},
+        setInterval: (fn, ms) => { const timer = { fn, ms, unref() {} }; intervals.push(timer); return timer; }, clearInterval: () => {},
+        require: id => {
+          if (id === "electron") return { app: { isPackaged: true, getVersion: () => "0.1.3", getPath: name => name === "exe" ? path.join(data, "Shard.exe") : data },
+            BrowserWindow: Window, ipcMain: { handle: (channel, fn) => handlers.set(channel, fn) }, shell: { openExternal: async () => {} } };
+          if (id === "electron-updater") return { autoUpdater: backend };
+          if (id === "./update-controller") return { UpdateController };
+          if (id === "./update-storage") return { UpdateCache, UpdatePreferencesFile, versionAtLeast };
+          if (id === "./update-log") return { createUpdateLog: () => ({ info() {}, warn() {}, error() {}, debug() {}, flush: async () => {} }) };
+          return require(id);
+        },
+      });
+      let prepared = 0;
+      const instance = exports.registerUpdater({ window: () => null, prepareInstall: async () => { prepared++; return null; }, installFailed() {}, log() {} });
+      return { instance, backend, timers, intervals, data, prepared: () => prepared, handlers };
+    }
+    const ordinary = await service("ordinary");
+    assert.equal(await ordinary.instance.beforeLaunch(), false);
+    assert.equal(ordinary.backend.checks, 0, "Normal startup does not wait on GitHub");
+    ordinary.instance.startChecks(); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(ordinary.backend.checks, 1);
+    assert.equal(ordinary.intervals[0].ms, 12 * 60 * 60 * 1000);
+    ordinary.intervals[0].fn(); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(ordinary.backend.checks, 2);
+    ordinary.instance.startChecks(); assert.equal(ordinary.intervals.length, 1);
+    assert.throws(() => ordinary.handlers.get("updates:install")({}), /not allowed/);
+    const launch = await service("scheduled", "0.1.4");
+    assert.equal(await launch.instance.beforeLaunch(), true);
+    assert.equal(launch.backend.installs, 1); assert.equal(launch.prepared(), 1);
+    assert.equal(new UpdatePreferencesFile(path.join(launch.data, "updates.json")).value.scheduledVersion, undefined);
+    const offline = await service("offline", "0.1.4", async () => { throw new Error("offline"); });
+    assert.equal(await offline.instance.beforeLaunch(), false);
+    assert.equal(offline.backend.installs, 0);
+    assert.equal(new UpdatePreferencesFile(path.join(offline.data, "updates.json")).value.scheduledVersion, "0.1.4");
+    const slowCheck = deferred();
+    const slow = await service("slow", "0.1.4", () => slowCheck.promise);
+    const launchSlow = slow.instance.beforeLaunch();
+    // File reads precede creation of the timeout; wait for that exact boundary.
+    while (!slow.timers.length) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(slow.timers[0].ms, 12000); slow.timers[0].fn();
+    assert.equal(await launchSlow, false);
+    slow.backend.emit("update-available", info); slowCheck.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(slow.backend.installs, 0, "Late metadata cannot install after startup has continued");
+    const damaged = await service("damaged", "0.1.4");
+    await writeFile(path.join(damaged.data, "shard-updater/pending/Shard-Setup-0.1.4.exe"), "tampered");
+    assert.equal(await damaged.instance.beforeLaunch(), false);
+    assert.equal(damaged.backend.downloads, 0, "Damaged deferred files need an explicit new download");
+    assert.equal(damaged.backend.installs, 0);
+  } finally { await rm(serviceDir, { recursive: true, force: true }); }
+  console.log("Startup updater tests passed: startup/12h checks, deferred install, offline, timeout, damaged cache, IPC isolation");
+
+  const coreExports = {}, coreTimers = [];
+  vm.runInNewContext(require("typescript").transpileModule(readFileSync(new URL("../src/main/core-client.ts", import.meta.url), "utf8"), {
+    compilerOptions: { module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
+  }).outputText, { exports: coreExports, process, console,
+    setTimeout: fn => { const timer = { fn }; coreTimers.push(timer); return timer; }, clearTimeout: timer => { if (timer) timer.cleared = true; },
+    require: id => id === "electron" ? { app: {} } : id === "./settings" ? {} : require(id),
+  });
+  const client = new coreExports.CoreClient(), child = new EventEmitter();
+  child.exitCode = null; child.signalCode = null; let killed = false, finished = false;
+  child.kill = () => { killed = true; return true; };
+  client.reconnectTimer = { cleared: false };
+  client.proc = child; client.invoke = async () => {};
+  const stopped = client.shutdown().then(() => { finished = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finished, false);
+  coreTimers[0].fn();
+  assert.equal(killed, true); assert.equal(finished, false, "Signalling kill is not proof that core DLLs are released");
+  child.exitCode = 0; child.emit("exit", 0); await stopped;
+  assert.equal(finished, true);
+  assert.equal(client.reconnectTimer, null, "Installer failure can restart the core without a stale reconnect timer");
+  assert.ok(coreTimers.every(timer => timer.cleared));
+  console.log("Capture shutdown test passed: installer waits for the core process to actually exit");
 
   // Exercise the actual NSIS updater and its YAML/SemVer/SHA-512 download path
   // against an isolated localhost feed. The dummy bytes are NEVER executed.

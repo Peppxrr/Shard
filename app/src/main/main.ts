@@ -1,14 +1,13 @@
 // main.ts — Electron main process: core lifecycle, settings, hotkeys, library,
 // storage watchdog, exports, tray, IPC.
-import { app, BrowserWindow, dialog, ipcMain, screen, shell, Notification, Tray, Menu, nativeImage } from "electron";
+import { app, protocol, BrowserWindow, dialog, ipcMain, screen, shell, Notification, Tray, Menu, nativeImage } from "electron";
 import type { NativeImage } from "electron";
 import { join as joinPath } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { cpSync, existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
-import type { Dirent } from "node:fs";
-import { promises as fsPromises } from "node:fs";
 import path from "node:path";
+import { ThemeStore } from "./themes";
 import { CoreClient } from "./core-client";
 import { loadSettings, getSettings, saveSettings, seedGamesJson } from "./settings";
 import { HotkeyManager } from "./hotkeys";
@@ -24,6 +23,12 @@ import { registerUpdater } from "./updater";
 import type { AudioSourceConfig, AudioTrackInfo, ClipRecord, DevConsoleLine, EditorExportProject, ExportProgress, Settings } from "../shared/contracts";
 
 const execFileAsync = promisify(execFile);
+
+// Optional local review profile. Set before the instance lock, so development
+// can run beside the installed app without sharing settings or the database.
+if (!app.isPackaged && process.env.SHARD_DEV_USER_DATA) {
+  app.setPath("userData", path.resolve(process.env.SHARD_DEV_USER_DATA));
+}
 
 function appIcon(): NativeImage {
   const candidates = [
@@ -90,111 +95,9 @@ async function listProcesses(): Promise<ProcessEntry[]> {
 
 
 
-// ----------------------------------------------------------------- themes ----
-
-function themesDir(): string {
-  return path.join(app.getPath("userData"), "Themes");
-}
-
-function sanitizeThemeId(id: string): string {
-  const s = String(id ?? "").trim().toLowerCase();
-  if (!s) return "default";
-  return s.replace(/[^a-z0-9-_]/g, "-").replace(/^-+|-+$/g, "") || "default";
-}
-
-function parseThemeMeta(css: string, fallbackId: string): { id: string; name: string; author?: string; version?: string; description?: string } {
-  try {
-    const m = css.match(/\/\*\*([\s\S]*?)\*\//);
-    if (!m) return { id: sanitizeThemeId(fallbackId), name: fallbackId };
-    const block = m[1];
-    const get = (key: string): string | undefined => {
-      const re = new RegExp(`@${key}\\s+([^\\n*]+)`, "i");
-      const hit = block.match(re);
-      return hit?.[1]?.trim();
-    };
-    const name = get("name") || fallbackId;
-    const out: any = { id: sanitizeThemeId(fallbackId), name };
-    const author = get("author");
-    const version = get("version");
-    const description = get("description");
-    if (author) out.author = author;
-    if (version) out.version = version;
-    if (description) out.description = description;
-    return out;
-  } catch {
-    return { id: sanitizeThemeId(fallbackId), name: fallbackId };
-  }
-}
-
-async function listCustomThemes(): Promise<Array<{ id: string; name: string; author?: string; version?: string; description?: string; kind: "custom" }>> {
-  const dir = themesDir();
-  try {
-    await fsPromises.mkdir(dir, { recursive: true });
-  } catch {}
-  let entries: string[] = [];
-  try {
-    entries = await fsPromises.readdir(dir);
-  } catch {
-    return [];
-  }
-  const out: Array<{ id: string; name: string; author?: string; version?: string; description?: string; kind: "custom" }> = [];
-  for (const name of entries) {
-    // Skip files like Goob.png at top-level, custom.css, etc. Only folders with theme.css
-    const full = path.join(dir, name);
-    try {
-      const stat = await fsPromises.stat(full);
-      if (!stat.isDirectory()) continue;
-      const cssPath = path.join(full, "theme.css");
-      await fsPromises.access(cssPath);
-      const css = await fsPromises.readFile(cssPath, "utf8");
-      const meta = parseThemeMeta(css, name);
-      out.push({ ...meta, id: sanitizeThemeId(name), kind: "custom" });
-    } catch {
-      // missing theme.css, unreadable, malformed — skip but log
-      // console.debug is not spammy
-    }
-  }
-  return out;
-}
-
-async function readThemeCss(id: string): Promise<{ css: string; dir: string } | null> {
-  const safe = sanitizeThemeId(id);
-  let entries: Dirent[];
-  try {
-    entries = await fsPromises.readdir(themesDir(), { withFileTypes: true });
-  } catch {
-    return null;
-  }
-
-  const candidates = entries
-    .filter((entry) => entry.isDirectory() && sanitizeThemeId(entry.name) === safe)
-    .sort((a, b) => {
-      const aExact = a.name.toLowerCase() === safe;
-      const bExact = b.name.toLowerCase() === safe;
-      if (aExact !== bExact) return aExact ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-
-  for (const candidate of candidates) {
-    const dir = path.join(themesDir(), candidate.name);
-    try {
-      const css = await fsPromises.readFile(path.join(dir, "theme.css"), "utf8");
-      return { css, dir };
-    } catch {}
-  }
-  return null;
-}
-
-
-async function readCustomCss(): Promise<{ css: string; dir: string } | null> {
-  const p = path.join(themesDir(), "custom.css");
-  try {
-    const css = await fsPromises.readFile(p, "utf8");
-    return { css, dir: themesDir() };
-  } catch {
-    return null;
-  }
-}
+// Registered before app readiness; local theme assets also work on Vite's HTTP origin.
+protocol.registerSchemesAsPrivileged([{ scheme: "shard-theme", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
+let themes: ThemeStore;
 
 let win: BrowserWindow | null = null;
 let core: CoreClient;
@@ -204,6 +107,9 @@ let storage: StorageWatchdog;
 let exporter: ExportManager;
 let tray: Tray | null = null;
 let quitting = false;
+let applicationStarted = false;
+let coreStoppedForUpdate = false;
+let updater: ReturnType<typeof registerUpdater> | undefined;
 let coreFatal: string | null = null;
 const overlay = new SaveOverlay();
 const devConsole = new DevConsole();
@@ -249,6 +155,45 @@ async function main(): Promise<void> {
 
   migrateLegacyUserData();
   await loadSettings();
+  themes = new ThemeStore(path.join(app.getPath("userData"), "Themes"), app.getVersion(), () => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send("themes:changed");
+  });
+  protocol.handle("shard-theme", async request => {
+    try {
+      const resource = await themes.resource(request.url);
+      return new Response(resource.data as Uint8Array<ArrayBuffer>, { headers: {
+        "Content-Type": resource.mime, "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+      } });
+    } catch { return new Response("Theme resource unavailable", { status: 404 }); }
+  });
+  await themes.startWatching().catch(error => console.warn("[themes] Watch failed", error));
+
+  updater = registerUpdater({
+    window: () => win,
+    prepareInstall: async () => {
+      if (exporter?.busy) return "Wait for your export to finish before restarting.";
+      // A crashed/disconnected capture core must not prevent updating Shard.
+      if (core?.ready) {
+        const state = await core.invoke("state.get") as { recording?: { active?: boolean } };
+        if (state.recording?.active) return "Stop your recording before restarting to update.";
+      }
+      // quitAndInstall can close windows before before-quit is emitted.
+      quitting = true;
+      await core?.shutdown();
+      coreStoppedForUpdate = !!core;
+      return null;
+    },
+    installFailed: () => {
+      quitting = false;
+      if (coreStoppedForUpdate) {
+        coreStoppedForUpdate = false;
+        void core.start().catch(error => console.error("[updates] Core restart failed", error));
+      }
+    },
+    log: line => devConsole.feed(line),
+  });
+  if (await updater.beforeLaunch()) return;
 
   const userData = app.getPath("userData");
   await seedGamesJson();
@@ -291,27 +236,14 @@ async function main(): Promise<void> {
   hotkeys = new HotkeyManager(core, (msg) => toast(msg));
 
   createWindow();
+  applicationStarted = true;
   registerIpc();
-  registerUpdater({
-    window: () => win,
-    prepareInstall: async () => {
-      if (exporter.busy) return "Wait for your export to finish before restarting.";
-      // A crashed/disconnected capture core must not prevent updating Shard.
-      if (core.ready) {
-        const state = await core.invoke("state.get") as { recording?: { active?: boolean } };
-        if (state.recording?.active) return "Stop your recording before restarting to update.";
-      }
-      // quitAndInstall can close windows before before-quit is emitted.
-      quitting = true;
-      return null;
-    },
-    installFailed: () => { quitting = false; },
-  });
   setupTray();
   applyAppSettings(getSettings());
   // Restore the developer console window when the setting was left enabled.
   if (getSettings().app.developerConsole && !devConsole.open) devConsole.toggle();
 
+  updater.startChecks();
   await core.start();
   hotkeys.apply(getSettings());
 }
@@ -319,6 +251,7 @@ async function main(): Promise<void> {
 // Import profiles from the former app name on first launch so existing
 // settings and clips remain available after upgrading.
 function migrateLegacyUserData(): void {
+  if (!app.isPackaged && process.env.SHARD_DEV_USER_DATA) return;
   const userData = app.getPath("userData");
   if (existsSync(path.join(userData, "settings.json"))) return;
   const appData = app.getPath("appData");
@@ -522,15 +455,18 @@ function registerIpc(): void {
   });
   ipcMain.handle("clipSound:getDefaultPath", async () => getDefaultSoundPath());
 
-  // Themes — custom theme discovery + CSS reading, mild FS access via IPC.
-  ipcMain.handle("themes:listCustom", async () => listCustomThemes());
-  ipcMain.handle("themes:readTheme", async (_e, id: string) => readThemeCss(String(id)));
-  ipcMain.handle("themes:readCustomCss", async () => readCustomCss());
-  ipcMain.handle("themes:getDir", () => themesDir());
+  ipcMain.handle("themes:listCustom", () => themes.list());
+  ipcMain.handle("themes:readTheme", (_e, id: string) => themes.read(String(id)));
+  ipcMain.handle("themes:readCustomCss", () => themes.customCss());
+  ipcMain.handle("themes:setValues", async (event, id: string, values) => {
+    const saved = await themes.saveValues(String(id), values);
+    for (const window of BrowserWindow.getAllWindows()) if (window.webContents.id !== event.sender.id) window.webContents.send("themes:changed");
+    return saved;
+  });
+  ipcMain.handle("themes:refresh", () => themes.refresh());
+  ipcMain.handle("themes:getDir", () => themes.dir);
   ipcMain.handle("themes:openFolder", async () => {
-    const dir = themesDir();
-    try { await fsPromises.mkdir(dir, { recursive: true }); } catch {}
-    const err = await shell.openPath(dir);
+    const err = await shell.openPath(themes.dir);
     if (err) throw new Error(err);
   });
 
@@ -580,6 +516,7 @@ function identifyAudioTrack(track: AudioTrackInfo, source: AudioSourceConfig | u
 // ------------------------------------------------------------- settings ----
 
 function applyAppSettings(s: Settings): void {
+  if (!app.isPackaged && process.env.SHARD_DEV_USER_DATA) return;
   app.setLoginItemSettings({
     openAtLogin: s.app.startWithWindows,
     path: process.execPath,
@@ -753,6 +690,8 @@ app.on("before-quit", (event) => {
   shutdownStarted = true;
   void (async () => {
     try {
+      await updater?.stop();
+      themes?.close();
       hotkeys?.dispose();
       storage?.stop();
       exporter?.cancel();
@@ -770,7 +709,7 @@ app.on("before-quit", (event) => {
 app.on("window-all-closed", () => {
   // With close-to-tray the window is only hidden, so this only fires when the
   // window really closed (setting off or Quit): shut down fully.
-  if (!quitting && !getSettings().app.minimizeToTray) void quit();
+  if (applicationStarted && !quitting && !getSettings().app.minimizeToTray) void quit();
 });
 app.on("quit", () => {
   if (!quitting) {

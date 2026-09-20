@@ -2,22 +2,15 @@
 import { ICON_MARKUP } from "./iconAssets";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { THEME_CHANGE_EVENT } from "../themeManager";
+import { THEME_CHANGE_EVENT, getThemeIconUrl } from "../themeManager";
 
 /* ---------------------------------------------------------------------------
  * Icon — curated 24-grid stroke glyphs, currentColor, 16px default.
  * ------------------------------------------------------------------------- */
-function readThemeIconUrl(token: string): string | null {
-  if (typeof document === "undefined") return null;
-  const value = getComputedStyle(document.documentElement).getPropertyValue(`--icon-${token}`).trim();
-  const match = value.match(/^url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)$/i);
-  return match ? (match[1] ?? match[2] ?? match[3] ?? "").trim() || null : null;
-}
-
 function useThemeIconUrl(token: string): string | null {
-  const [url, setUrl] = useState<string | null>(() => readThemeIconUrl(token));
+  const [url, setUrl] = useState<string | null>(() => getThemeIconUrl(token));
   useLayoutEffect(() => {
-    const refresh = () => setUrl(readThemeIconUrl(token));
+    const refresh = () => setUrl(getThemeIconUrl(token));
     refresh();
     window.addEventListener(THEME_CHANGE_EVENT, refresh);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, refresh);
@@ -31,9 +24,10 @@ export function Icon({ name, size = 16, className }: { name: string; size?: numb
     .replace(/[^a-z0-9-_]/gi, "-")
     .toLowerCase();
   const customUrl = useThemeIconUrl(token);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const glyph = ICON_MARKUP[name] ?? ICON_MARKUP.question;
-  if (customUrl) return <svg className={className} data-icon={token} width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-    <image href={customUrl} width="24" height="24" preserveAspectRatio="xMidYMid meet" />
+  if (customUrl && customUrl !== failedUrl) return <svg className={className} data-icon={token} width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+    <image href={customUrl} onError={() => setFailedUrl(customUrl)} width="24" height="24" preserveAspectRatio="xMidYMid meet" />
   </svg>;
   return <svg className={className} data-icon={token} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: glyph }} />;
 }
@@ -56,7 +50,7 @@ export function Button({ variant = "default", size = "md", icon, iconRight, bloc
   const cls = ["btn", variant !== "default" && `btn--${variant}`, size !== "md" && `btn--${size}`, block && "btn--block", className]
     .filter(Boolean).join(" ");
   return (
-    <button className={cls} type={type ?? "button"} disabled={disabled || loading} {...rest}>
+    <button data-shard-component="button" data-variant={variant ?? "default"} data-loading={!!loading} className={cls} type={type ?? "button"} disabled={disabled || loading} {...rest}>
       {loading && <span className="spin" style={{ width: 14, height: 14 }} />}
       {icon}
       {children}
@@ -75,7 +69,7 @@ export function IconButton({ variant = "ghost", size = "md", active, label, clas
   const cls = ["btn", "btn--icon", variant !== "ghost" && `btn--${variant}`, size !== "md" && `btn--${size}`, className]
     .filter(Boolean).join(" ");
   return (
-    <button className={cls} type={type ?? "button"} aria-pressed={active} aria-label={label} title={label} {...rest}>
+    <button data-shard-component="icon-button" className={cls} type={type ?? "button"} aria-pressed={active} aria-label={label} title={label} {...rest}>
       {children}
     </button>
   );
@@ -86,7 +80,7 @@ export function IconButton({ variant = "ghost", size = "md", active, label, clas
  * ------------------------------------------------------------------------- */
 export function Toggle({ checked, onChange, disabled, id }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; id?: string }) {
   return (
-    <span className="toggle">
+    <span data-shard-component="toggle" data-checked={checked} className="toggle">
       <input type="checkbox" id={id} checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span className="toggle__track"><span className="toggle__thumb" /></span>
     </span>
@@ -159,9 +153,9 @@ interface CardProps {
 }
 export function Card({ title, sub, icon, actions, children, foot, className, flat, hover }: CardProps) {
   return (
-    <section className={["card", flat && "card--flat", hover && "card--hover", className].filter(Boolean).join(" ")}>
+    <section data-shard-component="card" className={["card", flat && "card--flat", hover && "card--hover", className].filter(Boolean).join(" ")}>
       {title && (
-        <header className="card__head">
+        <header data-shard-slot="card-header" className="card__head">
           <div>
             <div className="card__title">{icon}{title}</div>
             {sub && <div className="card__sub">{sub}</div>}
@@ -169,8 +163,8 @@ export function Card({ title, sub, icon, actions, children, foot, className, fla
           {actions && <div className="card__actions">{actions}</div>}
         </header>
       )}
-      {children && <div className="card__body">{children}</div>}
-      {foot && <footer className="card__foot">{foot}</footer>}
+      {children && <div data-shard-slot="card-body" className="card__body">{children}</div>}
+      {foot && <footer data-shard-slot="card-footer" className="card__foot">{foot}</footer>}
     </section>
   );
 }
@@ -209,7 +203,7 @@ export function Modal({ open, onClose, title, sub, size = "md", children, foot, 
   }, [open, onClose]);
   if (!open) return null;
   return (
-    <div className={`modal modal--${size}`} onMouseDown={closeOnBackdrop && onClose ? onClose : undefined}>
+    <div data-shard-component="modal" className={`modal modal--${size}`} onMouseDown={closeOnBackdrop && onClose ? onClose : undefined}>
       <div className="modal__panel" onMouseDown={(e) => e.stopPropagation()}>
         {(title || onClose) && (
           <header className="modal__head">
@@ -262,7 +256,7 @@ export function Toasts({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss: 
   return (
     <div className="toasts">
       {toasts.map((t) => (
-        <div key={t.id} className={["toast", t.kind && `toast--${t.kind}`].filter(Boolean).join(" ")}>
+        <div data-shard-component="toast" data-shard-state={t.kind ?? "info"} key={t.id} className={["toast", t.kind && `toast--${t.kind}`].filter(Boolean).join(" ")}>
           <span className="toast__ico">{t.kind === "error" ? "⚠" : t.kind === "ok" ? "✓" : "•"}</span>
           <span className="toast__msg">{t.message}</span>
           <IconButton size="sm" className="toast__x" label="Dismiss" onClick={() => onDismiss(t.id)} children={<Icon name="x" size={14} />} />
@@ -277,7 +271,7 @@ export function Toasts({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss: 
  * ------------------------------------------------------------------------- */
 export function EmptyState({ icon, title, children, action }: { icon?: ReactNode; title: ReactNode; children?: ReactNode; action?: ReactNode }) {
   return (
-    <div className="empty">
+    <div data-shard-component="empty" className="empty">
       {icon && <div className="empty__art">{icon}</div>}
       <div className="empty__title">{title}</div>
       {children && <div className="empty__text">{children}</div>}
@@ -433,6 +427,7 @@ export function ShardSelect<T extends string>({
   return (
     <>
       <button
+        data-shard-component="select"
         ref={btnRef}
         type="button"
         className={["shard-select", className].filter(Boolean).join(" ")}
@@ -458,6 +453,7 @@ export function ShardSelect<T extends string>({
       </button>
       {open && pos && (
         <div
+          data-shard-component="select-menu"
           role="listbox"
           className="shard-select__menu"
           style={{ position: "fixed", left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxHeight, zIndex: 210 }}

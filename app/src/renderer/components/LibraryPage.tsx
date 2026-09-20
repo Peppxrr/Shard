@@ -71,12 +71,12 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
   }, [clips, gameFilter, sourceFilter, search, sort]);
 
   return (
-    <div className="library">
+    <div data-shard-page="library" className="library">
       <header className="page__head">
         <h1 className="page__title">Library</h1>
         <p className="dim page__sub">Your clips, recordings, and edits in one place.</p>
       </header>
-      <div className="toolbar">
+      <div data-shard-slot="toolbar" className="toolbar">
         <label className="search">
           <Icon name="search" size={15} />
           <input type="search" aria-label="Search clips" placeholder="Search clips…" value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -116,7 +116,7 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
           {clips.length ? "Try another search or change your filters." : <>Use your <strong>Save clip</strong> hotkey to save a replay here.</>}
         </EmptyState>
       ) : (
-        <div className="grid">
+        <div data-shard-slot="clip-grid" className="grid">
           {filtered.map((c) => (
             <ClipCard key={c.id} clip={c} onOpen={() => setSelected(c)} onEdit={() => onOpenEditor(c)} />
           ))}
@@ -141,9 +141,9 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
   const [confirming, setConfirming] = useState(false);
   const isFav = clip.protected === 1;
   return (
-    <div className="clip card--hover" onClick={onOpen}>
+    <div data-shard-component="clip" data-favorite={isFav} data-source={clip.source} className="clip card--hover" onClick={onOpen}>
       <div
-        className="clip__thumb"
+        data-shard-slot="clip-thumbnail" className="clip__thumb"
         draggable
         title="Click to play · drag to share"
         onDragStart={(e) => {
@@ -158,11 +158,11 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
         <span className={`badge badge--type${clip.source === "edited" ? " badge--edited" : ""}`}>{clip.source}</span>
         <span className="badge badge--dur num">{fmtDuration(clip.durationMs)}</span>
       </div>
-      <div className="clip__meta">
+      <div data-shard-slot="clip-details" className="clip__meta">
         <div className="clip__title">{clip.game ?? "Untagged"}</div>
         <div className="clip__sub">{relativeDate(clip.createdAt)} · {fmtSize(clip.sizeBytes)}</div>
         <div className="clip__time mono">{fmtDateTime(clip.createdAt)}</div>
-        <div className="clip__actions" onClick={(e) => e.stopPropagation()}>
+        <div data-shard-slot="clip-actions" className="clip__actions" onClick={(e) => e.stopPropagation()}>
           <IconButton size="sm" label="Edit" onClick={onEdit}><Icon name="scissor" size={15} /></IconButton>
           <IconButton size="sm" label={isFav ? "Unfavorite" : "Favorite — keep from auto-delete"} active={isFav}
             className={isFav ? "is-fav" : ""} onClick={() => void window.shard.setProtected(clip.id, !isFav)}>

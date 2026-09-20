@@ -1,3 +1,4 @@
+import { THEME_CHANGE_EVENT } from "../themeManager";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { WaveformData } from "../../shared/contracts";
@@ -407,8 +408,8 @@ export function Timeline({
   };
 
   return (
-    <section className="timeline" aria-label="Clip timeline">
-      <header className="timeline__toolbar">
+    <section data-shard-component="timeline" className="timeline" aria-label="Clip timeline">
+      <header data-shard-slot="toolbar" className="timeline__toolbar">
         <div className="timeline__toolbar-group">
           <Button size="sm" icon={<Icon name="scissor" size={14} />} onClick={onSplit} disabled={!selectedSegment}>Split</Button>
           <Button size="sm" variant="danger" icon={<Icon name="trash" size={14} />} onClick={onDelete} disabled={!selectedSegment}>Delete</Button>
@@ -477,7 +478,7 @@ export function Timeline({
                   <div
                     key={segment.id}
                     data-segment-id={segment.id}
-                    className={`timeline-segment${segment.id === state.selectedSegmentId ? " is-selected" : ""}`}
+                    data-shard-component="timeline-segment" data-selected={segment.id === state.selectedSegmentId} className={`timeline-segment${segment.id === state.selectedSegmentId ? " is-selected" : ""}`}
                     style={{ left: timeToPixel(start, pxPerSecond), width: Math.max(2, (end - start) * pxPerSecond) }}
                     onContextMenu={(event) => {
                       event.preventDefault();
@@ -517,7 +518,7 @@ export function Timeline({
           </div>
 
           {state.audioTracks.map((track) => (
-            <div key={track.streamIndex} className={`timeline__row timeline__row--audio${activeAudio === track.streamIndex ? " is-active" : ""}${track.muted ? " is-muted" : ""}${!track.included ? " is-excluded" : ""}`}>
+            <div data-shard-component="audio-track" data-muted={track.muted} data-included={track.included} data-selected={activeAudio === track.streamIndex} key={track.streamIndex} className={`timeline__row timeline__row--audio${activeAudio === track.streamIndex ? " is-active" : ""}${track.muted ? " is-muted" : ""}${!track.included ? " is-excluded" : ""}`}>
               <div
                 className="timeline__label timeline__audio-label"
                 onClick={() => setActiveAudio(track.streamIndex)}
@@ -659,11 +660,19 @@ const Waveform = memo(function Waveform({
   segments: TimelineSegment[];
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [themeRevision, setThemeRevision] = useState(0);
+  useEffect(() => {
+    const changed = () => setThemeRevision(value => value + 1);
+    window.addEventListener(THEME_CHANGE_EVENT, changed);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, changed);
+  }, []);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !waveform) return;
     const context = canvas.getContext("2d");
     if (!context) return;
+    const colors = getComputedStyle(canvas);
+    const color = colors.getPropertyValue(muted ? "--waveform-muted" : "--waveform").trim();
     const width = canvas.width;
     const height = canvas.height;
     context.clearRect(0, 0, width, height);
@@ -679,12 +688,12 @@ const Waveform = memo(function Waveform({
       const amplitude = Math.max(1, Math.min(1, peak / Math.max(0.0001, referencePeak)) * (middle - 2));
       const sourceTime = ((x + 0.5) / width) * waveform.duration;
       const kept = segments.some((segment) => sourceTime >= segment.sourceStart && sourceTime <= segment.sourceEnd);
-      context.fillStyle = muted
-        ? (kept ? "rgba(118, 127, 147, .42)" : "rgba(118, 127, 147, .10)")
-        : (kept ? "rgba(91, 157, 255, .82)" : "rgba(91, 157, 255, .14)");
+      context.fillStyle = color || (muted ? "#767f93" : "#5b9dff");
+      context.globalAlpha = muted ? (kept ? .42 : .10) : (kept ? .82 : .14);
       context.fillRect(x, middle - amplitude, 1, amplitude * 2);
     }
-  }, [muted, segments, waveform]);
+    context.globalAlpha = 1;
+  }, [muted, segments, waveform, themeRevision]);
   if (!waveform) return <span className="timeline__waveform-loading">Generating waveform…</span>;
   return <canvas ref={canvasRef} className="timeline__waveform" width={Math.min(4000, Math.max(800, waveform.peaks.length))} height={48} />;
 });

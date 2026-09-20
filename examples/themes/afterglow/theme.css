@@ -1,0 +1,103 @@
+/**
+ * @name Afterglow
+ * @author Shard
+ * @version 1.0.0
+ * @description A complete, editable example of Shard Theme API 1.
+ */
+
+/* Options are supplied by Shard. Fallbacks also make this a CSS-only theme. */
+:root {
+  --bg-0: #0b1519;
+  --bg-1: #122127;
+  --bg-2: #1b2c33;
+  --bg-3: #263b42;
+  --bg-4: #324950;
+  --stroke: #2c4047;
+  --stroke-2: #40575f;
+  --stroke-3: #637c84;
+  --fg: #e5f0eb;
+  --fg-2: #b9ccc8;
+  --fg-3: #93aaa9;
+  --fg-4: #738f91;
+  --accent: var(--theme-accent, #85dcc4);
+  --accent-2: #e2c28d;
+  --accent-ink: #0a1b1a;
+  --accent-soft: color-mix(in srgb, var(--accent) 17%, transparent);
+  --accent-softer: color-mix(in srgb, var(--accent) 8%, transparent);
+  --accent-grad: linear-gradient(115deg, var(--accent), color-mix(in srgb, var(--accent) 68%, #e2c28d));
+  --accent-grad-soft: linear-gradient(120deg, var(--accent-soft), transparent);
+  --ok: #85dcc4;
+  --warn: #e2c28d;
+  --rec: #ff8991;
+  --danger: #ff9a93;
+  --ok-soft: #85dcc41c;
+  --warn-soft: #e2c28d1c;
+  --rec-soft: #ff89911c;
+  --danger-soft: #ff9a931c;
+  --r-xs: 4px;
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --font-ui: "Segoe UI Variable", "Segoe UI", sans-serif;
+  --font-mono: "Cascadia Code", Consolas, monospace;
+  --fs-10: calc(var(--theme-text-size, 14px) * .7143);
+  --fs-11: calc(var(--theme-text-size, 14px) * .7857);
+  --fs-12: calc(var(--theme-text-size, 14px) * .8571);
+  --fs-13: calc(var(--theme-text-size, 14px) * .9286);
+  --fs-14: var(--theme-text-size, 14px);
+  --fs-15: calc(var(--theme-text-size, 14px) * 1.0714);
+  --fs-17: calc(var(--theme-text-size, 14px) * 1.2143);
+  --fs-20: calc(var(--theme-text-size, 14px) * 1.4286);
+  --fs-26: calc(var(--theme-text-size, 14px) * 1.8571);
+  --shadow-1: 0 2px 8px #0002;
+  --shadow-2: 0 18px 48px #0005;
+  --shadow-3: 0 30px 80px #0008;
+  --timeline-selection: #e2c28d;
+  --timeline-playhead: #fff3da;
+  --timeline-handle: #d8eae2;
+  --timeline-cut: #081215c4;
+  --waveform: var(--accent);
+  --icon-capture: url("./assets/orbit.svg");
+  color-scheme: dark;
+}
+
+[data-shard-component="app"] {
+  background: radial-gradient(ellipse at 90% 0%, #25494366, transparent 58%), var(--bg-0);
+}
+[data-shard-slot="titlebar"] { background: #0e1b20; border-bottom-color: var(--stroke); }
+[data-shard-slot="statusbar"] { background: #0e1b20; }
+[data-shard-component="card"] { box-shadow: var(--shadow-1); }
+[data-shard-slot="card-header"] { border-bottom-style: dashed; }
+.nav__item[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+.btn--primary { font-weight: 650; }
+.page__title { letter-spacing: -.025em; }
+.eyebrow { color: var(--accent-2); letter-spacing: .15em; }
+
+:root[data-theme-corners="square"] { --r-xs: 2px; --r-sm: 3px; --r-md: 4px; --r-lg: 5px; --r-xl: 8px; }
+:root[data-theme-compact="true"] { --sp-4: 12px; --sp-5: 16px; --sp-6: 20px; --sp-8: 24px; --page-gutter: 24px; --control-height: 32px; }
+
+/* This rearranges the existing controls. Window buttons remain in the titlebar.
+   Small windows keep top navigation so both settings columns remain usable. */
+@media (min-width: 1000px) {
+  :root[data-theme-navigation="sidebar"] [data-shard-slot="titlebar"]::before {
+    content: "SHARD / AFTERGLOW";
+    font: 600 11px var(--font-mono);
+    letter-spacing: .14em;
+    color: var(--accent);
+    padding-left: 12px;
+  }
+  :root[data-theme-navigation="sidebar"] [data-shard-component="navigation"] {
+    position: fixed; inset: 82px auto 76px 18px; width: 150px;
+    display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+    padding: 0; z-index: 4; -webkit-app-region: no-drag;
+  }
+  :root[data-theme-navigation="sidebar"] [data-shard-nav] {
+    min-height: 44px; justify-content: flex-start; border-radius: var(--r-md);
+    padding: 0 14px; border: 1px solid transparent;
+  }
+  :root[data-theme-navigation="sidebar"] [data-shard-nav][aria-current="page"] { border-color: var(--stroke-2); }
+  :root[data-theme-navigation="sidebar"] [data-shard-slot="content"] { margin-left: 180px; border-left: 1px solid var(--stroke); }
+}
+
+@media (prefers-reduced-motion: reduce) { .btn, .card, .clip { transition: none; } }

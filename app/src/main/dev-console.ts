@@ -3,12 +3,22 @@
 // app.developerConsole setting; the renderer shows a bottom-right indicator
 // while enabled. The console window reuses the renderer bundle (loaded with
 // the #console hash, which renders the DevConsole component instead of App).
-import { BrowserWindow } from "electron";
+import { BrowserWindow, ipcMain } from "electron";
 import { join as joinPath } from "node:path";
 import type { DevConsoleLine } from "../shared/contracts";
 
 export class DevConsole {
   private win: BrowserWindow | null = null;
+  private history: DevConsoleLine[] = [];
+  private sequence = 0;
+
+  constructor() {
+    ipcMain.handle("devconsole:history", event => {
+      if (!this.win || event.sender !== this.win.webContents || event.senderFrame !== this.win.webContents.mainFrame)
+        throw new Error("Console history is only available in the developer console.");
+      return this.history;
+    });
+  }
 
   get open(): boolean {
     return !!this.win && !this.win.isDestroyed();
@@ -56,8 +66,11 @@ export class DevConsole {
     this.win = null;
   }
 
-  // Feed one line; no-op while the console is closed.
+  // A bounded buffer retains updater/startup diagnostics before the console opens.
   feed(line: DevConsoleLine): void {
+    line = { ...line, id: ++this.sequence };
+    this.history.push(line);
+    if (this.history.length > 2000) this.history.splice(0, this.history.length - 2000);
     if (!this.open) return;
     this.win?.webContents.send("devconsole:line", line);
   }

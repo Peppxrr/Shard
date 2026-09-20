@@ -6,8 +6,7 @@ import { ClipSoundSettings } from "./ClipSoundSettings";
 import { CaptureSettingsPanel, ExportSettingsPanel, StorageSettingsPanel, AppSettingsPanel } from "./GeneralSettingsPanels";
 import { AudioSourcesSettings } from "./AudioSourcesSettings";
 import { HotkeysSettings } from "./HotkeysSettings";
-import { getAllThemes, setTheme, reloadThemes, openThemesFolder, getSelectedId } from "../themeManager";
-import type { ThemeMeta } from "../../shared/contracts";
+import { AppearancePanel } from "./AppearancePanel";
 
 interface Props {
   settings: Settings;
@@ -123,8 +122,8 @@ export function SettingsPage({ settings, onChange, onCommit }: Props) {
     onChange({ ...settings, [section]: { ...(settings[section] as object), ...(p as object) } });
 
   return (
-    <div className="page settings" ref={pageRef}>
-      <aside className="settings__nav">
+    <div data-shard-page="settings" data-shard-section={active} className="page settings" ref={pageRef}>
+      <aside data-shard-slot="settings-navigation" className="settings__nav">
         <h1 className="page__title settings__title">Settings</h1>
         {NAV.map((s) => (
           <button key={s.id} type="button" className={active === s.id ? "nav__item settings__nav-item active" : "nav__item settings__nav-item"}
@@ -134,7 +133,7 @@ export function SettingsPage({ settings, onChange, onCommit }: Props) {
         ))}
       </aside>
 
-      <div className="settings__content">
+      <div data-shard-slot="settings-content" className="settings__content">
         <header className="page__head">
           <h2 className="page__title">{NAV.find((section) => section.id === active)?.label}</h2>
           <p className="dim page__sub">{SETTINGS_DESCRIPTIONS[active]}</p>
@@ -160,99 +159,6 @@ export function SettingsPage({ settings, onChange, onCommit }: Props) {
 
         {active === "app" && <AppSettingsPanel settings={settings} onChange={onChange} version={version} />}
       </div>
-    </div>
-  );
-}
-
-
-/* ----------------------------- Appearance / Themes ----------------------------- */
-function AppearancePanel({ settings, onChange }: { settings: Settings; onChange: (s: Settings) => void }) {
-  const [themes, setThemes] = useState<ThemeMeta[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [themesDir, setThemesDir] = useState<string>("");
-  const selected = settings.appearance?.theme ?? getSelectedId() ?? "default";
-
-  const load = async () => {
-    setLoading(true);
-    try {
-      const all = await getAllThemes();
-      setThemes(all);
-      try {
-        const dir = await window.shard.getThemesDir();
-        setThemesDir(dir);
-      } catch {}
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void load();
-  }, []);
-
-  const builtin = themes.filter((t) => t.kind === "builtin");
-  const custom = themes.filter((t) => t.kind === "custom");
-
-  const handleSelect = async (id: string) => {
-    const safe = id.trim().toLowerCase().replace(/[^a-z0-9-_]/g, "-") || "default";
-    // Apply immediately via themeManager (also persists to localStorage + settings)
-    await setTheme(safe);
-    // Keep React settings in sync so save shows correct value and persists
-    onChange({ ...settings, appearance: { theme: safe } });
-  };
-
-  const handleReload = async () => {
-    await load();
-    await reloadThemes(selected);
-  };
-
-  const handleOpen = async () => {
-    await openThemesFolder().catch(() => {});
-  };
-
-  return (
-    <div className="stack">
-      <Card title="App theme" sub="Choose the colors and surfaces that feel right for you.">
-        <div className="theme-grid" aria-label="Built-in themes">
-          {builtin.map((theme) => (
-            <button key={theme.id} type="button" aria-pressed={selected === theme.id}
-              className="theme-option" onClick={() => void handleSelect(theme.id)}>
-              <span className={"theme-option__preview theme-option__preview--" + theme.id} aria-hidden="true">
-                <span className="theme-option__bar" /><span className="theme-option__sidebar" />
-                <span className="theme-option__surface"><i /><i /><i /></span>
-              </span>
-              <span className="theme-option__label">{theme.name}
-                {selected === theme.id && <Icon name="check" size={15} />}
-              </span>
-              <span className="theme-option__description">{theme.id === "oled" ? "Pure black surfaces" : theme.id === "midnight" ? "Deep navy, cool highlights" : "Charcoal with soft blue"}</span>
-            </button>
-          ))}
-        </div>
-        {loading && <p className="field__hint">Loading themes…</p>}
-      </Card>
-      <Card title="Custom themes" sub="Add your own colors and styles."
-        actions={<Button size="sm" icon={<Icon name="refresh" size={14} />} onClick={() => void handleReload()}>Reload themes</Button>}>
-        {custom.length > 0 && <div className="stack">
-          {custom.map((theme) => (
-            <button key={theme.id} type="button" className="theme-custom" aria-pressed={selected === theme.id}
-              onClick={() => void handleSelect(theme.id)}>
-              <span className="theme-custom__identity"><span className="setting-symbol"><Icon name="paintbrush" size={18} /></span><span><strong>{theme.name}</strong><span className="field__hint">{theme.description || (theme.author ? `Created by ${theme.author}` : "Custom color palette")}</span></span></span>
-              {selected === theme.id && <Icon name="check" size={16} />}
-            </button>
-          ))}
-        </div>}
-        {!custom.length && <p className="field__hint">No custom themes installed.</p>}
-        <div className="theme-folder">
-          <Button icon={<Icon name="folder" size={15} />} onClick={() => void handleOpen()}>Open themes folder</Button>
-          {themesDir && <span className="field__hint" title={themesDir}>{themesDir}</span>}
-        </div>
-        <details className="theme-help">
-          <summary>Create a custom theme</summary>
-          <p className="field__hint">Add a folder containing <code>theme.css</code> to your themes folder, then reload themes.
-            See <code>docs/THEMES.md</code> for supported colors, spacing, and styles.</p>
-          <p className="field__hint">Custom themes can load fonts and images from the internet. Only install themes you trust.</p>
-        </details>
-      </Card>
     </div>
   );
 }

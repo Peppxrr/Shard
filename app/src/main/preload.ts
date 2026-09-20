@@ -1,3 +1,4 @@
+import type { ThemeDocument, ThemeValues } from "../shared/themes";
 // preload.ts — narrow contextBridge surface (window.shard).
 import { contextBridge, ipcRenderer } from "electron";
 import type {
@@ -19,6 +20,10 @@ const api: ShardApi = {
   checkForUpdates: () => ipcRenderer.invoke("updates:check") as Promise<UpdateState>,
   downloadUpdate: () => ipcRenderer.invoke("updates:download") as Promise<UpdateState>,
   installUpdate: () => ipcRenderer.invoke("updates:install") as Promise<UpdateState>,
+  scheduleUpdate: () => ipcRenderer.invoke("updates:schedule") as Promise<UpdateState>,
+  cancelScheduledUpdate: () => ipcRenderer.invoke("updates:unschedule") as Promise<UpdateState>,
+  dismissUpdate: () => ipcRenderer.invoke("updates:dismiss") as Promise<UpdateState>,
+  getDevConsoleHistory: () => ipcRenderer.invoke("devconsole:history"),
   openUpdateRelease: () => ipcRenderer.invoke("updates:release") as Promise<UpdateState>,
   onUpdateState: (cb) => {
     const listener = (_e: unknown, state: UpdateState) => cb(state);
@@ -117,8 +122,8 @@ const api: ShardApi = {
 
   // Themes — renderer calls main to list/read custom themes (builtin are local)
   listCustomThemes: () => ipcRenderer.invoke("themes:listCustom") as Promise<ThemeMeta[]>,
-  readTheme: (id: string) => ipcRenderer.invoke("themes:readTheme", id) as Promise<{ css: string; dir: string } | null>,
-  readCustomCss: () => ipcRenderer.invoke("themes:readCustomCss") as Promise<{ css: string; dir: string } | null>,
+  readTheme: (id: string) => ipcRenderer.invoke("themes:readTheme", id) as Promise<ThemeDocument | null>,
+  readCustomCss: () => ipcRenderer.invoke("themes:readCustomCss") as Promise<string | null>,
   getThemesDir: () => ipcRenderer.invoke("themes:getDir") as Promise<string>,
   openThemesFolder: () => ipcRenderer.invoke("themes:openFolder") as Promise<void>,
 };
@@ -128,9 +133,16 @@ contextBridge.exposeInMainWorld("shard", api);
 // Dedicated themes bridge — themeManager prefers this, but ShardApi also exposes the same
 // methods for convenience. Keeping both avoids breaking older custom theme docs.
 const themesApi = {
+  setValues: (id: string, values: ThemeValues) => ipcRenderer.invoke("themes:setValues", id, values) as Promise<ThemeValues>,
+  refresh: () => ipcRenderer.invoke("themes:refresh") as Promise<void>,
+  onChanged: (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on("themes:changed", listener);
+    return () => ipcRenderer.removeListener("themes:changed", listener);
+  },
   listCustom: () => ipcRenderer.invoke("themes:listCustom") as Promise<ThemeMeta[]>,
-  readTheme: (id: string) => ipcRenderer.invoke("themes:readTheme", id) as Promise<{ css: string; dir: string } | null>,
-  readCustomCss: () => ipcRenderer.invoke("themes:readCustomCss") as Promise<{ css: string; dir: string } | null>,
+  readTheme: (id: string) => ipcRenderer.invoke("themes:readTheme", id) as Promise<ThemeDocument | null>,
+  readCustomCss: () => ipcRenderer.invoke("themes:readCustomCss") as Promise<string | null>,
   getThemesDir: () => ipcRenderer.invoke("themes:getDir") as Promise<string>,
   openThemesFolder: () => ipcRenderer.invoke("themes:openFolder") as Promise<void>,
   listCustomThemes: () => ipcRenderer.invoke("themes:listCustom") as Promise<ThemeMeta[]>,

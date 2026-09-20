@@ -1,3 +1,4 @@
+import type { ThemeDocument, ThemeValues } from "./shared/themes";
 import type { ShardApi, ThemeMeta } from "./shared/contracts";
 
 declare module "*.css?raw" {
@@ -14,9 +15,12 @@ declare global {
   interface Window {
     shard: ShardApi;
     shardThemes: {
+      setValues(id: string, values: ThemeValues): Promise<ThemeValues>;
+      refresh(): Promise<void>;
+      onChanged(cb: () => void): () => void;
       listCustom(): Promise<ThemeMeta[]>;
-      readTheme(id: string): Promise<{ css: string; dir: string } | null>;
-      readCustomCss(): Promise<{ css: string; dir: string } | null>;
+      readTheme(id: string): Promise<ThemeDocument | null>;
+      readCustomCss(): Promise<string | null>;
       getThemesDir(): Promise<string>;
       openThemesFolder(): Promise<void>;
       listCustomThemes(): Promise<ThemeMeta[]>;

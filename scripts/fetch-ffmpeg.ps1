@@ -9,10 +9,11 @@ $ProgressPreference = "SilentlyContinue"
 
 # Versioned release asset, not a moving latest URL or a short-lived daily build.
 # Update URL and digest together after reviewing the upstream release.
-$url = "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build.zip"
-$sha256 = "2e8e28af97c2ae338ccef92e36da9b2a4cd21d0cad9dde093545606cb07f5b00"
-
 $root = Split-Path $PSScriptRoot -Parent
+$pins = Get-Content (Join-Path $root "runtime-dependencies.json") -Raw | ConvertFrom-Json
+$url = $pins.ffmpeg.url
+$sha256 = $pins.ffmpeg.sha256
+
 $dir = Join-Path $root "vendor/ffmpeg"
 New-Item -ItemType Directory -Force $dir | Out-Null
 
@@ -28,11 +29,12 @@ if ($actual -ne $sha256) {
 }
 
 Expand-Archive $zip $fetchDir -Force
-$inner = Join-Path $fetchDir "ffmpeg-9.0.1-full_build"
+$inner = Join-Path $fetchDir $pins.ffmpeg.archiveDirectory
 $exeDir = Join-Path $dir "bin"
 New-Item -ItemType Directory -Force $exeDir | Out-Null
 Copy-Item (Join-Path $inner "bin/ffmpeg.exe") $exeDir -Force
 Copy-Item (Join-Path $inner "bin/ffprobe.exe") $exeDir -Force
+[IO.File]::WriteAllText((Join-Path $dir "pins.json"), ($pins.ffmpeg | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))
 # Verify the resolved temporary directory before recursive cleanup.
 $resolvedFetch = [IO.Path]::GetFullPath($fetchDir)
 if (-not $resolvedFetch.StartsWith([IO.Path]::GetFullPath($dir) + [IO.Path]::DirectorySeparatorChar)) {

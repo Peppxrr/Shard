@@ -23,13 +23,12 @@ const coreBin = process.argv[2]
   ? resolve(process.argv[2])
   : join(appRoot, "resources", "core-bin");
 
+const pins = JSON.parse(readFileSync(join(repoRoot, "runtime-dependencies.json"), "utf8"));
 const ROOT_FILES = [
   "shardcore.exe", "obs.dll", "libobs-d3d11.dll", "libobs-winrt.dll", "w32-pthreads.dll",
   "obs-ffmpeg-mux.exe", "obs-nvenc-test.exe", "ffmpeg.exe", "ffprobe.exe",
   // obs-deps runtime (FFmpeg, curl, x264, ...)
-  "avcodec-62.dll", "avformat-62.dll", "avutil-60.dll", "avdevice-62.dll", "avfilter-11.dll",
-  "swscale-9.dll", "swresample-6.dll", "zlib.dll", "libx264-164.dll", "librist.dll",
-  "datachannel.dll", "libcurl.dll", "srt.dll",
+  ...pins.obs.runtimeDlls,
 ];
 
 const PLUGINS = [
@@ -89,15 +88,23 @@ if (!existsSync(coreBin)) {
     fail("missing data/libobs/default.effect (libobs cannot render without it)");
   }
 
+  const stagedPins = join(coreBin, "runtime-dependencies.json");
+  if (!existsSync(stagedPins) || JSON.stringify(JSON.parse(readFileSync(stagedPins, "utf8"))) !== JSON.stringify(pins))
+    fail("staged runtime dependency versions differ from the selected pins — rebuild the core");
+  const ffmpegPins = join(coreBin, "ffmpeg-pins.json");
+  if (!existsSync(ffmpegPins) || JSON.stringify(JSON.parse(readFileSync(ffmpegPins, "utf8"))) !== JSON.stringify(pins.ffmpeg))
+    fail("FFmpeg provenance does not match the selected version — fetch FFmpeg and rebuild");
+
   // Hook payload integrity: the staged bytes must be the pinned, officially
   // signed OBS release binaries — a rebuilt or modified hook breaks the
   // anti-cheat trust model (and the patched win-capture would refuse it anyway).
-  const payloadDir = join(repoRoot, "vendor/obs-hook-payload/32.2.1");
+  const payloadDir = join(repoRoot, pins.obs.hookPayload);
   const manifestPath = join(payloadDir, "manifest.json");
   if (!existsSync(manifestPath)) {
-    fail("vendor/obs-hook-payload/32.2.1/manifest.json missing — cannot verify official hook payload");
+    fail(`${pins.obs.hookPayload}/manifest.json missing — cannot verify official hook payload`);
   } else {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (manifest.obsVersion !== pins.obs.version) fail("OBS version differs from its hook payload manifest");
     for (const [name, expected] of Object.entries(manifest.files)) {
       const staged = join(coreBin, "data/obs-plugins/win-capture", name);
       if (!existsSync(staged)) continue; // already reported as missing above

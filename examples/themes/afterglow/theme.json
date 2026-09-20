@@ -1,0 +1,18 @@
+{
+  "$schema": "../../../docs/theme.schema.json",
+  "schema": 1,
+  "name": "Afterglow",
+  "author": "Shard",
+  "version": "1.0.0",
+  "description": "An observatory after dark. Sea-glass color, warm details, and a quieter workspace.",
+  "minShardVersion": "0.1.5",
+  "styles": ["theme.css", "pages.css"],
+  "settings": {
+    "accent": { "type": "color", "name": "Accent color", "default": "#85dcc4" },
+    "text-size": { "type": "range", "name": "Text size", "description": "Scale the interface typography without changing video or timeline geometry.", "min": 13, "max": 18, "step": 1, "unit": "px", "default": 14 },
+    "navigation": { "type": "select", "name": "Navigation", "default": "sidebar", "choices": [{ "value": "sidebar", "label": "Side rail" }, { "value": "top", "label": "Top bar" }] },
+    "compact": { "type": "boolean", "name": "Compact spacing", "description": "Bring cards and controls closer together.", "default": false },
+    "corners": { "type": "select", "name": "Card corners", "default": "soft", "choices": [{ "value": "soft", "label": "Soft" }, { "value": "square", "label": "Architectural" }] },
+    "constellations": { "type": "boolean", "name": "Constellation artwork", "description": "Local SVG artwork. No animation or network requests.", "default": true }
+  }
+}

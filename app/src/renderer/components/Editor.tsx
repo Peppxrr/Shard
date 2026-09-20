@@ -475,8 +475,8 @@ export function Editor({ clip, onClose, onExport }: Props) {
 
   return (
     <Modal open onClose={onClose} closeOnBackdrop={false} size="full">
-      <div className="editor-workspace">
-        <header className="editor-header">
+      <div data-shard-page="editor" data-playing={playing} className="editor editor-workspace">
+        <header data-shard-slot="toolbar" className="editor-header">
           <Button variant="ghost" size="sm" icon={<Icon name="back" size={15} />} onClick={onClose}>Library</Button>
           <div className="editor-header__title">
             <strong title={clipName}>{clipName}</strong>

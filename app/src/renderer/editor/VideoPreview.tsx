@@ -109,7 +109,7 @@ export function VideoPreview({
   };
 
   return (
-    <section className={["editor-player", className].filter(Boolean).join(" ")} aria-label="Video preview">
+    <section data-shard-component="player" data-playing={playing} className={["editor-player", className].filter(Boolean).join(" ")} aria-label="Video preview">
       <div className="editor-player__stage" onClick={onTogglePlayback}
         onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }}>
         <video
@@ -153,7 +153,7 @@ export function VideoPreview({
         </button>
       </ContextMenu>}
 
-      <div className="editor-player__controls" onClick={(event) => event.stopPropagation()}>
+      <div data-shard-slot="player-controls" className="editor-player__controls" onClick={(event) => event.stopPropagation()}>
         <IconButton label={playing ? "Pause (Space)" : "Play (Space)"} onClick={onTogglePlayback}>
           <Icon name={playing ? "pause" : "play"} size={18} />
         </IconButton>

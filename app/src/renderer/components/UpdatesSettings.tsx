@@ -1,47 +1,46 @@
-import { useEffect, useState } from "react";
-import type { UpdateState } from "../../shared/contracts";
-import { Button, Card } from "./ui";
-import { SettingRow } from "./SettingControls";
+import { useUpdates } from "../useUpdates";
+import { Button, Card, Icon } from "./ui";
 
-export function UpdatesSettings({ version }: { version: string }) {
-  const [state, setState] = useState<UpdateState | null>(null);
-  const [error, setError] = useState("");
-  const accept = (next: UpdateState) => setState(previous => !previous || next.revision >= previous.revision ? next : previous);
-  useEffect(() => {
-    let active = true;
-    const receive = (next: UpdateState) => { if (active) accept(next); };
-    const off = window.shard.onUpdateState(receive);
-    void window.shard.getUpdateState().then(receive).catch(() => { if (active) setError("Could not load update status. Reopen Settings to try again."); });
-    return () => { active = false; off(); };
-  }, []);
-  const run = async (action: () => Promise<UpdateState>) => {
-    setError("");
-    try { accept(await action()); }
-    catch { setError("Could not complete the update request. Please try again."); }
-  };
+export function UpdatesSettings({ version, embedded = false }: { version: string; embedded?: boolean }) {
+  const { state, error, run } = useUpdates();
   const status = state?.status;
   const canDownload = status === "available" || (status === "error" && state?.retry === "download");
   const canInstall = status === "downloaded" || (status === "error" && state?.retry === "install");
   const canCheck = status === "idle" || status === "up-to-date" || (status === "error" && state?.retry === "check");
-  const label = status === "checking" ? "Checking for updates…" : status === "up-to-date" ? "Shard is up to date" :
-    status === "available" ? `Shard ${state?.version} is available` : status === "downloading" ? "Downloading update…" :
-    status === "downloaded" ? `Shard ${state?.version} is ready to install` : status === "installing" ? "Restarting to update…" : "Check for a new version when you’re ready.";
-  return <Card title="Updates" sub="You choose when to check, download, and restart.">
-    <SettingRow title={`Shard ${state?.currentVersion || version || "…"}`} description="Installed version">
-      {(canCheck || status === "checking" || status === "disabled") && <Button size="sm" loading={status === "checking"} disabled={status === "disabled"} onClick={() => void run(window.shard.checkForUpdates)}>Check for updates</Button>}
-      {canDownload && state?.mode === "installed" && <Button size="sm" variant="primary" onClick={() => void run(window.shard.downloadUpdate)}>Download update</Button>}
-      {canDownload && state?.mode === "portable" && <Button size="sm" variant="primary" onClick={() => void run(window.shard.openUpdateRelease)}>Open GitHub release</Button>}
-      {canInstall && <Button size="sm" variant="primary" onClick={() => void run(window.shard.installUpdate)}>Restart &amp; update</Button>}
-    </SettingRow>
-    <p className="field__hint" role="status" aria-live="polite">{state?.message || label}</p>
-    {status === "downloading" && <div className="updates-progress">
-      <progress aria-label="Update download" max={100} value={state?.progress?.percent} />
-      <span className="num">{state?.progress ? `${Math.round(state.progress.percent)}% · ${(state.progress.transferred / 1048576).toFixed(1)} / ${(state.progress.total / 1048576).toFixed(1)} MB` : "Starting download…"}</span>
+  const label = status === "checking" ? "Checking for updates" : status === "up-to-date" ? "You’re up to date" :
+    status === "available" ? "A new version is available" : status === "downloading" ? "Getting your update ready" :
+    status === "downloaded" ? "Ready when you are" : status === "installing" ? "Restarting to update" :
+    status === "error" ? "Update needs attention" : status === "disabled" ? "Updates unavailable" : "Keep Shard up to date";
+  const content = <div className="updates">
+    <div className="updates__overview">
+      <div className={`updates__icon${status === "error" ? " updates__icon--error" : ""}`}><Icon name={status === "up-to-date" || canInstall ? "check" : "refresh"} size={22} /></div>
+      <div className="updates__heading"><h3 role="status" aria-live="polite">{label}</h3>
+        <div className="updates__versions"><span>Installed <strong className="num">{state?.currentVersion || version || "…"}</strong></span>
+          {state?.version && <><span aria-hidden="true">→</span><span className="updates__version num">{state.version}</span></>}
+        </div>
+      </div>
+    </div>
+    {state?.message && <p className={status === "error" ? "updates__message updates__message--error" : "updates__message"} role={status === "error" ? "alert" : "status"}>{state.message}</p>}
+    {status === "downloading" && state && <div className="updates__download">
+      <div className="updates__download-label"><span>{state.downloadKind === "full" ? "Downloading full update" : "Downloading changes"}</span><strong className="num">{state.progress ? `${Math.round(state.progress.percent)}%` : "Preparing…"}</strong></div>
+      <progress aria-label="Update download" max={100} value={state.progress?.percent} />
+      <div className="updates__download-meta num"><span>{state.progress ? `${(state.progress.transferred / 1048576).toFixed(1)} of ${(state.progress.total / 1048576).toFixed(1)} MB` : "Checking your downloaded files"}</span><span>{state.progress && `${(state.progress.bytesPerSecond / 1048576).toFixed(1)} MB/s`}</span></div>
     </div>}
-    {state?.mode === "portable" && <p className="field__hint">Portable builds update manually. Download the new portable EXE from GitHub, close Shard, then replace your old EXE. Your settings and clips stay in place.</p>}
-    {canInstall && <p className="field__hint">Save any editor changes first. Restarting clears unsaved replay history.</p>}
-    {state?.releaseNotes && <details className="updates-notes"><summary>What’s new in {state.version}</summary><p>{state.releaseNotes}</p></details>}
-    {status === "error" && <Button size="sm" variant="ghost" onClick={() => void run(window.shard.openUpdateRelease)}>Open GitHub release</Button>}
+    {state?.installOnNextLaunch && <div className="updates__scheduled"><Icon name="clock" size={16}/><div><strong>Scheduled for your next launch</strong><p>Close Shard whenever you’re ready. The update will finish the next time you open it.</p></div></div>}
+    <div className="updates__actions">
+      {(canCheck || status === "checking" || status === "disabled") && <Button size="sm" loading={status === "checking"} disabled={status === "disabled"} onClick={() => void run(window.shard.checkForUpdates)}>Check for updates</Button>}
+      {canDownload && <Button size="sm" variant="primary" icon={<Icon name="refresh" size={14}/>} onClick={() => void run(state?.mode === "portable" ? window.shard.openUpdateRelease : window.shard.downloadUpdate)}>{state?.mode === "portable" ? "View GitHub release" : "Download update"}</Button>}
+      {canInstall && <>
+        <Button size="sm" variant="primary" onClick={() => void run(window.shard.installUpdate)}>Update &amp; restart</Button>
+        <Button size="sm" variant="ghost" onClick={() => void run(state?.installOnNextLaunch ? window.shard.cancelScheduledUpdate : window.shard.scheduleUpdate)}>{state?.installOnNextLaunch ? "Cancel scheduled update" : "Install on next launch"}</Button>
+      </>}
+      {status === "error" && <Button size="sm" variant="ghost" onClick={() => void run(window.shard.openUpdateRelease)}>View GitHub release</Button>}
+    </div>
+    {canInstall && <p className="updates__hint">Save your editor changes before restarting. Unsaved replay history will be cleared.</p>}
+    {state?.mode === "portable" && <p className="updates__hint">Download the new portable EXE, close Shard, then replace the old EXE. Your settings and clips stay in place.</p>}
+    {state?.releaseNotes && <details className="updates__notes" open><summary>What’s new in {state.version}<Icon name="chevronDown" size={14}/></summary><div>{state.releaseNotes}</div></details>}
+    {state?.mode !== "disabled" && <div className="updates__foot"><Icon name="refresh" size={12}/><span>Checks at startup and every 12 hours{state?.lastCheckedAt ? ` · Last checked ${new Date(state.lastCheckedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}</span></div>}
     {error && <p className="form-error" role="alert">{error}</p>}
-  </Card>;
+  </div>;
+  return embedded ? content : <Card title="Updates" sub="Latest improvements. Your choice of when to install.">{content}</Card>;
 }

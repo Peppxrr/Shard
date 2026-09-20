@@ -90,12 +90,12 @@ export function CapturePage({ settings, clips }: Props) {
   const lastClips = [...clips].sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
 
   return (
-    <div className="capture">
+    <div data-shard-page="capture" data-shard-state={recording ? "recording" : capturing ? "capturing" : "idle"} data-saving={saving} className="capture">
       <header className="page__head">
         <h1 className="page__title">Capture</h1>
         <p className="dim page__sub">Keep the moments worth saving.</p>
       </header>
-      <section className="capture__hero card">
+      <section data-shard-component="capture-hero" className="capture__hero card">
         <div className="capture__hero-main">
           <span className="eyebrow">Replay buffer</span>
           <h2 className="capture__title"><StatusDot state={dotState} /> {stateTitle}</h2>
@@ -115,16 +115,16 @@ export function CapturePage({ settings, clips }: Props) {
         </div>
       </section>
 
-      <section className="capture__actions">
+      <section data-shard-slot="capture-actions" className="capture__actions">
         <div className="capture__save">
           <Segmented<Dur>
             value={dur}
             onChange={setDur}
             options={[{ value: "30", label: "30s" }, { value: "60", label: "60s" }, { value: "120", label: "2m" }, { value: "300", label: "5m" }]}
           />
-          <Button variant="primary" icon={<Icon name="save" size={16} />} loading={saving} onClick={saveClip}>Save clip</Button>
+          <Button data-shard-component="capture-button" data-shard-state={saving ? "saving" : "ready"} variant="primary" icon={<Icon name="save" size={16} />} loading={saving} onClick={saveClip}>Save clip</Button>
         </div>
-        <Button variant={recording ? "danger" : "soft"}
+        <Button data-shard-component="record-button" data-shard-state={recording ? "recording" : "idle"} variant={recording ? "danger" : "soft"}
           icon={recording ? <Icon name="stop" size={16} /> : <Icon name="record" size={16} />}
           onClick={toggleRecord}>
           {recording ? "Stop recording" : "Start recording"}

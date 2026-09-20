@@ -13,18 +13,37 @@ export class UpdateController {
   private prepareInstall: () => Promise<string | null>;
   private installFailed: () => void;
   private openExternal: (url: string) => Promise<void>;
+  private dismissedVersion?: string;
+  private scheduledVersion?: string;
+  private saveChoice: (choice: { dismissedVersion?: string; scheduledVersion?: string }) => void;
+  private beforeDownload: () => Promise<void>;
+  private afterDownload: () => Promise<void>;
+  private beforeInstall: () => Promise<void>;
+  private log: (message: string) => void;
+  private backgroundCheck = false;
 
   constructor(options: {
     currentVersion: string; mode: UpdateState["mode"]; disabledMessage?: string;
     backend: UpdateBackend | null; publish: (state: UpdateState) => void;
     prepareInstall: () => Promise<string | null>; installFailed: () => void;
     openExternal: (url: string) => Promise<void>;
+    dismissedVersion?: string; scheduledVersion?: string;
+    saveChoice?: (choice: { dismissedVersion?: string; scheduledVersion?: string }) => void;
+    beforeDownload?: () => Promise<void>; afterDownload?: () => Promise<void>;
+    beforeInstall?: () => Promise<void>; log?: (message: string) => void;
   }) {
     this.backend = options.backend;
     this.publish = options.publish;
     this.prepareInstall = options.prepareInstall;
     this.installFailed = options.installFailed;
     this.openExternal = options.openExternal;
+    this.dismissedVersion = options.dismissedVersion;
+    this.scheduledVersion = options.scheduledVersion;
+    this.saveChoice = options.saveChoice ?? (() => {});
+    this.beforeDownload = options.beforeDownload ?? (async () => {});
+    this.afterDownload = options.afterDownload ?? (async () => {});
+    this.beforeInstall = options.beforeInstall ?? (async () => {});
+    this.log = options.log ?? (message => console.error("[updates]", message));
     this.state = { revision: 0, status: options.mode === "disabled" ? "disabled" : "idle",
       mode: options.mode, currentVersion: options.currentVersion, message: options.disabledMessage };
     const updater = this.backend;
@@ -35,15 +54,19 @@ export class UpdateController {
     updater.allowDowngrade = false;
     updater.disableWebInstaller = true;
     // One set of listeners for the application's lifetime, never per Settings mount.
-    updater.on("update-available", (info: UpdateInfo) => this.set({ status: "available", ...release(info) }));
-    updater.on("update-not-available", () => this.set({ status: "up-to-date", version: undefined, releaseNotes: undefined }));
+    updater.on("update-available", (info: UpdateInfo) => this.set({ status: "available", ...release(info),
+      dismissed: this.dismissedVersion === info.version, installOnNextLaunch: this.scheduledVersion === info.version }));
+    updater.on("update-not-available", () => this.set({ status: "up-to-date", version: undefined, releaseNotes: undefined,
+      dismissed: false, installOnNextLaunch: false }));
     updater.on("download-progress", (p: ProgressInfo) => {
       if (this.state.status !== "downloading") return;
       this.set({ progress: { percent: Math.max(0, Math.min(100, p.percent)), transferred: p.transferred,
         total: p.total, bytesPerSecond: p.bytesPerSecond } });
     });
-    updater.on("update-downloaded", (info: UpdateInfo) => this.set({ status: "downloaded", ...release(info), progress: undefined }));
-    updater.on("error", (error: Error) => this.fail(error));
+    // downloadUpdate resolves only after cache bookkeeping has finished. Do not
+    // expose install buttons while its final block map copy is still in flight.
+    updater.on("update-downloaded", (info: UpdateInfo) => this.set({ ...release(info), progress: undefined }));
+    updater.on("error", (error: Error) => { if (!this.backgroundCheck) this.fail(error); });
   }
 
   getState(): UpdateState { return structuredClone(this.state); }
@@ -54,7 +77,7 @@ export class UpdateController {
   }
 
   private fail(error: unknown): void {
-    console.error("[updates]", error);
+    this.log(String(error));
     const retry = this.state.status === "installing" ? "install" :
       this.state.status === "downloading" ? "download" : this.state.retry ?? "check";
     if (retry === "install") this.installFailed();
@@ -66,14 +89,20 @@ export class UpdateController {
     this.set({ status: "error", retry, message, progress: undefined });
   }
 
-  async check(): Promise<UpdateState> {
+  async check(background = false): Promise<UpdateState> {
     if (!this.backend || this.busy || !["idle", "up-to-date", "available", "error"].includes(this.state.status) ||
       (this.state.status === "error" && this.state.retry !== "check")) return this.getState();
     this.busy = true;
+    this.backgroundCheck = background;
+    const previous = this.getState();
+    this.log(background ? "Checking for updates in the background" : "Checking for updates");
     this.set({ status: "checking", message: undefined, retry: undefined, version: undefined, releaseNotes: undefined });
     try { await this.backend.checkForUpdates(); }
-    catch (error) { this.fail(error); }
-    finally { this.busy = false; }
+    catch (error) {
+      if (background) { this.log(`Background check failed: ${String(error)}`); this.set(previous); }
+      else this.fail(error);
+    }
+    finally { this.busy = false; this.backgroundCheck = false; this.set({ lastCheckedAt: Date.now() }); }
     return this.getState();
   }
 
@@ -81,9 +110,17 @@ export class UpdateController {
     if (!this.backend || this.busy || this.state.mode !== "installed" ||
       !(this.state.status === "available" || (this.state.status === "error" && this.state.retry === "download"))) return this.getState();
     this.busy = true;
-    this.set({ status: "downloading", message: undefined, retry: undefined, progress: undefined });
-    try { await this.backend.downloadUpdate(); }
-    catch (error) { this.fail(error); }
+    this.set({ status: "downloading", message: undefined, retry: undefined, progress: undefined, downloadKind: "changes" });
+    try {
+      await this.beforeDownload();
+      await this.backend.downloadUpdate();
+      await this.afterDownload();
+      this.set({ status: "downloaded", progress: undefined, message: undefined, retry: undefined });
+    }
+    catch (error) {
+      try { await this.afterDownload(); } catch (cleanupError) { this.log(String(cleanupError)); }
+      this.fail(error);
+    }
     finally { this.busy = false; }
     return this.getState();
   }
@@ -96,10 +133,55 @@ export class UpdateController {
     try {
       const reason = await this.prepareInstall();
       if (reason) this.set({ status: "downloaded", message: reason });
-      else this.backend.quitAndInstall(false, true);
+      else {
+        await this.beforeInstall();
+        this.scheduledVersion = undefined;
+        this.saveChoices();
+        this.log("Starting silent installation; Shard will restart when complete");
+        this.backend.quitAndInstall(true, true);
+      }
     } catch (error) { this.fail(error); }
     finally { this.busy = false; }
     return this.getState();
+  }
+
+  private saveChoices(): void {
+    this.saveChoice({ dismissedVersion: this.dismissedVersion, scheduledVersion: this.scheduledVersion });
+  }
+
+  schedule(): UpdateState {
+    if (this.busy || this.state.mode !== "installed" || this.state.status !== "downloaded") return this.getState();
+    const previous = this.scheduledVersion;
+    this.scheduledVersion = this.state.version;
+    try { this.saveChoices(); }
+    catch (error) { this.scheduledVersion = previous; throw error; }
+    this.log(`Update ${this.scheduledVersion} scheduled for next launch`);
+    this.set({ installOnNextLaunch: true, message: undefined });
+    return this.getState();
+  }
+
+  unschedule(): UpdateState {
+    if (this.busy) return this.getState();
+    const previous = this.scheduledVersion;
+    this.scheduledVersion = undefined;
+    try { this.saveChoices(); }
+    catch (error) { this.scheduledVersion = previous; throw error; }
+    this.log("Next-launch installation cancelled");
+    this.set({ installOnNextLaunch: false });
+    return this.getState();
+  }
+
+  dismiss(): UpdateState {
+    const previous = this.dismissedVersion;
+    this.dismissedVersion = this.state.version;
+    try { this.saveChoices(); }
+    catch (error) { this.dismissedVersion = previous; throw error; }
+    this.set({ dismissed: true });
+    return this.getState();
+  }
+
+  useFullDownload(): void {
+    if (this.state.status === "downloading") this.set({ downloadKind: "full", progress: undefined });
   }
 
   async openRelease(): Promise<UpdateState> {

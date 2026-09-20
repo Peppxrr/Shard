@@ -32,7 +32,12 @@ set(ENABLE_VLC OFF CACHE BOOL "Disable vlc-video plugin" FORCE)
 # The target-side Game Capture payload is the official signed OBS release,
 # staged separately from the embedded host plugin. win-capture verifies this
 # directory and embeds its manifest values for runtime checks.
-set(SHARD_OBS_HOOK_PAYLOAD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/obs-hook-payload/32.2.1"
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-dependencies.json")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-dependencies.json" SHARD_RUNTIME_PINS)
+string(JSON SHARD_HOOK_PAYLOAD GET "${SHARD_RUNTIME_PINS}" obs hookPayload)
+string(JSON SHARD_OBS_VERSION GET "${SHARD_RUNTIME_PINS}" obs version)
+set(OBS_VERSION_OVERRIDE "${SHARD_OBS_VERSION}" CACHE STRING "Pinned OBS release" FORCE)
+set(SHARD_OBS_HOOK_PAYLOAD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../${SHARD_HOOK_PAYLOAD}"
     CACHE PATH "Pinned official OBS Game Capture payload" FORCE)
 
 add_subdirectory(../vendor/obs-studio obs-studio)

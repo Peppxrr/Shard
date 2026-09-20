@@ -1,0 +1,14 @@
+{
+  "obs": {
+    "version": "32.2.1",
+    "hookPayload": "vendor/obs-hook-payload/32.2.1",
+    "depsDirectory": "obs-deps-2026-07-15-x64",
+    "runtimeDlls": ["avcodec-62.dll", "avformat-62.dll", "avutil-60.dll", "avdevice-62.dll", "avfilter-11.dll", "swscale-9.dll", "swresample-6.dll", "zlib.dll", "libx264-164.dll", "librist.dll", "datachannel.dll", "libcurl.dll", "srt.dll"]
+  },
+  "ffmpeg": {
+    "version": "9.0.1",
+    "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build.zip",
+    "sha256": "2e8e28af97c2ae338ccef92e36da9b2a4cd21d0cad9dde093545606cb07f5b00",
+    "archiveDirectory": "ffmpeg-9.0.1-full_build"
+  }
+}

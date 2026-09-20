@@ -1,0 +1,17 @@
+/* Explicit page hooks scope sheets without relying on component nesting. */
+[data-shard-page="capture"] [data-shard-component="capture-hero"] {
+  border-color: var(--stroke-2);
+  background: radial-gradient(ellipse at right, #366c5d44, transparent 70%), var(--bg-1);
+  min-height: 200px;
+}
+:root[data-theme-constellations="true"] [data-shard-component="capture-hero"] {
+  background: linear-gradient(90deg, var(--bg-1) 24%, transparent), url("./assets/constellation.svg") right center / auto 100% no-repeat, var(--bg-1);
+}
+[data-shard-page="capture"][data-shard-state="recording"] [data-shard-component="capture-hero"] { border-color: var(--rec); }
+[data-shard-page="library"] [data-shard-slot="clip-grid"] { gap: var(--sp-4); }
+[data-shard-component="clip"][data-favorite="true"] { border-color: color-mix(in srgb, var(--warn) 55%, var(--stroke)); }
+[data-shard-slot="clip-details"] { background: linear-gradient(150deg, var(--bg-1), var(--bg-2)); }
+[data-shard-page="settings"] [data-shard-slot="settings-navigation"] { border-right: 1px solid var(--stroke); padding-right: var(--sp-4); }
+[data-shard-page="games"] [data-shard-component="game"][data-running="true"] { background: var(--accent-softer); }
+[data-shard-page="editor"] [data-shard-component="timeline-segment"][data-selected="true"] { border-color: var(--accent-2); }
+[data-shard-component="player"][data-playing="true"] { border-color: var(--stroke-3); }
