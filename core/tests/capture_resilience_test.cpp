@@ -1,4 +1,5 @@
 #include "capture_resilience.h"
+#include "replay_timing.h"
 
 #include <cassert>
 #include <cstdio>
@@ -11,6 +12,21 @@ using shard::captionBoundaryInset;
 
 int main()
 {
+  // A full five-minute 60 fps replay retains every distinct decode timestamp,
+  // negative preroll, B-frame ordering, and genuine missing-frame gaps.
+  for (int64_t frame = 0; frame < 18000; ++frame) {
+    const auto timing = shard::replayTimestamps(frame + 2, frame, 60, 60, 1500000);
+    assert(timing.dts == frame - 90);
+    assert(timing.pts - timing.dts == 2);
+  }
+  const auto bframe = shard::replayTimestamps(101, 102, 60, 60, 1500000);
+  assert(bframe.pts == 11 && bframe.dts == 12);
+  assert(shard::replayTimestamps(1001, 1001, 60000, 60000, 0).dts == 1001);
+  assert(shard::replayTimestamps(48000, 48000, 48000, 48000, 1500000).dts == -24000);
+  assert(shard::replayTimestamps(108, 106, 60, 60, 1500000).dts == 16);
+  assert(shard::replayCanPurge(false, 3));
+  assert(!shard::replayCanPurge(false, 2));
+  assert(!shard::replayCanPurge(true, 3));
   const auto framed = computeClientAreaCrop(976, 579, 100, 100, 108, 131, 960, 540);
   assert(framed.valid);
   assert(framed.left == 8);

@@ -23,6 +23,9 @@ import {
   undoHistory,
 } from "../src/renderer/editor/model.ts";
 import { buildExportGraph, resolveExportAudioTracks, validateExportSegments } from "../src/main/export-graph.ts";
+import { buildVideoEncoderArgs } from "../src/main/export-video.ts";
+import { statSync } from "node:fs";
+import "./test-playback-diagnostics.mjs";
 
 const audioTracks = [
   { streamIndex: 1, audioIndex: 0, codec: "aac", name: "Game", kind: "output", channels: 2, sampleRate: 48000 },
@@ -141,6 +144,28 @@ const twentyInput = path.join(tempDir, "Source with twenty audio streams.mp4");
 const twentyOutput = path.join(tempDir, "Edited twenty audio streams.mp4");
 
 try {
+  // Real 60 fps cuts must remain CFR across non-frame-aligned boundaries.
+  // A generous size limit must not inflate a simple short clip toward 20 MB.
+  const sixtyInput = path.join(tempDir, "60 fps source.mp4");
+  run(ffmpeg, ["-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=60:duration=8",
+    "-c:v", "libx264", "-preset", "ultrafast", sixtyInput]);
+  for (const segments of [[{ start: 1.013, end: 3.013 }], [{ start: 0.013, end: 3.013 }, { start: 4.019, end: 7.019 }]]) {
+    const output = path.join(tempDir, `cadence-${segments.length}.mp4`);
+    const cadenceGraph = buildExportGraph(segments, [], 320, 180);
+    const duration = segments.reduce((sum, s) => sum + s.end - s.start, 0);
+    const budget = Math.floor(20 * 1024 * 1024 * 8 * .9 / duration / 1000);
+    run(ffmpeg, ["-y", "-i", sixtyInput, "-filter_complex", cadenceGraph.filter, ...cadenceGraph.maps,
+      ...buildVideoEncoderArgs("libx264", budget, 60), output]);
+    const video = probe(ffprobe, output).streams.find(s => s.codec_type === "video");
+    assert.equal(video.avg_frame_rate, "60/1");
+    assert(Math.abs(Number(video.nb_frames) - duration * 60) <= 1);
+    assert(statSync(output).size < 2 * 1024 * 1024, "quality output stays far below the 20 MB ceiling");
+  }
+  // Size correction retains cadence while reducing the encoded bitrate.
+  const fitted = path.join(tempDir, "size-fitted.mp4");
+  run(ffmpeg, ["-y", "-i", sixtyInput, ...buildVideoEncoderArgs("libx264", 150, 60, false), fitted]);
+  assert(statSync(fitted).size < 250000);
+  assert.equal(probe(ffprobe, fitted).streams[0].avg_frame_rate, "60/1");
   run(ffmpeg, [
     "-y",
     "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=4",

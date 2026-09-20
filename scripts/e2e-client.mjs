@@ -107,6 +107,24 @@ async function main() {
   console.log(`  ffprobe duration=${dur}`);
   assert(Math.abs(dur - want) <= 0.05, `ffprobe duration within one encoded frame of ${want}s (got ${dur})`);
 
+  // Duration alone hid duplicate decode timestamps and discarded B-frame
+  // composition offsets. Inspect the complete video packet cadence as well.
+  const timing = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
+    "-show_packets", "-show_entries", "packet=pts_time,dts_time:stream=r_frame_rate", "-show_streams",
+    "-of", "json", clip.path], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+  assert(timing.status === 0, "video packet timing probe succeeds");
+  const timed = JSON.parse(timing.stdout);
+  const [rateNum, rateDen] = timed.streams[0].r_frame_rate.split("/").map(Number);
+  const frameSeconds = rateDen / rateNum;
+  const packets = timed.packets;
+  assert(packets.every((p, i) => !i || Number(p.dts_time) > Number(packets[i - 1].dts_time)), "strictly increasing decode timestamps");
+  const pts = packets.map(p => Number(p.pts_time)).filter(t => t >= 0).sort((a, b) => a - b);
+  assert(pts.length >= Math.floor(want / frameSeconds) - 3, "saved replay retains the expected frame count");
+  assert(pts.every((t, i) => !i || Math.abs(t - pts[i - 1] - frameSeconds) < 0.00001), "uniform presentation cadence without duplicate or missing frames");
+  const tail = spawnSync(path.join(coreBin, "ffmpeg.exe"), ["-v", "error", "-xerror", "-ss", String(want - 1),
+    "-i", clip.path, "-map", "0:v:0", "-an", "-f", "null", "-"], { encoding: "utf8" });
+  assert(tail.status === 0 && !tail.stderr.trim(), "final reference group decodes without missing-frame errors");
+
   // Cover the old playable-but-black/silent regression in this same capture
   // run, so callers do not need a separate selftest + manual content probe.
   const streams = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-show_entries", "stream=codec_type", "-of", "json", clip.path], { encoding: "utf8" });
@@ -115,6 +133,21 @@ async function main() {
     "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-frames:v", "3", "-an", "-f", "null", "-"], { encoding: "utf8" });
   const luma = [...content.stderr.matchAll(/lavfi\.signalstats\.YAVG=([\d.]+)/g)].map(m => Number(m[1]));
   assert(content.status === 0 && luma.some(value => value > 16), "clip contains nonblack video (keep the test display visible)");
+
+  // Keep the encoder purging under a deliberately undersized cap while outputs
+  // restart. Old callbacks must drain their own ring, not a cleared/replaced one.
+  await call("config.set", { replay: { maxSeconds: 2, maxMb: 1 } });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await sleep(4500);
+    const pressure = await call("state.get");
+    assert(pressure.ring.active && pressure.ring.secondsBuffered >= 1, "ring stays responsive under cap pressure");
+    await call("config.set", { video: { encoder: "auto" } });
+  }
+  await sleep(3500);
+  const restartedSave = waitEvent("clip.saved", 15000);
+  await call("clip.save", { durationSec: 2 });
+  const restartedClip = await restartedSave;
+  assert(Math.abs(Number(ffprobe(restartedClip.path).duration) - 2) <= 0.05, "restarted ring can still save under cap pressure");
 
   // Capture mode toggle back to auto
   st = await call("config.set", { capture: { mode: "auto" } });

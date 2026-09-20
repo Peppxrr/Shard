@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.4
+
+- Fixed replay timestamp handling that could cause uneven playback, preserving frame order and clean clip endings.
+- Prevented replay-buffer stalls under tight memory limits and during capture restarts.
+- Reduced capture interruptions caused by filesystem work while saving clips.
+- Made export sizes depend on video quality and content instead of trying to fill the entire size limit. The selected size remains a hard maximum.
+- Preserved the source frame rate during exports and avoided blocking the app while checking exported files.
+- Improved playback diagnostics for short clips and paused playback, and clarified that measured playback FPS differs from the file's encoded frame rate.
+
 ## 0.1.3
 
 - Made the playback timeline smoother and added brief play/pause feedback.

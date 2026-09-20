@@ -72,8 +72,8 @@ private:
   bool startWithVideoEncoderLocked(const std::string& videoId); // requires lifecycleMtx_
   void stopLocked();  // requires lifecycleMtx_
   void ingestPacket(Ring* r, struct encoder_packet* packet);
-  bool purgeFront();
-  void purge();
+  static bool purgeFront(Ring* ring);
+  static void purge(Ring* ring);
   struct SaveRequest {
     int durationSec = 0;
     int64_t endTimeUs = 0;

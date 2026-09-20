@@ -1,6 +1,10 @@
 // On-demand measurement only: no polling or frame callbacks during normal playback.
 export function measurePlayback(video: HTMLVideoElement, signal: AbortSignal): Promise<object> {
   return new Promise((resolve, reject) => {
+    if (video.paused || video.ended) {
+      reject(new Error("Start playback before measuring."));
+      return;
+    }
     const started = performance.now();
     const startTime = video.currentTime;
     const startQuality = video.getVideoPlaybackQuality();
@@ -17,9 +21,10 @@ export function measurePlayback(video: HTMLVideoElement, signal: AbortSignal): P
     let observer: PerformanceObserver | null = null;
     let hidden = document.hidden;
     const onWaiting = () => waiting++;
-    const onSeeking = () => seeks++;
-    const onPause = () => pauses++;
-    const onVisibility = () => { hidden ||= document.hidden; };
+    const onSeeking = () => { seeks++; finish("seek"); };
+    const onPause = () => { pauses++; finish(video.ended ? "ended" : "pause"); };
+    const onEnded = () => finish("ended");
+    const onVisibility = () => { hidden ||= document.hidden; if (hidden) finish("hidden"); };
     const onFrame: VideoFrameRequestCallback = (_now, metadata) => {
       callbackCount++;
       if (lastFrame) intervals.push(metadata.expectedDisplayTime - lastFrame);
@@ -36,11 +41,12 @@ export function measurePlayback(video: HTMLVideoElement, signal: AbortSignal): P
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("seeking", onSeeking);
       video.removeEventListener("pause", onPause);
+      video.removeEventListener("ended", onEnded);
       document.removeEventListener("visibilitychange", onVisibility);
       signal.removeEventListener("abort", abort);
     };
     const abort = () => { cleanup(); reject(new Error("Playback measurement cancelled.")); };
-    const timer = window.setTimeout(() => {
+    const finish = (reason: string) => {
       cleanup();
       const seconds = (performance.now() - started) / 1000;
       const quality = video.getVideoPlaybackQuality();
@@ -53,22 +59,26 @@ export function measurePlayback(video: HTMLVideoElement, signal: AbortSignal): P
       };
       resolve({
         sampleSeconds: Number(seconds.toFixed(2)),
+        sampleEndedBy: reason,
+        reliableSample: seconds >= 1 && !seeks && !hidden,
         video: { width: video.videoWidth, height: video.videoHeight, duration: video.duration, playbackRate: video.playbackRate },
         startTime, endTime: video.currentTime, paused: video.paused, ended: video.ended,
         totalFrames: total, droppedFrames: dropped,
-        presentedFps: Number(((total - dropped) / seconds).toFixed(2)),
+        presentedFps: seconds > 0 ? Number(((total - dropped) / seconds).toFixed(2)) : null,
         droppedPercent: total ? Number((dropped / total * 100).toFixed(2)) : null,
         frameIntervalMedianMs: percentile(intervals, .5), frameIntervalP95Ms: percentile(intervals, .95),
         decoderProcessingP95Ms: percentile(decodeTimes, .95),
         frameCallbacks: callbackCount, mainThreadLongTasks: longTasks, longestMainThreadTaskMs: longestTaskMs,
         waitingEvents: waiting, seekingEvents: seeks, pauseEvents: pauses, windowHiddenDuringSample: hidden,
         readyState: video.readyState, networkState: video.networkState,
-        note: "Measure while playing without seeking. Pauses, loops, hidden windows and clip endings affect FPS. Frame callbacks can be delayed by main-thread scheduling. Decoder processing time includes pipeline latency and is not a throughput benchmark.",
+        note: "This measures playback throughput, not the file's encoded frame rate. Sampling ends on pause, end, seek or hidden window; samples under one second are unreliable. Buffering remains included. Frame callbacks can be delayed by main-thread scheduling. Decoder processing time includes pipeline latency and is not a throughput benchmark.",
       });
-    }, 5000);
+    };
+    const timer = window.setTimeout(() => finish("timeout"), 5000);
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("seeking", onSeeking);
     video.addEventListener("pause", onPause);
+    video.addEventListener("ended", onEnded);
     document.addEventListener("visibilitychange", onVisibility);
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) { abort(); return; }

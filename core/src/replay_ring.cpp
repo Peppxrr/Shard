@@ -1,6 +1,7 @@
 #include "replay_ring.h"
 
 #include "mux.h"
+#include "replay_timing.h"
 
 #include <obs-av1.h>
 #include <cmath>
@@ -351,7 +352,7 @@ void ReplayRing::updateCaps()
   while (!ring_->packets.empty() && ring_->keyframes > 2 &&
          ((ring_->max_size > 0 && ring_->cur_size > ring_->max_size) ||
           (ring_->max_time > 0 && ring_->latest_time - ring_->cur_time > ring_->max_time))) {
-    purge();
+    purge(ring_);
   }
 }
 
@@ -416,13 +417,15 @@ void ReplayRing::ingestPacket(Ring* r, struct encoder_packet* packet)
   // Purge over caps (byte cap then time cap), keeping >= 2 keyframes so the
   // ring always starts on a keyframe and never thrashes.
   if (r->max_size > 0 && !r->packets.empty() && r->keyframes > 2) {
-    while (r->cur_size + (int64_t)packet->size > r->max_size)
-      purge();
+    while (replayCanPurge(r->packets.empty(), r->keyframes) &&
+           r->cur_size + (int64_t)packet->size > r->max_size)
+      purge(r);
   }
   if (!r->packets.empty() && r->keyframes > 2) {
     const int64_t latestWithPacket = std::max(r->latest_time, packet->dts_usec);
-    while (latestWithPacket - r->cur_time > r->max_time)
-      purge();
+    while (replayCanPurge(r->packets.empty(), r->keyframes) &&
+           latestWithPacket - r->cur_time > r->max_time)
+      purge(r);
   }
 
   struct encoder_packet pkt;
@@ -447,25 +450,25 @@ void ReplayRing::ingestPacket(Ring* r, struct encoder_packet* packet)
     r->keyframes++;
 }
 
-void ReplayRing::purge()
+void ReplayRing::purge(Ring* r)
 {
+  // Encoder callbacks own their output's Ring until OBS finishes stopping it.
+  // Never follow owner->ring_ here: teardown clears it and a restart may replace
+  // it while an old callback is still draining.
   // Purge the front packet; if it was a keyframe, keep purging until the
   // next keyframe so the ring always opens on a keyframe.
-  if (!purgeFront())
+  if (!purgeFront(r))
     return;
-  if (!ring_)
-    return;
-  while (!ring_->packets.empty()) {
-    const auto& front = ring_->packets.front();
+  while (!r->packets.empty()) {
+    const auto& front = r->packets.front();
     if (front.type == OBS_ENCODER_VIDEO && front.keyframe)
       return;
-    purgeFront();
+    purgeFront(r);
   }
 }
 
-bool ReplayRing::purgeFront()
+bool ReplayRing::purgeFront(Ring* r)
 {
-  Ring* r = ring_;
   if (!r || r->packets.empty())
     return false;
 
@@ -627,20 +630,28 @@ bool ReplayRing::snapshotSave(const SaveRequest& request, std::vector<encoder_pa
   audio_t* obsAudio = obs_get_audio();
   const int64_t audioTb = obsAudio ? audio_output_get_sample_rate(obsAudio) : 48000;
 
-  bool found_video = false;
-  int64_t firstVideoDts = 0;
-  int64_t videoSlot = 0;
   const int64_t audioPacketUs = !audioEncoders_.empty()
       ? (int64_t)obs_encoder_get_frame_size(audioEncoders_.front()) * 1000000 / audioTb
       : 0;
-  const int64_t videoSlotUs = 1000000 / videoTb;
   const int64_t first_dts = r->packets[begin].dts_usec;
   const int64_t presentation_start = request.durationSec > 0 ? std::max(start_time, first_dts) : first_dts;
 
   out.clear();
   out.reserve(n - begin);
+  bool videoEndReached = false;
   for (size_t i = begin; i < n; i++) {
     const auto& pkt = r->packets[i];
+    if (pkt.type == OBS_ENCODER_VIDEO) {
+      // Decode order can put a future reference frame before earlier B-frames.
+      // End at the last complete reference group inside the requested interval;
+      // dropping only that future P-frame leaves undecodable dependent B-frames.
+      // Audio still reaches the requested endpoint (video may end a few frames
+      // earlier, according to the encoder's reorder depth).
+      if (replayRescale(pkt.pts, pkt.timebase_den, 1000000) >= end_time)
+        videoEndReached = true;
+      if (videoEndReached)
+        continue;
+    }
     if (pkt.dts_usec >= end_time)
       continue;
     if (pkt.type == OBS_ENCODER_AUDIO && audioPacketUs > 0 && pkt.dts_usec + audioPacketUs > end_time) {
@@ -652,34 +663,20 @@ bool ReplayRing::snapshotSave(const SaveRequest& request, std::vector<encoder_pa
     encoder_packet p;
     obs_encoder_packet_ref(&p, const_cast<encoder_packet*>(&pkt));
 
-    // This packet's raw pts (in its own timebase) as microseconds.
-    const int64_t pts_usec = p.pts * 1000000 / p.timebase_den;
-    if (p.type == OBS_ENCODER_VIDEO) {
-      if (!found_video) {
-        firstVideoDts = p.dts_usec;
-        found_video = true;
-      }
-      // The encoder's raw video dts carry b-frame delay artifacts (duplicates
-      // and gaps) that MP4 rejects as non-monotonic. Keep the first frame's
-      // relation to the requested presentation start, then assign exact frame
-      // slots. Frames before the requested start stay negative as decode-only
-      // preroll.
-      p.dts_usec = firstVideoDts - presentation_start + videoSlot * videoSlotUs;
-      videoSlot++;
-      p.dts = p.dts_usec * videoTb / 1000000;
-      p.pts = p.dts;
-      p.timebase_num = 1;
-      p.timebase_den = (uint32_t)videoTb;
-      out.push_back(p);
-    } else {
-      p.dts_usec -= presentation_start;
-      p.dts = p.dts_usec * audioTb / 1000000;
-      p.pts = (pts_usec - presentation_start) * audioTb / 1000000;
-      p.timebase_num = 1;
-      p.timebase_den = (uint32_t)audioTb;
-      out.push_back(p);
-    }
+    // Preserve encoder decode/presentation ordering and real timing gaps.
+    // Rebuilding slots from rounded microseconds caused duplicate DTS, and
+    // assigning PTS=DTS discarded the B-frame composition offsets.
+    const int64_t targetTb = p.type == OBS_ENCODER_VIDEO ? videoTb : audioTb;
+    const auto timing = replayTimestamps(p.pts, p.dts, p.timebase_den, targetTb, presentation_start);
+    p.pts = timing.pts;
+    p.dts = timing.dts;
+    p.dts_usec = replayRescale(p.dts, targetTb, 1000000);
+    p.timebase_den = (uint32_t)targetTb;
+    out.push_back(p);
   }
+
+  // No filesystem work while blocking OBS's encoder callbacks.
+  lock.unlock();
 
   actualSec = (end_time - presentation_start) / 1000000.0;
   if (actualSec < 0)

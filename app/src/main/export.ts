@@ -5,7 +5,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import type { ClipRecord, EditorExportProject, ExportProgress, ExportResult, ExportSettings } from "../shared/contracts";
-import { ffmpegBin, ffprobe, listExportEncoders, probeAudioTracks } from "./ffmpeg";
+import { ffmpegBin, ffprobeAsync, listExportEncoders, probeAudioTracks } from "./ffmpeg";
+import { buildVideoEncoderArgs } from "./export-video";
 import { editorDir } from "./library";
 import {
   buildExportAudioOutputs,
@@ -53,8 +54,9 @@ export class ExportManager extends EventEmitter {
       const base = path.basename(clip.path, path.extname(clip.path));
       outFile = await availableOutputPath(outDir, `${base}-edited`, ".mp4");
 
-      const sourceRes = { w: clip.width ?? 1920, h: clip.height ?? 1080 };
-      const fps = clip.fps && clip.fps > 0 ? clip.fps : 30;
+      const sourceProbe = await ffprobeAsync(clip.path);
+      const sourceRes = { w: sourceProbe.width || clip.width || 1920, h: sourceProbe.height || clip.height || 1080 };
+      const fps = sourceProbe.fps && sourceProbe.fps > 0 ? sourceProbe.fps : (clip.fps || 30);
       let resolution = pickResolution(settings.resolution, sourceRes);
       if (!Number.isFinite(settings.targetMb) || settings.targetMb <= 0)
         throw new Error("Export target size must be greater than zero");
@@ -116,7 +118,7 @@ export class ExportManager extends EventEmitter {
         const stat = await fs.stat(outFile);
         actualBytes = stat.size;
         actualMb = actualBytes / (1024 * 1024);
-        const outputProbe = ffprobe(outFile);
+        const outputProbe = await ffprobeAsync(outFile);
         const durationError = Math.abs(outputProbe.durationSec - totalDur);
         if (durationError > Math.max(0.35, 2 / fps)) {
           throw new Error(
@@ -126,10 +128,12 @@ export class ExportManager extends EventEmitter {
         if (actualBytes <= targetBytes) break;
 
         const ratio = targetBytes / actualBytes;
-        const nextBitrate = Math.max(100, Math.floor(bitrate * ratio * 0.96));
+        // The quality pass did not target `bitrate`. Start fitting at the full
+        // budget; only scale a bitrate that an earlier fitting pass actually used.
+        const nextBitrate = runs === 1 ? bitrate : Math.max(100, Math.floor(bitrate * ratio * 0.96));
         const stalled = previousBytes !== null && actualBytes >= previousBytes * 0.95;
         previousBytes = actualBytes;
-        if ((stalled || nextBitrate >= bitrate - 1) && (resolution.w > 640 || resolution.h > 360)) {
+        if (runs > 1 && (stalled || nextBitrate >= bitrate - 1) && (resolution.w > 640 || resolution.h > 360)) {
           resolution = dropRes(resolution.w, resolution.h);
           bitrate = Math.max(100, Math.min(nextBitrate, Math.floor(bitrate * 0.80)));
           this.emitProgress(clip.id, "Reducing resolution", 0, 0, totalDur);
@@ -193,7 +197,7 @@ export class ExportManager extends EventEmitter {
     attempt: number,
   ): Promise<void> {
     const graph = buildExportGraph(segments, tracks, width, height);
-    const videoArgs = buildVideoEncoderArgs(videoEncoder, bitrateKbps, fps);
+    const videoArgs = buildVideoEncoderArgs(videoEncoder, bitrateKbps, fps, attempt === 1);
     const metadataArgs = graph.audioOutputs.flatMap((output, index) => [
       `-metadata:s:a:${index}`, `title=${output.name}`,
     ]);
@@ -307,28 +311,6 @@ export class ExportManager extends EventEmitter {
       result: payload.result,
     } satisfies ExportProgress);
   }
-}
-
-function buildVideoEncoderArgs(videoEncoder: string, bitrateKbps: number, fps: number): string[] {
-  const args = [
-    "-c:v", videoEncoder,
-    "-b:v", `${bitrateKbps}k`,
-    "-maxrate", `${bitrateKbps}k`,
-    "-bufsize", `${bitrateKbps * 2}k`,
-    "-pix_fmt", "yuv420p",
-    "-r", String(fps),
-  ];
-  if (videoEncoder.endsWith("_nvenc"))
-    args.push("-preset", "p4", "-rc", "cbr");
-  else if (videoEncoder.endsWith("_amf"))
-    args.push("-quality", "balanced", "-rc", "cbr");
-  else if (videoEncoder.endsWith("_qsv"))
-    args.push("-preset", "medium");
-  else if (videoEncoder === "libsvtav1")
-    args.push("-preset", "8");
-  else
-    args.push("-preset", "veryfast");
-  return args;
 }
 
 async function availableOutputPath(directory: string, base: string, extension: string): Promise<string> {
