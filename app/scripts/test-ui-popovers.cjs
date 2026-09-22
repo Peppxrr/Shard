@@ -7,7 +7,9 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 let win;
 app.whenReady().then(async () => {
   win = new BrowserWindow({ show: false, width: 1000, height: 760,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true } });
+    // Use Chromium's normal compositor path. Offscreen rendering has different
+    // top-layer/fixed-position geometry around transformed ancestors.
+    webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   const errors = [];
   win.webContents.on("console-message", ({ level, message }) => { if (level === "error" || level === 3) { errors.push(message); console.error(message); } });
   await win.loadFile(path.join(fixture, "dist/index.html"));
@@ -39,8 +41,8 @@ app.whenReady().then(async () => {
     await open();
     const result = await bounds();
     inViewport(result);
-    assert.ok(Math.abs(result.menu.left - result.button.left) < 1, effect + ": horizontal anchor");
-    assert.ok(Math.abs(result.menu.top - result.button.bottom - 4) < 1, effect + ": vertical anchor");
+    assert.ok(Math.abs(result.menu.left - result.button.left) < 1, effect + ": horizontal anchor " + JSON.stringify(result));
+    assert.ok(Math.abs(result.menu.top - result.button.bottom - 4) < 1, effect + ": vertical anchor " + JSON.stringify(result));
     assert.equal(result.inherited.trim(), "inherited");
     assert.equal(result.scoped, "rgb(10, 20, 30)");
     assert.equal(await js(`document.elementFromPoint(${result.menu.left + 20},${result.menu.top + 15}).closest('[popover]') !== null`), true);
