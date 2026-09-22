@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { TimelinePreviews } from "../src/main/timeline-previews.ts";
 
-const executable = path.resolve("resources/core-bin/ffmpeg.exe");
+const stagedFfmpeg = path.resolve("resources/core-bin/ffmpeg.exe");
+const vendorFfmpeg = path.resolve("../vendor/ffmpeg/bin/ffmpeg.exe");
+const executable = existsSync(stagedFfmpeg) ? stagedFfmpeg : vendorFfmpeg;
+assert.ok(existsSync(executable), `FFmpeg test binary not found: ${executable}`);
 const parent = path.resolve("../tmp");
 await fs.mkdir(parent, { recursive: true });
 const root = await fs.mkdtemp(path.join(parent, "timeline-preview-test-"));
