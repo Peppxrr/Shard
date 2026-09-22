@@ -95,14 +95,7 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
   return <div ref={ref} id={id} popover="auto" role={role} aria-label={ariaLabel}
     data-shard-component={role === "listbox" ? "select-menu" : "context-menu"}
     className={className}
-    style={{
-      position: "fixed",
-      inset: "auto",
-      margin: 0,
-      overflowY: "auto",
-      maxWidth: "calc(100vw - 16px)",
-      maxHeight: "calc(100vh - 16px)",
-    }}
+    style={{ position: "fixed", inset: "auto", margin: 0, overflowY: "auto" }}
     onPointerDown={event => event.stopPropagation()}
     onKeyDown={event => { if (event.key === "Escape") event.stopPropagation(); }}>
     {children}
