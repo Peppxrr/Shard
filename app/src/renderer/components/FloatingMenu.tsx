@@ -80,8 +80,13 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
   }, [anchor, x, y]);
 
   // Content can grow while the old max-height keeps its observed border box
-  // unchanged. Measure again when React updates the options or menu contents.
-  useLayoutEffect(() => { positionRef.current?.(); }, [children]);
+  // unchanged. Measure immediately, then once more on the next frame so the
+  // top-layer box has committed its new intrinsic size before we anchor it.
+  useLayoutEffect(() => {
+    positionRef.current?.();
+    const frame = requestAnimationFrame(() => positionRef.current?.());
+    return () => cancelAnimationFrame(frame);
+  }, [children]);
 
   return <div ref={ref} id={id} popover="auto" role={role} aria-label={ariaLabel}
     data-shard-component={role === "listbox" ? "select-menu" : "context-menu"}
