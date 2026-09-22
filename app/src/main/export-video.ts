@@ -1,5 +1,13 @@
 // Quality determines ordinary export size. The user's MB setting is a ceiling;
 // bitrate fitting is only needed when a quality encode exceeds that ceiling.
+export function pickExportResolution(mode: string, source: { w: number; h: number }): { w: number; h: number } {
+  const match = mode.match(/^(\d+)p$/);
+  const targetHeight = match ? Math.max(2, Number(match[1])) : source.h;
+  const scale = Math.min(1, targetHeight / source.h);
+  const even = (value: number) => Math.max(2, Math.floor(value / 2) * 2);
+  return { w: even(source.w * scale), h: even(source.h * scale) };
+}
+
 export function buildVideoEncoderArgs(
   encoder: string, bitrateKbps: number, fps: number, quality = true,
 ): string[] {

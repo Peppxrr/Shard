@@ -56,6 +56,7 @@ void Recorder::onOutputStop(void* data, calldata_t* /*cd*/)
 
 bool Recorder::start()
 {
+  auto lock = lockLifecycle();
   if (active_.load())
     return true;
 
@@ -147,6 +148,7 @@ bool Recorder::startWithVideoEncoder(const std::string& videoId)
 
 void Recorder::stop()
 {
+  auto lock = lockLifecycle();
   if (!active_.load())
     return;
   if (output_)
@@ -157,12 +159,22 @@ void Recorder::stop()
 
 void Recorder::stopAndWait(int timeoutMs)
 {
+  auto lock = lockLifecycle();
   stop();
   if (!active_.load())
     return;
   auto deadline = steady_clock::now() + milliseconds(timeoutMs);
   while (active_.load() && steady_clock::now() < deadline)
     std::this_thread::sleep_for(milliseconds(50));
+}
+
+bool Recorder::prepareVideoReset()
+{
+  auto lock = lockLifecycle();
+  stopAndWait();
+  if (active_.load()) return false;
+  releaseOutput();
+  return true;
 }
 
 } // namespace shard

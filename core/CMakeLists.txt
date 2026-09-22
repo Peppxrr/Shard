@@ -147,6 +147,13 @@ if(WIN32)
   add_executable(shard_gc_d3d12_fixture WIN32 EXCLUDE_FROM_ALL tests/gc_d3d12_fixture.cpp)
   target_compile_definitions(shard_gc_d3d12_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(shard_gc_d3d12_fixture PRIVATE d3d12.lib dxgi.lib)
+  # Opt-in GPU test of black-frame detection, actual scene fallback and retry.
+  add_executable(shard_capture_backend_fixture EXCLUDE_FROM_ALL
+    tests/capture_backend_fixture.cpp src/sources.cpp)
+  target_include_directories(shard_capture_backend_fixture PRIVATE src)
+  target_compile_definitions(shard_capture_backend_fixture PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(shard_capture_backend_fixture PRIVATE OBS::libobs nlohmann_json::nlohmann_json
+    d3d11.lib dxgi.lib dwmapi.lib PowrProf.lib uuid.lib ole32.lib)
 endif()
 
 # ---------------------------------------------------------------------------

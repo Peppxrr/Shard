@@ -4,6 +4,7 @@ import type { ClipRecord } from "../../shared/contracts";
 import { Button, Icon, Modal } from "./ui";
 import { Timeline } from "../editor/Timeline";
 import { VideoPreview, formatEditorTime, mediaFileUrl } from "../editor/VideoPreview";
+import { usePlayerAudio } from "../editor/usePlayerAudio";
 import {
   commitHistory,
   createEditorState,
@@ -53,8 +54,7 @@ export function Editor({ clip, onClose, onExport }: Props) {
     mediaDurationRef.current = mediaDuration;
   }, [mediaDuration]);
   const [playing, setPlaying] = useState(false);
-  const [volume, setVolume] = useState(1);
-  const [muted, setMuted] = useState(false);
+  const { volume, setVolume, muted, setMuted } = usePlayerAudio("editor");
   const [zoom, setZoom] = useState(1);
   const [loadingMedia, setLoadingMedia] = useState(true);
   const [mediaError, setMediaError] = useState<string | null>(null);

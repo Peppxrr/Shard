@@ -1,4 +1,5 @@
 #include "encoders.h"
+#include "capture_geometry.h"
 
 #include <obs-module.h>
 #include <graphics/graphics.h>
@@ -138,8 +139,9 @@ void EncoderManager::effectiveVideoParams(int baseW, int baseH, int& width, int&
   fps = v.fps;
 
   if (v.preset == "low") {
-    width = baseW > 1280 ? 1280 : baseW;
-    height = baseH > 720 ? 720 : baseH;
+    const auto fitted = fitCaptureSize({static_cast<uint32_t>(baseW), static_cast<uint32_t>(baseH)}, {1280, 720});
+    width = fitted.width;
+    height = fitted.height;
     fps = fps > 30 ? 30 : fps;
     bitrateKbps = 4000;
   } else if (v.preset == "high") {
@@ -147,8 +149,10 @@ void EncoderManager::effectiveVideoParams(int baseW, int baseH, int& width, int&
     height = baseH;
     bitrateKbps = 16000;
   } else if (v.preset == "custom") {
-    width = v.width;
-    height = v.height;
+    const auto fitted = fitCaptureSize({static_cast<uint32_t>(baseW), static_cast<uint32_t>(baseH)},
+                                      {static_cast<uint32_t>(v.width), static_cast<uint32_t>(v.height)});
+    width = fitted.width;
+    height = fitted.height;
     bitrateKbps = v.bitrateKbps;
   } else { // medium (default)
     width = baseW;

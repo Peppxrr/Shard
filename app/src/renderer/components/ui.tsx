@@ -1,6 +1,7 @@
 // Shared UI primitives using original bundled Feather/Lucide SVG assets.
+import { FloatingMenu } from "./FloatingMenu";
 import { ICON_MARKUP } from "./iconAssets";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useId, useRef, useState } from "react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { THEME_CHANGE_EVENT, getThemeIconUrl } from "../themeManager";
 
@@ -197,7 +198,10 @@ interface ModalProps {
 export function Modal({ open, onClose, title, sub, size = "md", children, foot, closeOnBackdrop = true }: ModalProps) {
   useEffect(() => {
     if (!open || !onClose) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      // Escape dismisses a menu before its containing dialog.
+      if (e.key === "Escape" && !document.querySelector(":popover-open")) onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
@@ -308,54 +312,9 @@ export function ContextMenu({
   children: ReactNode;
   className?: string;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ left: x, top: y });
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const margin = 8;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    let left = x;
-    let top = y;
-    // Flip horizontally if overflow right
-    if (left + rect.width + margin > vw) left = Math.max(margin, vw - rect.width - margin);
-    if (left < margin) left = margin;
-    // Flip vertically if overflow bottom — try above cursor first
-    if (top + rect.height + margin > vh) {
-      const above = y - rect.height - 8;
-      if (above >= margin) top = above;
-      else top = Math.max(margin, vh - rect.height - margin);
-    }
-    if (top < margin) top = margin;
-    setPos({ left, top });
-  }, [x, y]);
-
-  useEffect(() => {
-    const close = () => onClose();
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("blur", close);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("blur", close);
-      window.removeEventListener("resize", close);
-    };
-  }, [onClose]);
-
-  return (
-    <div
-      ref={ref}
-      role="menu"
-      className={className ?? "editor-context"}
-      style={{ position: "fixed", left: pos.left, top: pos.top, zIndex: 200 }}
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      {children}
-    </div>
-  );
+  return <FloatingMenu x={x} y={y} onClose={onClose} role="menu" className={className ?? "editor-context"}>
+    {children}
+  </FloatingMenu>;
 }
 
 /* ---------------------------------------------------------------------------
@@ -386,42 +345,7 @@ export function ShardSelect<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
-
-  useLayoutEffect(() => {
-    if (!open || !btnRef.current) return;
-    const rect = btnRef.current.getBoundingClientRect();
-    const margin = 8;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const width = Math.max(rect.width, 180);
-    let left = rect.left;
-    if (left + width + margin > vw) left = Math.max(margin, vw - width - margin);
-    const spaceBelow = vh - rect.bottom - margin;
-    const spaceAbove = rect.top - margin;
-    const wantBelow = Math.min(280, options.length * 36 + 8);
-    let top: number;
-    let maxHeight: number;
-    if (spaceBelow >= Math.min(wantBelow, 200) || spaceBelow >= spaceAbove) {
-      top = rect.bottom + 4;
-      maxHeight = Math.min(wantBelow, spaceBelow);
-    } else {
-      maxHeight = Math.min(wantBelow, spaceAbove);
-      top = rect.top - maxHeight - 4;
-    }
-    setPos({ left, top, width, maxHeight });
-  }, [open, options.length]);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = () => setOpen(false);
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("resize", close);
-    };
-  }, [open]);
+  const menuId = useId();
 
   const selected = options.find((o) => o.value === value);
   return (
@@ -435,13 +359,10 @@ export function ShardSelect<T extends string>({
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
         style={style}
-        onPointerDown={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
+        onClick={() => setOpen((v) => !v)}
         onKeyDown={(e) => {
-          if (e.key === "Escape") setOpen(false);
           if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             setOpen(true);
@@ -451,29 +372,26 @@ export function ShardSelect<T extends string>({
         <span className="shard-select__value">{selected?.label ?? placeholder ?? "Select"}</span>
         <span className="shard-select__chev"><Icon name="chevronDown" size={14} /></span>
       </button>
-      {open && pos && (
-        <div
-          data-shard-component="select-menu"
-          role="listbox"
-          className="shard-select__menu"
-          style={{ position: "fixed", left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxHeight, zIndex: 210 }}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
+      {open && !disabled && (
+        <FloatingMenu id={menuId} anchor={btnRef} onClose={() => setOpen(false)} role="listbox"
+          ariaLabel={ariaLabel} className="shard-select__menu">
           {options.map((o) => (
             <button
               key={o.value}
+              type="button"
               role="option"
               aria-selected={o.value === value}
               className={["shard-select__option", o.value === value && "is-selected"].filter(Boolean).join(" ")}
               onClick={() => {
                 onChange(o.value);
                 setOpen(false);
+                btnRef.current?.focus({ preventScroll: true });
               }}
             >
               {o.label}
             </button>
           ))}
-        </div>
+        </FloatingMenu>
       )}
     </>
   );

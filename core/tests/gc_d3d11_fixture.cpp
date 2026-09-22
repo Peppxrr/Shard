@@ -10,15 +10,24 @@
 #include <cmath>
 #include <iterator>
 #include <thread>
+#include <cstdlib>
 
 using Microsoft::WRL::ComPtr;
 
 namespace {
+bool replacingWindow = false;
+uint32_t requestedWidth = 0, requestedHeight = 0;
+uint32_t width = 960, height = 540;
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
   if (message == WM_DESTROY) {
-    PostQuitMessage(0);
+    if (!replacingWindow) PostQuitMessage(0);
+    return 0;
+  }
+  if (message == WM_APP + 1) {
+    requestedWidth = static_cast<uint32_t>(wparam);
+    requestedHeight = static_cast<uint32_t>(lparam);
     return 0;
   }
   return DefWindowProcW(window, message, wparam, lparam);
@@ -28,8 +37,8 @@ bool createDevice(HWND window, ComPtr<ID3D11Device>& device, ComPtr<ID3D11Device
                   ComPtr<IDXGISwapChain>& swapChain, ComPtr<ID3D11RenderTargetView>& renderTarget)
 {
   DXGI_SWAP_CHAIN_DESC desc = {};
-  desc.BufferDesc.Width = 960;
-  desc.BufferDesc.Height = 540;
+  desc.BufferDesc.Width = width;
+  desc.BufferDesc.Height = height;
   desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   desc.SampleDesc.Count = 1;
   desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -60,6 +69,10 @@ bool createDevice(HWND window, ComPtr<ID3D11Device>& device, ComPtr<ID3D11Device
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  if (const char* value = std::getenv("SHARD_GC_FIXTURE_WIDTH")) width = std::atoi(value);
+  if (const char* value = std::getenv("SHARD_GC_FIXTURE_HEIGHT")) height = std::atoi(value);
+  if (width < 160 || height < 90 || width > 3840 || height > 2160) return 2;
   constexpr wchar_t kClassName[] = L"ShardGcD3D11Fixture";
   WNDCLASSW wc = {};
   wc.hInstance = instance;
@@ -69,8 +82,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
   if (!RegisterClassW(&wc))
     return 2;
 
-  HWND window = CreateWindowExW(0, kClassName, L"Shard GC D3D11 Fixture", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 960, 540, nullptr, nullptr, instance, nullptr);
+  const auto createWindow = [&] {
+    RECT rect = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
+    return CreateWindowExW(0, kClassName, L"Shard GC D3D11 Fixture", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                           20, 20, rect.right - rect.left, rect.bottom - rect.top,
+                           nullptr, nullptr, instance, nullptr);
+  };
+  HWND window = createWindow();
   if (!window)
     return 3;
 
@@ -95,6 +114,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     }
     if (!running)
       break;
+    if (requestedWidth >= 160 && requestedHeight >= 90 && requestedWidth <= 3840 && requestedHeight <= 2160) {
+      width = requestedWidth; height = requestedHeight;
+      requestedWidth = requestedHeight = 0;
+      // Allocate the replacement first so Windows cannot recycle the HWND.
+      HWND replacement = createWindow();
+      if (!replacement) return 5;
+      context->ClearState();
+      renderTarget.Reset(); swapChain.Reset(); context.Reset(); device.Reset();
+      replacingWindow = true;
+      DestroyWindow(window);
+      replacingWindow = false;
+      window = replacement;
+      if (!createDevice(window, device, context, swapChain, renderTarget)) return 6;
+    }
 
     const float seconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count();
     const float color[] = {

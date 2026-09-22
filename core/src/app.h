@@ -45,7 +45,7 @@ public:
 
   bool init();          // obs_startup + modules + video/audio + scene
   void shutdown();      // obs_shutdown (must be called before process exit)
-  bool resetVideo();    // outputs/sources must be stopped before calling
+  bool resetVideo(uint32_t captureWidth = 0, uint32_t captureHeight = 0); // outputs must be stopped
 
   obs_scene_t* scene() const { return scene_; }
   bool ok() const { return ok_; }

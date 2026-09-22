@@ -158,4 +158,4 @@ Missing/unsupported manifests and unreadable sheets appear with a reason in Appe
 - Test switching away/back, option reset, and a full restart after saving the selection. Check both default values and changed options.
 - Share only your theme folder and asset licenses. Do not include personal settings, `theme-options.json`, captured clips, or cache files.
 
-Contributors can run `npm --prefix app run verify -- themes`. The theme suite covers manifests, legacy discovery, collisions, options, URL resolution, asset boundaries, hot reload, and renderer switch/failure handling. Changes to editor behavior also use the `editor` scope.
+Contributors can run `npm --prefix app run verify -- themes`. The theme suite covers manifests, legacy discovery, collisions, options, URL resolution, asset boundaries, hot reload, and renderer switch/failure handling. It also runs real Electron checks for dropdown/context-menu placement inside filtered or transformed panels, viewport fitting, and dismissal/focus behavior. Changes to editor behavior also use the `editor` scope.

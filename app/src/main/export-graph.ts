@@ -132,8 +132,9 @@ export function buildExportGraph(
     );
   }
   filters.push(
-    `[vc]scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v]`,
+    // The dimensions already follow the source ratio. Scale directly to the
+    // codec-aligned size; padding would bake rounding slivers into the file.
+    `[vc]scale=${width}:${height},setsar=1[v]`,
   );
 
   const maps = ["-map", "[v]"];

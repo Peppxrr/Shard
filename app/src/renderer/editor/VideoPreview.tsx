@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 import { ContextMenu, Icon, IconButton } from "../components/ui";
 import { measurePlayback } from "./playbackDiagnostics";
+import { usePlayerAudio } from "./usePlayerAudio";
 
 interface VideoPreviewProps {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -58,6 +59,10 @@ export function VideoPreview({
   const [reportStatus, setReportStatus] = useState("");
   const reportAbort = useRef<AbortController | null>(null);
   const reportTimer = useRef<number | undefined>(undefined);
+  // Apply the remembered level before autoplay, including newly mounted media.
+  useLayoutEffect(() => {
+    if (videoRef.current) videoRef.current.volume = Math.max(0, Math.min(1, volume));
+  }, [videoRef, sourcePath, volume]);
   useEffect(() => {
     setMenu(null);
     setReportStatus("");
@@ -199,8 +204,7 @@ export function VideoPreview({
 export function StandaloneVideoPlayer({ sourcePath, loop = true }: { sourcePath: string; loop?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const [volume, setVolume] = useState(1);
+  const { volume, setVolume, muted, setMuted } = usePlayerAudio("preview");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);

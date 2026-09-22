@@ -173,20 +173,6 @@ ULONG CALLBACK capturePowerCallback(PVOID context, ULONG type, PVOID setting)
 }
 #endif
 
-// OBS compatibility: hook-only games where WGC must not be used as fallback.
-// Derived from vendor/obs-studio/plugins/win-capture/data/compatibility.json
-// entries with game_capture=true && window_capture=false && window_capture_wgc=false.
-static bool isHookOnlyGame(const std::string& exeLower)
-{
-  static const std::set<std::string> kHookOnly = {
-      "csgo.exe",       "cs2.exe",        "javaw.exe",    "cod.exe",
-      "genshinimpact.exe", "destiny2.exe", "gta-sa.exe", "leagueclientux.exe",
-      "samp.exe",       "terraria.exe",   "starrail.exe", "zenlesszonezero.exe",
-      "marvel-win64-shipping.exe", "thebazaar.exe", "fragpunk.exe", "robloxplayerbeta.exe",
-      "client-win64-shipping.exe", "hearthstonedecktracker.exe", "cod.exe"};
-  return kHookOnly.count(exeLower) != 0;
-}
-
 } // namespace
 
 SourceManager::SourceManager(App& app, Config& config, Events& events)
@@ -201,7 +187,6 @@ SourceManager::~SourceManager()
   for (size_t i = 0; i < audioSources_.size(); i++) {
     if (audioItems_[i]) {
       obs_sceneitem_remove(audioItems_[i]);
-      obs_sceneitem_release(audioItems_[i]);
     }
     if (audioSources_[i])
       obs_source_release(audioSources_[i]);
@@ -214,9 +199,11 @@ SourceManager::~SourceManager()
 
 void SourceManager::removeVideoSourceItem()
 {
+  // obs_scene_add returns borrowed items. remove releases the scene's item
+  // reference; an additional release would access an already freed item.
+  resetFrameProbeLocked();
   if (monitorItem_) {
     obs_sceneitem_remove(monitorItem_);
-    obs_sceneitem_release(monitorItem_);
     monitorItem_ = nullptr;
   }
   if (monitorSource_) {
@@ -225,7 +212,6 @@ void SourceManager::removeVideoSourceItem()
   }
   if (gameItem_) {
     obs_sceneitem_remove(gameItem_);
-    obs_sceneitem_release(gameItem_);
     gameItem_ = nullptr;
   }
   if (gameSource_) {
@@ -234,7 +220,6 @@ void SourceManager::removeVideoSourceItem()
   }
   if (windowItem_) {
     obs_sceneitem_remove(windowItem_);
-    obs_sceneitem_release(windowItem_);
     windowItem_ = nullptr;
   }
   if (windowSource_) {
@@ -251,7 +236,6 @@ void SourceManager::releaseAll()
   for (size_t i = 0; i < audioSources_.size(); i++) {
     if (audioItems_[i]) {
       obs_sceneitem_remove(audioItems_[i]);
-      obs_sceneitem_release(audioItems_[i]);
     }
     if (audioSources_[i])
       obs_source_release(audioSources_[i]);
@@ -280,45 +264,18 @@ void SourceManager::applyVideoSource()
     monitorSource_ = obs_source_create("monitor_capture", "monitor-capture", s, nullptr);
     obs_data_release(s);
   }
-  // Games use two layered backends. The injected OBS game hook keeps the
-  // graphics texture alive while a game renders in the background/minimized.
-  // WGC is layered above it for non-injectable and anti-cheat-protected games.
-  {
-    obs_data_t* s = obs_data_create();
-    obs_data_set_string(s, "capture_mode", "window");
-    obs_data_set_int(s, "priority", 2); // WINDOW_PRIORITY_EXE
-    obs_data_set_bool(s, "capture_cursor", true);
-    obs_data_set_bool(s, "anti_cheat_hook", true);
-    obs_data_set_int(s, "hook_rate", 1); // HOOK_RATE_NORMAL
-    const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
-    obs_data_set_bool(s, "shard_gc_diagnostics", diagnostics && *diagnostics && std::string(diagnostics) != "0");
-    obs_data_set_string(s, "window", "::");
-    gameSource_ = obs_source_create("game_capture", "game-capture", s, nullptr);
-    obs_data_release(s);
-  }
-  // WGC window capture remains the primary visible-window path. The target is
-  // set when a game subject appears; method 2 = METHOD_WGC.
-  {
-    obs_data_t* s = obs_data_create();
-    obs_data_set_int(s, "method", 2);
-    obs_data_set_int(s, "priority", 2);
-    obs_data_set_bool(s, "cursor", true);
-    // Keep WGC's complete surface alive. The scene item is cropped to the
-    // Win32 client rect only when that geometry is valid; failed geometry
-    // therefore falls back to a live full-window frame instead of black.
-    obs_data_set_bool(s, "client_area", false);
-    obs_data_set_string(s, "window", "::");
-    windowSource_ = obs_source_create("window_capture", "game-window", s, nullptr);
-    obs_data_release(s);
-  }
+  // The hook is preferred while healthy. Keep WGC running underneath so it
+  // can take over without waiting for a new capture session.
+  createGameCaptureLocked();
+  createWindowCaptureLocked();
 
   if (monitorSource_)
     monitorItem_ = obs_scene_add(app_.scene(), monitorSource_);
   // Scene rendering is bottom-to-top: WGC window_capture is the fallback
   // below the injected hook. Hook-primary means the game hook sits on top;
   // when it produces frames it covers the fallback, otherwise the fallback's
-  // WGC frames show. This survives minimization: WGC draws nothing while
-  // iconic, the hook underneath keeps updating.
+  // WGC frames show. The watchdog promotes WGC above an opaque broken hook;
+  // both sources stay active so the hook can recover in the background.
   if (windowSource_)
     windowItem_ = obs_scene_add(app_.scene(), windowSource_);
   if (gameSource_)
@@ -354,6 +311,21 @@ void SourceManager::applyVideoSource()
   emitSubjectChanged();
 }
 
+void SourceManager::createWindowCaptureLocked()
+{
+  obs_data_t* s = obs_data_create();
+  obs_data_set_int(s, "method", 2);
+  obs_data_set_int(s, "priority", 2);
+  obs_data_set_bool(s, "cursor", true);
+  // Keep WGC's complete surface alive. The scene item is cropped to the
+  // Win32 client rect only when that geometry is valid; failed geometry
+  // therefore falls back to a live full-window frame instead of black.
+  obs_data_set_bool(s, "client_area", false);
+  obs_data_set_string(s, "window", "::");
+  windowSource_ = obs_source_create("window_capture", "game-window", s, nullptr);
+  obs_data_release(s);
+}
+
 bool SourceManager::pidAlive(uint32_t pid)
 {
   if (pid == 0)
@@ -366,6 +338,70 @@ bool SourceManager::pidAlive(uint32_t pid)
   return true;
 #else
   return false;
+#endif
+}
+
+CaptureSize SourceManager::captureSize() const
+{
+  std::lock_guard<std::mutex> lock(sourceMutex_);
+  obs_source_t* source = nullptr;
+  obs_sceneitem_t* item = nullptr;
+  if (subject_.kind == Subject::Kind::Monitor) {
+    source = monitorSource_;
+  } else if (subject_.kind == Subject::Kind::Window) {
+    if (activeBackend_ == ActiveBackend::Hook) source = gameSource_;
+    else if (!subjectWindowMinimized(subject_)) { source = windowSource_; item = windowItem_; }
+  }
+  if (!source) return {};
+  const uint32_t width = obs_source_get_width(source), height = obs_source_get_height(source);
+  obs_sceneitem_crop crop = {};
+  if (item) obs_sceneitem_get_crop(item, &crop);
+  const uint32_t horizontal = crop.left + crop.right, vertical = crop.top + crop.bottom;
+  return width > horizontal && height > vertical ? CaptureSize{width - horizontal, height - vertical} : CaptureSize{};
+}
+
+bool SourceManager::resizeCanvas(CaptureSize size)
+{
+  std::lock_guard<std::mutex> lock(sourceMutex_);
+  const CaptureSize previous{app_.baseWidth(), app_.baseHeight()};
+  if (!app_.resetVideo(size.width, size.height)) {
+    // Keep an encoder-rejected size from leaving the video mix unavailable.
+    app_.resetVideo(previous.width, previous.height);
+    return false;
+  }
+  fillFrame(monitorItem_);
+  fillFrame(gameItem_);
+  fillWindowFrameLocked();
+  return true;
+}
+
+void SourceManager::refreshTargetWindowLocked()
+{
+#ifdef _WIN32
+  const HWND window = findSubjectWindow(subject_);
+  if (!window || IsIconic(window)) return;
+  const uintptr_t identity = reinterpret_cast<uintptr_t>(window);
+  if (identity == targetWindow_) return;
+  const bool replaced = targetWindow_ != 0;
+  targetWindow_ = identity;
+  if (!replaced) return;
+  // Launchers/splash screens can replace the HWND without changing PID,
+  // title or class. The old hook texture can remain acquired indefinitely.
+  wchar_t title[512] = {}, cls[256] = {};
+  GetWindowTextW(window, title, static_cast<int>(std::size(title)));
+  GetClassNameW(window, cls, static_cast<int>(std::size(cls)));
+  subject_.title = utf8FromWide(title);
+  subject_.cls = utf8FromWide(cls);
+  resetFrameProbeLocked();
+  recreateGameCaptureLocked();
+  if (windowItem_) obs_sceneitem_remove(windowItem_);
+  windowItem_ = nullptr;
+  if (windowSource_) obs_source_release(windowSource_);
+  createWindowCaptureLocked();
+  if (windowSource_) windowItem_ = obs_scene_add(app_.scene(), windowSource_);
+  setWindowTargetLocked(subject_);
+  std::fprintf(stderr, "capture: game window replaced for pid=%lu; reacquiring capture\n",
+               static_cast<unsigned long>(subject_.pid));
 #endif
 }
 
@@ -478,6 +514,7 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
 {
   if (!windowSource_ && !gameSource_)
     return;
+  resetFrameProbeLocked();
   const std::string desc = encodeWindowPart(s.title) + ":" + encodeWindowPart(s.cls) + ":" + encodeWindowPart(s.exe);
   obs_data_t* d = obs_data_create();
   obs_data_set_string(d, "window", desc.c_str());
@@ -496,6 +533,117 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
   windowNoFramesReported_ = false;
   windowSuppressedForMinimize_ = false;
   activeBackend_ = ActiveBackend::None;
+}
+
+void SourceManager::createGameCaptureLocked()
+{
+  obs_data_t* s = obs_data_create();
+  obs_data_set_string(s, "capture_mode", "window");
+  obs_data_set_int(s, "priority", 2);
+  obs_data_set_bool(s, "capture_cursor", true);
+  obs_data_set_bool(s, "anti_cheat_hook", true);
+  obs_data_set_int(s, "hook_rate", 1);
+  const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
+  obs_data_set_bool(s, "shard_gc_diagnostics", diagnostics && *diagnostics && std::string(diagnostics) != "0");
+  obs_data_set_string(s, "window", "::");
+  gameSource_ = obs_source_create("game_capture", "game-capture", s, nullptr);
+  obs_data_release(s);
+}
+
+void SourceManager::recreateGameCaptureLocked()
+{
+  // Updating the same descriptor does not reset an already acquired texture
+  // in OBS. Recreate only the failed hook, leaving WGC and audio uninterrupted.
+  probePending_ = false;
+  if (gameItem_) {
+    obs_sceneitem_remove(gameItem_);
+    gameItem_ = nullptr;
+  }
+  if (gameSource_) obs_source_release(gameSource_);
+  gameSource_ = nullptr;
+  createGameCaptureLocked();
+  if (gameSource_) {
+    gameItem_ = obs_scene_add(app_.scene(), gameSource_);
+    retryGameCaptureLocked();
+    fillFrame(gameItem_);
+  }
+  if (windowItem_) obs_sceneitem_set_order(windowItem_, OBS_ORDER_MOVE_TOP);
+  activeBackend_ = windowItem_ ? ActiveBackend::Wgc : ActiveBackend::None;
+  std::fprintf(stderr, "capture: recreated stalled game hook for pid=%lu; keeping WGC fallback\n",
+               static_cast<unsigned long>(subject_.pid));
+}
+
+void SourceManager::resetFrameProbeLocked()
+{
+  backendHealth_ = {};
+  probePending_ = false;
+  lastProbeMs_ = 0;
+  // releaseAll runs before obs_shutdown; the destructor may run afterward.
+  if (!probeRender_ && !probeHook_ && !probeWindow_) return;
+  obs_enter_graphics();
+  gs_texrender_destroy(probeRender_);
+  gs_stagesurface_destroy(probeHook_);
+  gs_stagesurface_destroy(probeWindow_);
+  probeRender_ = nullptr;
+  probeHook_ = probeWindow_ = nullptr;
+  obs_leave_graphics();
+}
+
+void SourceManager::sampleCaptureFrames(void* data, uint32_t, uint32_t)
+{
+  auto& self = *static_cast<SourceManager*>(data);
+  // Never block the graphics thread on a watchdog source update/teardown.
+  std::unique_lock<std::mutex> lock(self.sourceMutex_, std::try_to_lock);
+  if (!lock || self.subject_.kind != Subject::Kind::Window) return;
+  const uint64_t now = duration_ms_now();
+  if (now - self.lastProbeMs_ < 500) return;
+  self.lastProbeMs_ = now;
+  if (subjectWindowMinimized(self.subject_)) {
+    self.probePending_ = false;
+    self.backendHealth_.sample(CaptureFrameContent::Unknown, CaptureFrameContent::Unknown, now);
+    return;
+  }
+  constexpr uint32_t width = 64, height = 36;
+  if (!self.probeRender_) self.probeRender_ = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+  if (!self.probeHook_) self.probeHook_ = gs_stagesurface_create(width, height, GS_RGBA);
+  if (!self.probeWindow_) self.probeWindow_ = gs_stagesurface_create(width, height, GS_RGBA);
+  if (!self.probeRender_ || !self.probeHook_ || !self.probeWindow_) return;
+
+  // Read the previous sample, giving the GPU half a second to finish the
+  // tiny copy instead of synchronously reading a full-resolution frame.
+  const auto read = [&](gs_stagesurf_t* surface) {
+    uint8_t* pixels = nullptr;
+    uint32_t stride = 0;
+    if (!gs_stagesurface_map(surface, &pixels, &stride)) return CaptureFrameContent::Unknown;
+    const auto result = captureFrameContent(pixels, width, height, stride);
+    gs_stagesurface_unmap(surface);
+    return result;
+  };
+  if (self.probePending_)
+    self.backendHealth_.sample(read(self.probeHook_), read(self.probeWindow_), now);
+
+  const auto stage = [&](obs_source_t* source, gs_stagesurf_t* surface) {
+    const uint32_t cx = source ? obs_source_get_width(source) : 0;
+    const uint32_t cy = source ? obs_source_get_height(source) : 0;
+    if (!cx || !cy) return false;
+    gs_texrender_reset(self.probeRender_);
+    if (!gs_texrender_begin(self.probeRender_, width, height)) return false;
+    struct vec4 clear = {};
+    gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+    gs_ortho(0.0f, static_cast<float>(cx), 0.0f, static_cast<float>(cy), -100.0f, 100.0f);
+    gs_blend_state_push();
+    gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+    obs_source_video_render(source);
+    gs_blend_state_pop();
+    gs_texrender_end(self.probeRender_);
+    gs_stage_texture(surface, gs_texrender_get_texture(self.probeRender_));
+    return true;
+  };
+  const bool hook = stage(self.gameSource_, self.probeHook_);
+  const bool wgc = stage(self.windowSource_, self.probeWindow_);
+  self.probePending_ = hook && wgc;
+  if (!self.probePending_)
+    self.backendHealth_.sample(CaptureFrameContent::Unknown, CaptureFrameContent::Unknown, now);
 }
 
 void SourceManager::retryMonitorCaptureLocked()
@@ -573,6 +721,7 @@ void SourceManager::setGameSubject(const std::string& exe, const std::string& na
 
   const bool visibleIdentityChanged =
       subject_.kind != Subject::Kind::Window || subject_.pid != cand.pid || subject_.name != cand.name;
+  if (subject_.pid != cand.pid) targetWindow_ = 0;
   subject_ = std::move(cand);
   applySubjectLocked();
   if (visibleIdentityChanged)
@@ -597,6 +746,7 @@ void SourceManager::startWatchdog()
 {
   if (watchdogRun_.exchange(true))
     return;
+  obs_add_main_render_callback(sampleCaptureFrames, this);
   watchdogThread_ = std::thread([this] { watchdogLoop(); });
 }
 
@@ -606,12 +756,12 @@ void SourceManager::stopWatchdog()
     return;
   if (watchdogThread_.joinable())
     watchdogThread_.join();
+  obs_remove_main_render_callback(sampleCaptureFrames, this);
 }
 void SourceManager::watchdogLoop()
 {
   constexpr auto kRetryDelay = std::chrono::seconds(3);
   constexpr auto kNoFramesDelay = std::chrono::seconds(10);
-  constexpr int kHookAttemptsBeforeFallback = 3;
   CaptureRecoveryState recoveryState;
   CaptureRecoverySchedule recoverySchedule;
 #ifdef _WIN32
@@ -704,6 +854,7 @@ void SourceManager::watchdogLoop()
           }
         }
       } else if (subject_.kind == Subject::Kind::Window && pidAlive(subject_.pid)) {
+        refreshTargetWindowLocked();
         const bool minimized = subjectWindowMinimized(subject_);
         if (windowSuppressedForMinimize_ != minimized) {
           windowSuppressedForMinimize_ = minimized;
@@ -726,7 +877,8 @@ void SourceManager::watchdogLoop()
         const uint32_t gameHeight = gameSource_ ? obs_source_get_height(gameSource_) : 0;
         const bool windowReady = windowWidth && windowHeight;
         const bool usableWindowReady = windowReady && !minimized;
-        const bool gameReady = gameWidth && gameHeight;
+        const bool hookRejected = backendHealth_.hookRejected();
+        const bool gameReady = gameWidth && gameHeight && !hookRejected;
         const auto now = std::chrono::steady_clock::now();
         // A minimized live game is an expected WGC outage, not a dead capture
         // subject. Keep the replay lifecycle active so its existing packets
@@ -741,8 +893,6 @@ void SourceManager::watchdogLoop()
         if (usableWindowReady || gameReady) {
           active = true;
           captureHealthyAt_ = now;
-          lastWindowRetry_ = now;
-          wgcRetryCount_ = 0;
           windowNoFramesReported_ = false;
           if (gameReady)
             fillFrame(gameItem_);
@@ -757,15 +907,19 @@ void SourceManager::watchdogLoop()
 
           if (desired != activeBackend_) {
             activeBackend_ = desired;
-            const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
-            if (diagnostics && *diagnostics && std::string(diagnostics) != "0") {
-              const char* backendStr = desired == ActiveBackend::Hook ? "hook" : "wgc";
-              std::fprintf(stderr,
-                           "[GC] ts_ms=%llu stage=BackendSwitch backend=%s game=%ux%u wgc=%ux%u pid=%lu\n",
-                           static_cast<unsigned long long>(duration_ms_now()), backendStr, gameWidth, gameHeight,
-                           windowWidth, windowHeight, static_cast<unsigned long>(subject_.pid));
-              std::fflush(stderr);
-            }
+            // A black hook still has an opaque texture. Merely naming WGC
+            // as the backend cannot expose it; change the actual layer order.
+            if (desired == ActiveBackend::Wgc && windowItem_)
+              obs_sceneitem_set_order(windowItem_, OBS_ORDER_MOVE_TOP);
+            else if (desired == ActiveBackend::Hook && gameItem_)
+              obs_sceneitem_set_order(gameItem_, OBS_ORDER_MOVE_TOP);
+            const char* backendStr = desired == ActiveBackend::Hook ? "hook" : "wgc";
+            std::fprintf(stderr,
+                         "[GC] ts_ms=%llu stage=BackendSwitch backend=%s game=%ux%u wgc=%ux%u pid=%lu black_hook=%s\n",
+                         static_cast<unsigned long long>(duration_ms_now()), backendStr, gameWidth, gameHeight,
+                         windowWidth, windowHeight, static_cast<unsigned long>(subject_.pid),
+                         hookRejected ? "true" : "false");
+            std::fflush(stderr);
           }
         } else {
           if (captureHealthyAt_.time_since_epoch().count() == 0)
@@ -775,27 +929,24 @@ void SourceManager::watchdogLoop()
           if (lastHookRetry_.time_since_epoch().count() == 0)
             lastHookRetry_ = now;
 
-          const bool hookOnly = isHookOnlyGame(subject_.exe);
-          const bool wgcFallbackEnabled =
-              !hookOnly &&
-              (hookRetryCount_ >= kHookAttemptsBeforeFallback ||
-               (now - captureHealthyAt_ >= std::chrono::seconds(9)));
-          if (wgcFallbackEnabled && !minimized && now - lastWindowRetry_ >= kRetryDelay) {
-            retryWindowCaptureLocked();
-            lastWindowRetry_ = now;
-            wgcRetryCount_++;
-          }
-
           if (now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
             std::string msg = "Capture for " + subject_.name +
                               " is not producing frames through either game capture or WGC; recovery "
                               "is still retrying";
-            if (hookOnly) {
-              msg += " (hook-only title per OBS compatibility – must run on same GPU as Shard; see obsproject.com/kb/gpu-selection-guide)";
-            }
             events_.emit("error", {{"code", "CAPTURE_NO_FRAMES"}, {"message", msg}});
             windowNoFramesReported_ = true;
           }
+        }
+        // Keep the fallback ready even while the hook works. OBS compatibility
+        // JSON flags select which capture method a warning applies to; they
+        // are not a list of titles that prohibit WGC.
+        if (usableWindowReady) {
+          lastWindowRetry_ = now;
+          wgcRetryCount_ = 0;
+        } else if (!minimized && now - lastWindowRetry_ >= kRetryDelay) {
+          retryWindowCaptureLocked();
+          lastWindowRetry_ = now;
+          wgcRetryCount_++;
         }
         // Recover the hook independently of WGC. A fallback with dimensions
         // can still be black (notably for protected titles), and must not
@@ -803,8 +954,13 @@ void SourceManager::watchdogLoop()
         if (gameReady) {
           lastHookRetry_ = now;
           hookRetryCount_ = 0;
-        } else if (now - lastHookRetry_ >= std::chrono::milliseconds(captureHookRetryDelayMs(hookRetryCount_))) {
-          retryGameCaptureLocked();
+        } else if (now - lastHookRetry_ >= std::chrono::milliseconds(
+                       hookRejected ? 15000 : captureHookRetryDelayMs(hookRetryCount_))) {
+          if ((hookRejected && gameWidth && gameHeight) ||
+              (!gameWidth && !gameHeight && hookRetryCount_ > 0 && hookRetryCount_ % 5 == 0))
+            recreateGameCaptureLocked();
+          else
+            retryGameCaptureLocked();
           lastHookRetry_ = now;
           if (hookRetryCount_ < 1000000)
             hookRetryCount_++;
@@ -844,7 +1000,6 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
   for (size_t i = 0; i < audioSources_.size(); i++) {
     if (audioItems_[i]) {
       obs_sceneitem_remove(audioItems_[i]);
-      obs_sceneitem_release(audioItems_[i]);
     }
     if (audioSources_[i])
       obs_source_release(audioSources_[i]);

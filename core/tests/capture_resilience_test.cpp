@@ -1,8 +1,10 @@
 #include "capture_resilience.h"
 #include "replay_timing.h"
+#include "capture_geometry.h"
 
 #include <cassert>
 #include <cstdio>
+#include <array>
 
 using shard::CaptureRecoveryState;
 using shard::CaptureRecoverySchedule;
@@ -12,6 +14,62 @@ using shard::captionBoundaryInset;
 
 int main()
 {
+  using shard::CaptureSize;
+  assert((shard::fitCaptureSize({3440, 1440}, {1280, 720}) == CaptureSize{1280, 534}));
+  assert((shard::fitCaptureSize({2560, 1600}, {1280, 720}) == CaptureSize{1152, 720}));
+  assert((shard::fitCaptureSize({1280, 960}, {1280, 720}) == CaptureSize{960, 720}));
+  assert((shard::fitCaptureSize({800, 600}, {1920, 1080}) == CaptureSize{800, 600}));
+  shard::CaptureSizeStability stable;
+  assert(!stable.ready({800, 600}, 100));
+  assert(!stable.ready({800, 600}, 1500));
+  assert(stable.ready({800, 600}, 1600));
+  assert(!stable.ready({1280, 960}, 1700));
+  assert(!stable.ready({}, 3000));
+  assert(!stable.ready({1280, 960}, 4000));
+  using shard::CaptureFrameContent;
+  using shard::CaptureBackendHealth;
+  constexpr uint32_t probeWidth = 64, probeHeight = 36, stride = 272;
+  std::array<uint8_t, stride * probeHeight> pixels{};
+  assert(shard::captureFrameContent(nullptr, probeWidth, probeHeight, stride) == CaptureFrameContent::Unknown);
+  assert(shard::captureFrameContent(pixels.data(), probeWidth, probeHeight, stride) == CaptureFrameContent::Black);
+  // Bright window chrome outside the interior is not a working game image.
+  for (uint32_t y = 0; y < probeHeight; ++y) {
+    for (uint32_t x = 0; x < probeWidth; ++x) {
+      auto* p = pixels.data() + y * stride + x * 4;
+      p[3] = 255;
+      if (y < probeHeight / 5 || x < probeWidth / 5) p[0] = p[1] = p[2] = 255;
+    }
+  }
+  assert(shard::captureFrameContent(pixels.data(), probeWidth, probeHeight, stride) == CaptureFrameContent::Black);
+  pixels[18 * stride + 32 * 4] = 255; // A cursor-sized speck is not enough.
+  assert(shard::captureFrameContent(pixels.data(), probeWidth, probeHeight, stride) == CaptureFrameContent::Black);
+  pixels.fill(80);
+  assert(shard::captureFrameContent(pixels.data(), probeWidth, probeHeight, stride) == CaptureFrameContent::Content);
+
+  CaptureBackendHealth health;
+  for (uint64_t t = 500; t <= 10000; t += 500)
+    health.sample(CaptureFrameContent::Black, CaptureFrameContent::Black, t);
+  assert(!health.hookRejected()); // Legitimate black loading screen.
+  for (uint64_t t = 10500; t <= 13000; t += 500)
+    health.sample(CaptureFrameContent::Black, CaptureFrameContent::Content, t);
+  assert(!health.hookRejected()); // Transient disagreement must settle.
+  health.sample(CaptureFrameContent::Black, CaptureFrameContent::Content, 13500);
+  assert(health.hookRejected());
+  health.sample(CaptureFrameContent::Unknown, CaptureFrameContent::Unknown, 14000);
+  assert(health.hookRejected()); // Minimize/missing frames do not clear failure.
+  for (uint64_t t = 14500; t <= 16000; t += 500)
+    health.sample(CaptureFrameContent::Content, CaptureFrameContent::Content, t);
+  assert(health.hookRejected());
+  health.sample(CaptureFrameContent::Content, CaptureFrameContent::Content, 16500);
+  assert(!health.hookRejected()); // Sustained hook recovery restores preference.
+  health.sample(CaptureFrameContent::Black, CaptureFrameContent::Content, 17000);
+  health.sample(CaptureFrameContent::Black, CaptureFrameContent::Content, 30000);
+  assert(!health.hookRejected()); // Scheduling/sleep gap is not evidence.
+  health = {};
+  for (uint64_t t = 500; t <= 10000; t += 500)
+    health.sample(CaptureFrameContent::Black, CaptureFrameContent::Unknown, t);
+  assert(!health.hookRejected()); // Never promote an unverified black fallback.
+
   // A full five-minute 60 fps replay retains every distinct decode timestamp,
   // negative preroll, B-frame ordering, and genuine missing-frame gaps.
   for (int64_t frame = 0; frame < 18000; ++frame) {

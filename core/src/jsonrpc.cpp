@@ -14,6 +14,7 @@ Rpc::Rpc(App& app, Config& config, Events& events, SourceManager& sources, Encod
 
 nlohmann::json Rpc::buildState() const
 {
+  std::lock_guard<std::recursive_mutex> lock(dispatchMutex_);
   int secs = 0;
   double mb = 0;
   ring_.getStats(secs, mb);
@@ -53,6 +54,7 @@ nlohmann::json Rpc::buildState() const
 
 std::string Rpc::handle(const std::string& requestText)
 {
+  std::lock_guard<std::recursive_mutex> lock(dispatchMutex_);
   nlohmann::json req;
   try {
     req = nlohmann::json::parse(requestText);
@@ -253,13 +255,20 @@ void Rpc::restartVideoPipeline()
   // Resolution/fps/monitor changes need obs_reset_video, which requires every
   // output and source stopped and released. Stop the watchdog first so its
   // activity callback cannot restart the ring during the reset.
-  const bool wasRecording = recorder_.active();
+  const auto captureSize = sources_.subject().kind == SourceManager::Subject::Kind::Window
+      ? sources_.captureSize() : CaptureSize{};
   sources_.stopWatchdog();
-  recorder_.stopAndWait();
+  auto recordingLock = recorder_.lockLifecycle();
+  const bool wasRecording = recorder_.active();
+  if (!recorder_.prepareVideoReset()) {
+    sources_.startWatchdog();
+    events_.emit("error", {{"code", "CAPTURE_INIT_FAILED"}, {"message", "Recording did not stop in time to resize video"}});
+    return;
+  }
   ring_.stop();
   sources_.releaseAll();
 
-  if (!app_.resetVideo()) {
+  if (!app_.resetVideo(captureSize.width, captureSize.height)) {
     events_.emit("error", {{"code", "CAPTURE_INIT_FAILED"}, {"message", app_.lastError()}});
     return;
   }
@@ -272,6 +281,37 @@ void Rpc::restartVideoPipeline()
   if (wasRecording && ringStarted)
     recorder_.start();
   sources_.startWatchdog();
+}
+
+void Rpc::updateCaptureGeometry()
+{
+  std::lock_guard<std::recursive_mutex> lock(dispatchMutex_);
+  if (shutdownRequested()) return;
+  const auto size = sources_.captureSize();
+  if (!captureSizeStability_.ready(size, duration_ms_now()) ||
+      (size.width == app_.baseWidth() && size.height == app_.baseHeight())) return;
+
+  sources_.stopWatchdog();
+  auto recordingLock = recorder_.lockLifecycle();
+  const bool wasRecording = recorder_.active();
+  if (!recorder_.prepareVideoReset()) {
+    sources_.startWatchdog();
+    captureSizeStability_.reset();
+    events_.emit("error", {{"code", "CAPTURE_INIT_FAILED"}, {"message", "Recording did not stop in time to resize capture"}});
+    return;
+  }
+  ring_.stop();
+  // OBS retains its graphics device and live sources when resetting video.
+  // Do not reinject a working hook just to change the encoded dimensions.
+  const bool resized = sources_.resizeCanvas(size);
+  if (!resized)
+    events_.emit("error", {{"code", "CAPTURE_INIT_FAILED"}, {"message", app_.lastError()}});
+  const bool started = ring_.start();
+  if (wasRecording && started) recorder_.start();
+  sources_.startWatchdog();
+  captureSizeStability_.reset();
+  std::fprintf(stderr, "capture: canvas %ux%u, resized=%s; replay buffer restarted%s\n",
+               size.width, size.height, resized ? "true" : "false", wasRecording ? ", recording continued in new file" : "");
 }
 
 nlohmann::json Rpc::methodRecordingStart()

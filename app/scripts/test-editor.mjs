@@ -23,9 +23,15 @@ import {
   undoHistory,
 } from "../src/renderer/editor/model.ts";
 import { buildExportGraph, resolveExportAudioTracks, validateExportSegments } from "../src/main/export-graph.ts";
-import { buildVideoEncoderArgs } from "../src/main/export-video.ts";
+import { buildVideoEncoderArgs, pickExportResolution } from "../src/main/export-video.ts";
 import { statSync } from "node:fs";
 import "./test-playback-diagnostics.mjs";
+
+assert.deepEqual(pickExportResolution("720p", {w:3440,h:1440}), {w:1720,h:720});
+assert.deepEqual(pickExportResolution("1080p", {w:2560,h:1600}), {w:1728,h:1080});
+assert.deepEqual(pickExportResolution("720p", {w:1280,h:960}), {w:960,h:720});
+assert.deepEqual(pickExportResolution("source", {w:1366,h:768}), {w:1366,h:768});
+assert.deepEqual(pickExportResolution("1080p", {w:800,h:600}), {w:800,h:600});
 
 const audioTracks = [
   { streamIndex: 1, audioIndex: 0, codec: "aac", name: "Game", kind: "output", channels: 2, sampleRate: 48000 },
@@ -144,6 +150,23 @@ const twentyInput = path.join(tempDir, "Source with twenty audio streams.mp4");
 const twentyOutput = path.join(tempDir, "Edited twenty audio streams.mp4");
 
 try {
+  for (const [w, h] of [[320, 240], [320, 200], [344, 144]]) {
+    const nativeOutput = path.join(tempDir, `aspect-${w}-${h}.mp4`);
+    const fitted = pickExportResolution(`${h / 2}p`, {w, h});
+    const nativeGraph = buildExportGraph([{start:0,end:1}], [], fitted.w, fitted.h);
+    assert(!nativeGraph.filter.includes("pad="));
+    run(ffmpeg, ["-y", "-f", "lavfi", "-i", `color=c=white:size=${w}x${h}:rate=60:duration=1`,
+      "-filter_complex", nativeGraph.filter, ...nativeGraph.maps,
+      ...buildVideoEncoderArgs("libx264", 500, 60), nativeOutput]);
+    const video = probe(ffprobe, nativeOutput).streams[0];
+    assert.equal(video.width, fitted.w);
+    assert.equal(video.height, fitted.h);
+    assert.equal(video.avg_frame_rate, "60/1");
+    const frame = spawnSync(ffmpeg, ["-v", "error", "-i", nativeOutput, "-frames:v", "1",
+      "-pix_fmt", "gray", "-f", "rawvideo", "-"], {maxBuffer:1024*1024});
+    assert.equal(frame.status, 0);
+    assert(frame.stdout.every(value => value > 220), "nonstandard export has no black padding");
+  }
   // Real 60 fps cuts must remain CFR across non-frame-aligned boundaries.
   // A generous size limit must not inflate a simple short clip toward 20 MB.
   const sixtyInput = path.join(tempDir, "60 fps source.mp4");

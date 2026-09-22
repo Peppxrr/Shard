@@ -40,6 +40,32 @@ diagnostics for relevant problems. Passing capture E2E replaces the separate
 selftest plus manual ffprobe/black-frame check. Keep a nonblack desktop visible
 for capture tests; they take roughly 80 seconds and need a working Windows GPU.
 
+For black-hook fallback changes, an isolated GPU fixture exercises the real
+source manager with synthetic black/colored capture surfaces (no injection):
+
+```powershell
+cmake --build build_x64 --config Debug --target shard_capture_backend_fixture --parallel
+$env:PATH = "$PWD\app\resources\core-bin-dev;$env:PATH"
+build_x64\Debug\shard_capture_backend_fixture.exe "$PWD/app/resources/core-bin-dev"
+```
+
+It checks loading-screen tolerance, visible WGC takeover, recreation of a
+black hook, and return to recovered hook output. The existing
+`scripts/game-capture-test.mjs` separately verifies real signed-hook capture,
+including minimized games. Neither fixture establishes compatibility with a
+specific protected game on another machine.
+
+The D3D11 fixture also accepts `WM_APP + 1` with width/height in its message
+parameters to replace its window and swapchain without changing PID/title/class.
+To check native aspect ratios and launch/replacement recovery, build
+`shard_gc_d3d11_fixture`, point `CF_COREBIN` and `CF_GC_FIXTURE` at the matching
+Debug paths, then run `node scripts/game-capture-test.mjs` with
+`CF_GC_GEOMETRY=1` and `CF_GC_STATES=focused,four-three,laptop,ultrawide,minimized`.
+`CF_GC_RECORDING=1` additionally checks that resolution changes finalize and
+continue decodable recording segments. `CF_GC_IGNORE_EXES` is an optional
+comma-separated exclusion list for games already running during the test; it
+affects only the fixture's temporary profile.
+
 The release workflow calls the same `release` scope. Do not also perform a full
 local release run when CI has verified the same changes. Hosted CI does not
 test interactive capture, so use the capture scope when capture behavior changed.

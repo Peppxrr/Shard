@@ -46,12 +46,12 @@ export function VideoSettingsPanel({ video, encoders, monitor, onChange }: {
         </button>)}
       </div>
       {!custom && <p className="field__hint video-settings__note">
-        {video.preset === "low" ? "Caps the capture at 720p and 30 FPS to keep files small."
-          : "Keeps your display’s native resolution. Choose a frame rate below."}
+        {video.preset === "low" ? "Fits within 1280 × 720 without stretching, at up to 30 FPS."
+          : "Keeps the captured app or display at its native size. Choose a frame rate below."}
       </p>}
       {custom && <div className="video-custom">
         <div className="video-setting">
-          <div className="video-setting__copy"><h3>Resolution</h3><p>Width × height in pixels.</p></div>
+          <div className="video-setting__copy"><h3>Maximum resolution</h3><p>Fits within these dimensions while keeping the source’s aspect ratio.</p></div>
           <div className="video-dimensions">
             <NumberControl label="Video width" value={video.width} min={320} max={8192} step={2} onChange={(width) => patch({ width })} />
             <span className="dim" aria-hidden="true">×</span>

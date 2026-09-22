@@ -32,6 +32,7 @@ Use `[data-shard-component="<value>"]` with these values:
 | `toggle` | `data-checked="true|false"`; nested checkbox carries disabled state |
 | `select` | Button with `aria-expanded="true|false"`, native disabled state |
 | `select-menu` | Dropdown listbox; options use `aria-selected` |
+| `context-menu` | Player/editor context menu |
 | `modal` | Dialog overlay |
 | `toast` | `data-shard-state="info|ok|error"` |
 | `empty` | Empty-state content |
@@ -47,6 +48,10 @@ Use `[data-shard-component="<value>"]` with these values:
 | `audio-track` | `data-selected`, `data-muted`, `data-included`, each `"true"` or `"false"` |
 
 Some specialized buttons use a specific component value such as `capture-button` in place of `button`; `.btn` continues to match every shared button. Use native/ARIA state selectors for hover, focus, selection, and disabled controls rather than inferring those states from colors.
+
+Dropdowns and context menus use native popovers in Chromium's top layer. Their DOM ancestry and inherited variables are preserved, so page-scoped selectors still apply. Ancestor `backdrop-filter`, `filter`, transforms, and overflow clipping do not change their viewport placement. Style their surfaces, fonts, borders, and options; leave positioning and popover visibility to Shard. They close when their surrounding page scrolls or the window resizes; scrolling inside the menu keeps it open.
+
+`theme-picker` is the layout wrapper around several cards, including the gaps between them. To decorate individual panels without a rectangular background showing behind rounded corners, scope a background to `[data-shard-component="theme-picker"] [data-shard-component="card"]`. Navigation containers likewise have their own surface: if a theme gives one a background or border, also give that container a radius. The radius of a child button does not round its parent.
 
 ## Slots
 

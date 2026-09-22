@@ -7,6 +7,7 @@
 #include <obs.h>
 
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,9 @@ public:
   // Stop and block until the muxer fully finalizes (needed before
   // obs_reset_video / obs_shutdown). Timeout-bounded.
   void stopAndWait(int timeoutMs = 10000);
+  // Hold across video-mix changes to serialize the auto-record thread with RPC.
+  std::unique_lock<std::recursive_mutex> lockLifecycle() { return std::unique_lock(lifecycleMutex_); }
+  bool prepareVideoReset();
   bool active() const { return active_.load(); }
 
   // Path of the in-progress mkv (empty when inactive).
@@ -48,6 +52,7 @@ private:
   obs_encoder_t* videoEncoder_ = nullptr;
   std::vector<obs_encoder_t*> audioEncoders_; // one ffmpeg_aac per audio track
   std::atomic<bool> active_{false};
+  std::recursive_mutex lifecycleMutex_;
   std::string currentPath_;
 };
 

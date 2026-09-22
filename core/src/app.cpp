@@ -193,7 +193,7 @@ std::vector<MonitorInfo> App::monitors() const
   return result;
 }
 
-bool App::resetVideo()
+bool App::resetVideo(uint32_t captureWidth, uint32_t captureHeight)
 {
   struct obs_video_info ovi = {};
   ovi.graphics_module = "libobs-d3d11";
@@ -208,7 +208,10 @@ bool App::resetVideo()
   if (selected == displays.end())
     selected = std::find_if(displays.begin(), displays.end(),
                             [](const MonitorInfo& display) { return display.primary; });
-  if (selected != displays.end()) {
+  if (captureWidth && captureHeight) {
+    baseWidth_ = captureWidth;
+    baseHeight_ = captureHeight;
+  } else if (selected != displays.end()) {
     baseWidth_ = selected->width ? selected->width : 1920;
     baseHeight_ = selected->height ? selected->height : 1080;
   }

@@ -33,6 +33,11 @@ const states = (process.env.CF_GC_STATES ?? "focused,unfocused,covered,minimized
   .filter(Boolean);
 const expectedBlockStage = process.env.CF_GC_EXPECT_BLOCK_STAGE;
 const diagnosticsOnly = Boolean(expectedBlockStage);
+const geometryTest = process.env.CF_GC_GEOMETRY === "1";
+const geometryCases = { "four-three": [960, 720], laptop: [1280, 800], ultrawide: [1720, 720] };
+let expectedSize = [Number(process.env.SHARD_GC_FIXTURE_WIDTH || 960), Number(process.env.SHARD_GC_FIXTURE_HEIGHT || 540)];
+const recordingTest = process.env.CF_GC_RECORDING === "1";
+const recordingPaths = new Set();
 const coreExe = path.join(coreBin, "shardcore.exe");
 const ffmpegExe = path.join(coreBin, "ffmpeg.exe");
 const privateHookDir = path.join(coreBin, "data/obs-plugins/win-capture");
@@ -68,7 +73,7 @@ fs.writeFileSync(
     user: [{ id: `u:${fixtureName.toLowerCase()}`, name: fixtureName, executables: [fixtureExeName] }],
     discovered: [],
     customFolders: [],
-    ignoredExes: [],
+    ignoredExes: (process.env.CF_GC_IGNORE_EXES || "").split(",").filter(Boolean),
     verboseDetection: true,
   }),
 );
@@ -175,6 +180,7 @@ public static class GcWindow {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect rect);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int left, top, right, bottom; }
 }
 "@
@@ -185,7 +191,7 @@ if ($h -eq [IntPtr]::Zero) { throw 'fixture has no main window' }
 $cover = Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq 'Shard GC Cover' } | Select-Object -First 1
 if ('${state}' -eq 'focused') {
   [GcWindow]::ShowWindow($h, 9) | Out-Null
-  [GcWindow]::SetWindowPos($h, [IntPtr]::Zero, 100, 100, 960, 540, 0x0040) | Out-Null
+  [GcWindow]::SetWindowPos($h, [IntPtr]::Zero, 100, 100, 0, 0, 0x0041) | Out-Null
   [GcWindow]::SetForegroundWindow($h) | Out-Null
 } elseif ('${state}' -eq 'unfocused') {
   [GcWindow]::ShowWindow($h, 9) | Out-Null
@@ -204,6 +210,8 @@ if ('${state}' -eq 'focused') {
   [GcWindow]::SetForegroundWindow($ch) | Out-Null
 } elseif ('${state}' -eq 'minimized') {
   [GcWindow]::ShowWindow($h, 6) | Out-Null
+} elseif (${geometryCases[state] ? "$true" : "$false"}) {
+  [GcWindow]::PostMessage($h, 0x8001, [IntPtr](${geometryCases[state]?.[0] ?? 0}), [IntPtr](${geometryCases[state]?.[1] ?? 0})) | Out-Null
 }
 $target.Refresh()
 "hwnd=$h minimized=$($target.MainWindowHandle -eq [IntPtr]::Zero -or '${state}' -eq 'minimized')"
@@ -229,6 +237,17 @@ async function cleanup() {
     if (ws?.readyState === WebSocket.OPEN) await call("shutdown");
   } catch {}
   try { ws?.close(); } catch {}
+  if (recordingTest && core) {
+    const exit = core.exitCode ?? await new Promise(resolve => {
+      const timer = setTimeout(() => resolve("timeout"), 15_000);
+      core.once("exit", code => { clearTimeout(timer); resolve(code); });
+    });
+    if (exit !== 0) {
+      for (const child of [cover, fixture, core]) { try { child?.kill(); } catch {} }
+      throw new Error(`core did not shut down cleanly after recording: ${exit}`);
+    }
+    log("core shutdown exit 0");
+  }
   for (const child of [cover, fixture, core]) {
     try { child?.kill(); } catch {}
   }
@@ -291,6 +310,7 @@ try {
   ws.addEventListener("message", (event) => {
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
+    if (message.method === "recording.state" && message.params?.path) recordingPaths.add(message.params.path);
     if (message.id !== undefined) {
       const request = pending.get(message.id);
       if (!request) return;
@@ -349,7 +369,9 @@ try {
     }
   }
   const rows = [];
+  if (recordingTest) await call("recording.start");
   for (const state of states) {
+    const phaseStart = coreErr.length;
     if (state === "unfocused") {
       cover = spawn(
         "powershell",
@@ -360,6 +382,22 @@ try {
     }
     const stateDetail = setTargetState(state);
     log(`${state}: ${stateDetail}`);
+    if (geometryTest) {
+      const replacement = geometryCases[state];
+      if (replacement) expectedSize = replacement;
+      const [width, height] = expectedSize;
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        const logs = coreErr.slice(replacement ? phaseStart : 0);
+        if (logs.includes(`canvas ${width}x${height}, resized=true`) &&
+            (!replacement || logs.includes("game window replaced"))) break;
+        await delay(200);
+      }
+      const logs = coreErr.slice(replacement ? phaseStart : 0);
+      if (!logs.includes(`canvas ${width}x${height}, resized=true`))
+        throw new Error(`capture never reached native ${width}x${height}\n${logs}`);
+      await delay(4500); // Refill after the stream-size boundary before saving.
+    }
     await delay(diagnosticsOnly ? 5000 : 4000);
     if (diagnosticsOnly) {
       rows.push({ state });
@@ -367,12 +405,46 @@ try {
     }
     const saved = await saveClip();
     const freshness = uniqueFrameHashes(saved.path);
+    if (geometryTest) {
+      const probe = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-of", "json", saved.path], {encoding:"utf8"});
+      const stream = JSON.parse(probe.stdout).streams[0];
+      if (stream.width !== expectedSize[0] || stream.height !== expectedSize[1])
+        throw new Error(`wrong native size: ${JSON.stringify(stream)} expected ${expectedSize}`);
+      const frame = spawnSync(ffmpegExe, ["-v", "error", "-ss", "1", "-i", saved.path,
+        "-vf", "scale=64:48", "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"], {maxBuffer:1024*1024});
+      if (frame.status !== 0 || frame.stdout.length !== 64*48*3) throw new Error("edge check decode failed");
+      const center = (24*64+32)*3;
+      for (const pixel of [0, 63, 47*64, 48*64-1])
+        for (let channel=0;channel<3;channel++)
+          if (Math.abs(frame.stdout[pixel*3+channel]-frame.stdout[center+channel])>15)
+            throw new Error(`added border at ${state} corner ${pixel}`);
+      log(`native ${stream.width}x${stream.height}, no added edge bars`);
+    }
     const fresh = freshness.decodedFrames >= 10 && freshness.uniqueFrames >= 5;
     rows.push({ state, path: saved.path, ...freshness, fresh });
     if (!fresh) throw new Error(`${state} capture froze: ${JSON.stringify(freshness)}`);
   }
 
   await delay(500);
+  if (recordingTest) {
+    const stopped = waitEvent("recording.state", 15_000, params => !params.active);
+    await call("recording.stop");
+    await stopped;
+    const sizes = [];
+    for (const recording of recordingPaths) {
+      const info = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-of", "json", recording], {encoding:"utf8"});
+      if (info.status !== 0) throw new Error(`recording probe failed: ${info.stderr}`);
+      const stream = JSON.parse(info.stdout).streams[0];
+      sizes.push(`${stream.width}x${stream.height}`);
+      const decoded = spawnSync(ffmpegExe, ["-v", "error", "-i", recording, "-map", "0:v:0", "-f", "null", "-"], {encoding:"utf8"});
+      if (decoded.status !== 0 || decoded.stderr.trim()) throw new Error(`recording decode failed: ${decoded.stderr}`);
+    }
+    if (recordingPaths.size < 2 || !sizes.includes(expectedSize.join("x")))
+      throw new Error(`recording did not continue at new size: ${sizes}`);
+    log(`recording segments finalized and decode cleanly: ${sizes.join(", ")}`);
+  }
   const diagnostics = coreErr.split(/\r?\n/).filter((line) => line.includes("[GC]"));
   if (!diagnosticsOnly && states.includes("minimized") &&
       !diagnostics.some((line) => line.includes("stage=WindowLayer minimized=true wgc_visible=false"))) {

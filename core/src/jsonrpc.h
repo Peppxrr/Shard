@@ -29,6 +29,7 @@ public:
 
   bool shutdownRequested() const { return shutdownRequested_.load(); }
   void markShutdown() { shutdownRequested_.store(true); }
+  void updateCaptureGeometry();
 
 private:
   nlohmann::json dispatch(const nlohmann::json& req);
@@ -52,6 +53,8 @@ private:
   GameSystem& games_;
 
   std::atomic<bool> shutdownRequested_{false};
+  mutable std::recursive_mutex dispatchMutex_;
+  CaptureSizeStability captureSizeStability_;
 };
 
 } // namespace shard

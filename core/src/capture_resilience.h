@@ -5,6 +5,62 @@
 
 namespace shard {
 
+enum class CaptureFrameContent { Unknown, Black, Content };
+
+// Inspect only the interior: WGC's title bar and a small cursor must not turn
+// an otherwise black surface into evidence of a working game image.
+inline CaptureFrameContent captureFrameContent(const uint8_t* rgba, uint32_t width,
+                                               uint32_t height, uint32_t stride) noexcept
+{
+  if (!rgba || width < 16 || height < 16 || stride < width * 4)
+    return CaptureFrameContent::Unknown;
+  uint32_t pixels = 0, lit = 0, bright = 0;
+  for (uint32_t y = height / 5; y < height - height / 5; ++y) {
+    for (uint32_t x = width / 5; x < width - width / 5; ++x) {
+      const auto* p = rgba + y * stride + x * 4;
+      ++pixels;
+      if (p[3] > 16) {
+        if (p[0] > 12 || p[1] > 12 || p[2] > 12) ++lit;
+        if (p[0] > 24 || p[1] > 24 || p[2] > 24) ++bright;
+      }
+    }
+  }
+  if (lit * 100 <= pixels) return CaptureFrameContent::Black;
+  if (bright * 20 >= pixels) return CaptureFrameContent::Content;
+  return CaptureFrameContent::Unknown;
+}
+
+// Fed fresh paired samples at 2 Hz. Require three seconds of disagreement,
+// then two seconds of recovered hook images before returning to the hook.
+// Both-black loading screens and unavailable/minimized WGC are inconclusive.
+class CaptureBackendHealth {
+public:
+  void sample(CaptureFrameContent hook, CaptureFrameContent wgc, uint64_t nowMs) noexcept
+  {
+    if (lastSampleMs_ && nowMs - lastSampleMs_ > 1500)
+      badSince_ = goodSince_ = 0;
+    lastSampleMs_ = nowMs;
+    if (hook == CaptureFrameContent::Black && wgc == CaptureFrameContent::Content) {
+      if (!badSince_) badSince_ = nowMs;
+      goodSince_ = 0;
+      if (nowMs - badSince_ >= 3000) rejected_ = true;
+    } else {
+      badSince_ = 0;
+      if (hook == CaptureFrameContent::Content) {
+        if (!goodSince_) goodSince_ = nowMs;
+        if (nowMs - goodSince_ >= 2000) rejected_ = false;
+      } else {
+        goodSince_ = 0;
+      }
+    }
+  }
+  bool hookRejected() const noexcept { return rejected_; }
+
+private:
+  uint64_t lastSampleMs_ = 0, badSince_ = 0, goodSince_ = 0;
+  bool rejected_ = false;
+};
+
 struct ClientAreaCrop {
   uint32_t left = 0;
   uint32_t top = 0;

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.6
+
+- Added automatic window-capture fallback when the game hook produces black video. Shard keeps retrying the hook and switches back once usable frames return.
+- Improved capture recovery when games replace their window during startup, including games launched while Shard is already running.
+- Capture and exports now preserve the app's aspect ratio, including 4:3, laptop, and ultrawide resolutions, without adding black bars. Custom capture dimensions act as maximum bounds.
+- Resolution changes restart replay history and continue active recordings in a new file.
+- The editor and clip viewer now remember their playback volume and mute settings separately.
+- Fixed dropdowns and context menus being misplaced or clipped by custom themes.
+- Improved capture cleanup during recovery and shutdown.
+
 ## 0.1.5
 
 - Added a more powerful CSS theme API with stable page, component, and state hooks, plus styling controls for the editor, timeline, waveforms, icons, and overlays.

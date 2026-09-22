@@ -298,15 +298,17 @@ int main(int argc, char** argv)
   games.start();
 
   // Run until the app asks for shutdown.
-  while (!rpc.shutdownRequested())
+  while (!rpc.shutdownRequested()) {
+    rpc.updateCaptureGeometry();
     std::this_thread::sleep_for(milliseconds(100));
+  }
 
   // Ordered shutdown.
   std::fprintf(stderr, "shardcore: shutdown requested\n");
   games.stop();
   statsRun.store(false);
   statsThread.join();
-  recorder.stopAndWait();
+  recorder.prepareVideoReset();
   // Stop the watchdog before the ring so its capture-activity callback can
   // never touch the ring during teardown.
   sources.stopWatchdog();

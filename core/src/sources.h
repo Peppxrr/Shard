@@ -2,6 +2,8 @@
 
 #include "app.h"
 #include "config.h"
+#include "capture_resilience.h"
+#include "capture_geometry.h"
 
 #include <obs.h>
 
@@ -22,10 +24,9 @@ inline uint64_t duration_ms_now()
 }
 
 // Manages the capture subject — WGC monitor_capture for the desktop and a
-// layered WGC window_capture + injected game_capture pair for games. WGC is
-// the visible-window path; game capture remains available underneath it when
-// the game is minimized. Also owns configured audio sources and WASAPI device
-// enumeration.
+// layered WGC window_capture + injected game_capture pair for games. The hook
+// is preferred while healthy; WGC is promoted when the hook fails. Also owns
+// configured audio sources and WASAPI device enumeration.
 //
 // Subject model: while a game window is the subject, capture follows that
 // game until its process exits, even if another window takes focus. When a
@@ -87,6 +88,10 @@ public:
 
   // Drop every scene item + source (used before obs_shutdown / full restart).
   void releaseAll();
+  CaptureSize captureSize() const;
+  // Outputs/watchdog stopped by the caller. Keep live capture sessions intact
+  // while replacing only the OBS video mix and fitting its scene transforms.
+  bool resizeCanvas(CaptureSize size);
 
   // Current capture subject (RPC thread reads this for state.get).
   Subject subject() const
@@ -113,6 +118,12 @@ private:
   // win-capture sets error_acquiring=true on validation failures and then
   // stops its internal retry until the next settings update.
   void retryGameCaptureLocked();
+  void createGameCaptureLocked();
+  void createWindowCaptureLocked();
+  void refreshTargetWindowLocked();
+  void recreateGameCaptureLocked();
+  static void sampleCaptureFrames(void* data, uint32_t width, uint32_t height);
+  void resetFrameProbeLocked();
   void emitSubjectChanged();
   void removeVideoSourceItem();
 
@@ -134,8 +145,8 @@ private:
 
   Subject subject_; // what is currently captured/shown
 
-  // Hook-primary health + retry state. WGC is only promoted after the hook
-  // has been given several injection attempts.
+  // Hook-primary health + retry state. Verified black hook output can promote
+  // WGC even when OBS still reports nonzero hook texture dimensions.
   std::chrono::steady_clock::time_point captureHealthyAt_{};
   std::chrono::steady_clock::time_point lastWindowRetry_{};
   std::chrono::steady_clock::time_point lastHookRetry_{};
@@ -143,8 +154,17 @@ private:
   int wgcRetryCount_ = 0;
   bool windowNoFramesReported_ = false;
   bool windowSuppressedForMinimize_ = false;
-  // Which backend is currently exposed (for visibility toggling). Not persisted.
+  // Which backend is currently exposed (scene layer order). Not persisted.
   enum class ActiveBackend { None, Hook, Wgc } activeBackend_ = ActiveBackend::None;
+  // All probe access is under sourceMutex_. GPU objects are used only with
+  // the graphics context held; render callback takes the mutex with try_lock.
+  CaptureBackendHealth backendHealth_;
+  gs_texrender_t* probeRender_ = nullptr;
+  gs_stagesurf_t* probeHook_ = nullptr;
+  gs_stagesurf_t* probeWindow_ = nullptr;
+  bool probePending_ = false;
+  uint64_t lastProbeMs_ = 0;
+  uintptr_t targetWindow_ = 0;
   std::function<void(bool)> captureActivityCb_;
 
   std::vector<obs_source_t*> audioSources_;

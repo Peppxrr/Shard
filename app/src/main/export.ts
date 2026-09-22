@@ -6,7 +6,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import type { ClipRecord, EditorExportProject, ExportProgress, ExportResult, ExportSettings } from "../shared/contracts";
 import { ffmpegBin, ffprobeAsync, listExportEncoders, probeAudioTracks } from "./ffmpeg";
-import { buildVideoEncoderArgs } from "./export-video";
+import { buildVideoEncoderArgs, pickExportResolution as pickResolution } from "./export-video";
 import { editorDir } from "./library";
 import {
   buildExportAudioOutputs,
@@ -333,21 +333,6 @@ async function cleanupPassLogs(passLog: string): Promise<void> {
     `${passLog}.log`,
     `${passLog}.cutree`,
   ].map((file) => fs.unlink(file).catch(() => {})));
-}
-
-function pickResolution(mode: string, source: { w: number; h: number }): { w: number; h: number } {
-  let target = source;
-  if (mode !== "source") {
-    const match = mode.match(/^(\d+)p$/);
-    if (match) {
-      const h = Number(match[1]);
-      target = { w: Math.round((h * 16) / 9), h };
-    }
-  }
-  const scale = Math.min(1, target.w / source.w, target.h / source.h);
-  const width = Math.max(2, Math.round(source.w * scale));
-  const height = Math.max(2, Math.round(source.h * scale));
-  return { w: width % 2 ? width - 1 : width, h: height % 2 ? height - 1 : height };
 }
 
 function dropRes(width: number, height: number): { w: number; h: number } {
