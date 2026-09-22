@@ -65,13 +65,10 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
     if (button) observer.observe(button);
 
     // A constrained popover can change intrinsic content size without giving
-    // ResizeObserver a useful intermediate box. Watch its actual contents too
-    // and re-anchor after Chromium has committed the DOM mutation.
-    let mutationFrame = 0;
-    const mutations = new MutationObserver(() => {
-      cancelAnimationFrame(mutationFrame);
-      mutationFrame = requestAnimationFrame(position);
-    });
+    // ResizeObserver a useful intermediate box. MutationObserver runs after
+    // the DOM change is committed, so a synchronous layout read can re-anchor
+    // immediately without depending on animation frames in hidden windows.
+    const mutations = new MutationObserver(position);
     mutations.observe(menu, { childList: true, subtree: true, characterData: true });
 
     window.addEventListener("blur", close);
@@ -82,7 +79,6 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
       positionRef.current = null;
       observer.disconnect();
       mutations.disconnect();
-      cancelAnimationFrame(mutationFrame);
       window.removeEventListener("blur", close);
       window.removeEventListener("resize", close);
       window.removeEventListener("scroll", scroll, true);
@@ -92,14 +88,9 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
     };
   }, [anchor, x, y]);
 
-  // Content can grow while the old max-height keeps its observed border box
-  // unchanged. Measure immediately, then once more on the next frame so the
-  // top-layer box has committed its new intrinsic size before we anchor it.
-  useLayoutEffect(() => {
-    positionRef.current?.();
-    const frame = requestAnimationFrame(() => positionRef.current?.());
-    return () => cancelAnimationFrame(frame);
-  }, [children]);
+  // React commits child changes before layout effects run. Measuring here
+  // forces current layout synchronously and avoids frame scheduling entirely.
+  useLayoutEffect(() => { positionRef.current?.(); }, [children]);
 
   return <div ref={ref} id={id} popover="auto" role={role} aria-label={ariaLabel}
     data-shard-component={role === "listbox" ? "select-menu" : "context-menu"}
