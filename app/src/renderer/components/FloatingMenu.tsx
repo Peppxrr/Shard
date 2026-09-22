@@ -63,6 +63,17 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
     const observer = new ResizeObserver(position);
     observer.observe(menu);
     if (button) observer.observe(button);
+
+    // A constrained popover can change intrinsic content size without giving
+    // ResizeObserver a useful intermediate box. Watch its actual contents too
+    // and re-anchor after Chromium has committed the DOM mutation.
+    let mutationFrame = 0;
+    const mutations = new MutationObserver(() => {
+      cancelAnimationFrame(mutationFrame);
+      mutationFrame = requestAnimationFrame(position);
+    });
+    mutations.observe(menu, { childList: true, subtree: true, characterData: true });
+
     window.addEventListener("blur", close);
     window.addEventListener("resize", close);
     window.addEventListener("scroll", scroll, true);
@@ -70,6 +81,8 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
     return () => {
       positionRef.current = null;
       observer.disconnect();
+      mutations.disconnect();
+      cancelAnimationFrame(mutationFrame);
       window.removeEventListener("blur", close);
       window.removeEventListener("resize", close);
       window.removeEventListener("scroll", scroll, true);

@@ -28,16 +28,6 @@ const ps = (id, script, ...args) => add(id, "powershell.exe", ["-NoProfile", "-N
 
 if (release) {
   node("release-version", "app/scripts/release.mjs", "validate");
-  if (!["ffmpeg.exe", "ffprobe.exe"].every(file => existsSync(path.join(root, "vendor/ffmpeg/bin", file))) ||
-      !existsSync(path.join(root, "vendor/ffmpeg/pins.json")) ||
-      JSON.stringify(JSON.parse(readFileSync(path.join(root, "vendor/ffmpeg/pins.json"), "utf8"))) !== JSON.stringify(JSON.parse(readFileSync(path.join(root, "runtime-dependencies.json"), "utf8")).ffmpeg))
-    ps("fetch-ffmpeg", "scripts/fetch-ffmpeg.ps1");
-}
-if (release || scopes.some(scope => scope === "core" || scope === "capture")) {
-  ps("core-build", "scripts/build.ps1", "-Config", config);
-  add("core-test-build", "cmake", ["--build", "build_x64", "--config", config, "--target", "shard_tests", "shard_capture_resilience_tests", "--parallel"]);
-  add("detection-tests", path.join(root, "build_x64", config, "shard_tests.exe"), []);
-  add("capture-unit-tests", path.join(root, "build_x64", config, "shard_capture_resilience_tests.exe"), []);
 }
 // package already builds the app: never run the same build twice in a release.
 if (!release && scopes.some(scope => ["app", "editor", "updater", "themes"].includes(scope))) npm("app-build", "build");
@@ -47,6 +37,21 @@ if (release || scopes.includes("editor")) {
 }
 if (release || scopes.includes("updater")) npm("updater-tests", "test:updater");
 if (release || scopes.includes("themes")) npm("theme-tests", "test:themes");
+
+// Run cheap app/UI checks before the native OBS build on releases. A renderer
+// regression should fail fast instead of spending several minutes in MSBuild.
+if (release &&
+    (!["ffmpeg.exe", "ffprobe.exe"].every(file => existsSync(path.join(root, "vendor/ffmpeg/bin", file))) ||
+     !existsSync(path.join(root, "vendor/ffmpeg/pins.json")) ||
+     JSON.stringify(JSON.parse(readFileSync(path.join(root, "vendor/ffmpeg/pins.json"), "utf8"))) !== JSON.stringify(JSON.parse(readFileSync(path.join(root, "runtime-dependencies.json"), "utf8")).ffmpeg))) {
+  ps("fetch-ffmpeg", "scripts/fetch-ffmpeg.ps1");
+}
+if (release || scopes.some(scope => scope === "core" || scope === "capture")) {
+  ps("core-build", "scripts/build.ps1", "-Config", config);
+  add("core-test-build", "cmake", ["--build", "build_x64", "--config", config, "--target", "shard_tests", "shard_capture_resilience_tests", "--parallel"]);
+  add("detection-tests", path.join(root, "build_x64", config, "shard_tests.exe"), []);
+  add("capture-unit-tests", path.join(root, "build_x64", config, "shard_capture_resilience_tests.exe"), []);
+}
 if (scopes.includes("capture")) {
   const bin = path.join(root, "app/resources", release ? "core-bin" : "core-bin-dev");
   ps("capture-e2e", "scripts/e2e.ps1", "-CoreBin", bin, "-KeepTemp");
