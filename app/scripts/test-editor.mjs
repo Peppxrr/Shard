@@ -24,7 +24,7 @@ import {
 } from "../src/renderer/editor/model.ts";
 import { buildExportGraph, resolveExportAudioTracks, validateExportSegments } from "../src/main/export-graph.ts";
 import { buildVideoEncoderArgs, pickExportResolution } from "../src/main/export-video.ts";
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import "./test-playback-diagnostics.mjs";
 
 assert.deepEqual(pickExportResolution("720p", {w:3440,h:1440}), {w:1720,h:720});
@@ -141,8 +141,12 @@ assert.deepEqual(graph.audioOutputs.map((output) => output.name), ["Audio Mix"])
 assert.throws(() => validateExportSegments([{ start: 4, end: 2 }], 5), /outside the source clip/);
 
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "Shard Editor Ω "));
-const ffmpeg = path.resolve("resources/core-bin/ffmpeg.exe");
-const ffprobe = path.resolve("resources/core-bin/ffprobe.exe");
+const stagedFfmpegDir = path.resolve("resources/core-bin");
+const vendorFfmpegDir = path.resolve("../vendor/ffmpeg/bin");
+const ffmpegDir = existsSync(path.join(stagedFfmpegDir, "ffmpeg.exe")) ? stagedFfmpegDir : vendorFfmpegDir;
+const ffmpeg = path.join(ffmpegDir, "ffmpeg.exe");
+const ffprobe = path.join(ffmpegDir, "ffprobe.exe");
+assert.ok(existsSync(ffmpeg) && existsSync(ffprobe), `FFmpeg test binaries not found in ${ffmpegDir}`);
 const input = path.join(tempDir, "Source clip ü with spaces.mp4");
 const multiOutput = path.join(tempDir, "Edited multi Ω.mp4");
 const singleOutput = path.join(tempDir, "Edited single ü.mp4");
