@@ -297,12 +297,25 @@ try {
   } finally { await rm(serviceDir, { recursive: true, force: true }); }
   console.log("Startup updater tests passed: startup/12h checks, deferred install, offline, timeout, damaged cache, IPC isolation");
 
+  // The shutdown fixture loads the real client's pure logging dependencies;
+  // relative requires must resolve from the source module, not this script.
+  const coreDependencies = {};
+  for (const [id, source] of Object.entries({
+    "../shared/dev-console": "../src/shared/dev-console.ts",
+    "./core-line-decoder": "../src/main/core-line-decoder.ts",
+  })) {
+    const exports = {};
+    vm.runInNewContext(require("typescript").transpileModule(readFileSync(new URL(source, import.meta.url), "utf8"), {
+      compilerOptions: { module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
+    }).outputText, { exports, require, Buffer });
+    coreDependencies[id] = exports;
+  }
   const coreExports = {}, coreTimers = [];
   vm.runInNewContext(require("typescript").transpileModule(readFileSync(new URL("../src/main/core-client.ts", import.meta.url), "utf8"), {
     compilerOptions: { module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
   }).outputText, { exports: coreExports, process, console,
     setTimeout: fn => { const timer = { fn }; coreTimers.push(timer); return timer; }, clearTimeout: timer => { if (timer) timer.cleared = true; },
-    require: id => id === "electron" ? { app: {} } : id === "./settings" ? {} : require(id),
+    require: id => id === "electron" ? { app: {} } : id === "./settings" ? {} : coreDependencies[id] ?? require(id),
   });
   const client = new coreExports.CoreClient(), child = new EventEmitter();
   child.exitCode = null; child.signalCode = null; let killed = false, finished = false;

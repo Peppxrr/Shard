@@ -12,6 +12,10 @@ interface Props {
   settings: Settings;
   onChange: (s: Settings) => void;
   onCommit: (s: Settings) => void;
+  activeSection: SettingsSection;
+  onSectionChange: (section: SettingsSection) => void;
+  updatesRequest: number;
+  onUpdatesRequestHandled: () => void;
 }
 
 const NAV = [
@@ -25,7 +29,16 @@ const NAV = [
   { id: "app", label: "App", icon: "power" },
 ] as const;
 
-type NavId = (typeof NAV)[number]["id"];
+export type SettingsSection = (typeof NAV)[number]["id"];
+type NavId = SettingsSection;
+
+export function getSavedSettingsSection(): SettingsSection {
+  try {
+    const saved = localStorage.getItem("shard:settingsTab");
+    if (saved && (NAV as readonly { id: string }[]).some((section) => section.id === saved)) return saved as SettingsSection;
+  } catch {}
+  return "appearance";
+}
 
 const SETTINGS_DESCRIPTIONS: Record<NavId, string> = {
   appearance: "Make Shard feel at home on your desktop.",
@@ -38,26 +51,25 @@ const SETTINGS_DESCRIPTIONS: Record<NavId, string> = {
   app: "Control startup, notifications, and app behavior.",
 };
 
-export function SettingsPage({ settings, onChange, onCommit }: Props) {
+export function SettingsPage({ settings, onChange, onCommit, activeSection, onSectionChange, updatesRequest, onUpdatesRequestHandled }: Props) {
   const [devices, setDevices] = useState<AudioDeviceInfo[]>([]);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [videoEncoders, setVideoEncoders] = useState<VideoEncoderInfo[]>([]);
   const [exportEncoders, setExportEncoders] = useState<ExportEncoderInfo[]>([]);
-  const [active, setActive] = useState<NavId>(() => {
-    try {
-      const saved = localStorage.getItem("shard:settingsTab");
-      if (saved && (NAV as readonly { id: string }[]).some((n) => n.id === saved)) return saved as NavId;
-    } catch {}
-    return "appearance";
-  });
+  const active = activeSection;
   const [version, setVersion] = useState("");
   const [defaultClipsFolder, setDefaultClipsFolder] = useState("");
   const pageRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     try { localStorage.setItem("shard:settingsTab", active); } catch {}
-    pageRef.current?.parentElement?.scrollTo({ top: 0 });
   }, [active]);
+
+  useEffect(() => {
+    if (!updatesRequest || active !== "app") return;
+    pageRef.current?.querySelector<HTMLElement>("#settings-updates")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    onUpdatesRequestHandled();
+  }, [updatesRequest, active, onUpdatesRequestHandled]);
 
   useEffect(() => {
     window.shard.version().then(setVersion).catch(() => {});
@@ -127,7 +139,7 @@ export function SettingsPage({ settings, onChange, onCommit }: Props) {
         <h1 className="page__title settings__title">Settings</h1>
         {NAV.map((s) => (
           <button key={s.id} type="button" className={active === s.id ? "nav__item settings__nav-item active" : "nav__item settings__nav-item"}
-            aria-current={active === s.id ? "page" : undefined} onClick={() => setActive(s.id)}>
+            aria-current={active === s.id ? "page" : undefined} onClick={() => onSectionChange(s.id)}>
             <span className="ico"><Icon name={s.icon} size={15} /></span> {s.label}
           </button>
         ))}

@@ -191,35 +191,64 @@ interface ModalProps {
   title?: ReactNode;
   sub?: ReactNode;
   size?: "sm" | "md" | "lg" | "full";
+  variant?: "clip-viewer" | "medal-import";
   children: ReactNode;
   foot?: ReactNode;
   closeOnBackdrop?: boolean;
 }
-export function Modal({ open, onClose, title, sub, size = "md", children, foot, closeOnBackdrop = true }: ModalProps) {
+export function Modal({ open, onClose, title, sub, size = "md", variant, children, foot, closeOnBackdrop = true }: ModalProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useEffect(() => {
+    if (!open || !variant) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    panelRef.current?.focus({ preventScroll: true });
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const scope = document.fullscreenElement ?? panelRef.current;
+      const controls = Array.from(scope?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]',
+      ) ?? []).filter((element) => element.getClientRects().length > 0);
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (!first) { event.preventDefault(); return; }
+      if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement as HTMLElement))) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement as HTMLElement))) {
+        event.preventDefault(); first.focus();
+      }
+    };
+    window.addEventListener("keydown", trapFocus);
+    return () => {
+      window.removeEventListener("keydown", trapFocus);
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    };
+  }, [open, variant]);
   useEffect(() => {
     if (!open || !onClose) return;
     const onKey = (e: KeyboardEvent) => {
       // Escape dismisses a menu before its containing dialog.
-      if (e.key === "Escape" && !document.querySelector(":popover-open")) onClose();
+      if (e.key === "Escape" && !document.fullscreenElement && !document.querySelector(":popover-open")) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
   if (!open) return null;
   return (
-    <div data-shard-component="modal" className={`modal modal--${size}`} onMouseDown={closeOnBackdrop && onClose ? onClose : undefined}>
-      <div className="modal__panel" onMouseDown={(e) => e.stopPropagation()}>
+    <div data-shard-component="modal" data-shard-modal={variant} className={`modal modal--${size}`} onMouseDown={closeOnBackdrop && onClose ? onClose : undefined}>
+      <div ref={panelRef} data-shard-slot="modal-panel" className="modal__panel" role="dialog" aria-modal="true"
+        aria-labelledby={title ? titleId : undefined} tabIndex={-1} onMouseDown={(e) => e.stopPropagation()}>
         {(title || onClose) && (
-          <header className="modal__head">
-            <div>
-              {title && <div className="modal__title">{title}</div>}
-              {sub && <div className="modal__sub">{sub}</div>}
+          <header data-shard-slot="modal-header" className="modal__head">
+            <div data-shard-slot="modal-heading">
+              {title && <div id={titleId} data-shard-slot="modal-title" className="modal__title">{title}</div>}
+              {sub && <div data-shard-slot="modal-subtitle" className="modal__sub">{sub}</div>}
             </div>
             {onClose && <IconButton className="x" label="Close" onClick={onClose} children={<Icon name="x" size={18} />} />}
           </header>
         )}
-        <div className="modal__body">{children}</div>
-        {foot && <footer className="modal__foot">{foot}</footer>}
+        <div data-shard-slot="modal-body" className="modal__body">{children}</div>
+        {foot && <footer data-shard-slot="modal-footer" className="modal__foot">{foot}</footer>}
       </div>
     </div>
   );

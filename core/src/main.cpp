@@ -24,12 +24,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace shard {
 
@@ -63,20 +65,36 @@ void setProcessDpiAware()
 #endif
 }
 
-void gameCaptureDiagnosticLog(int, const char* format, va_list args, void*)
+const char* obsLogLevelName(int level)
 {
-  char message[4096];
-  const int written = std::vsnprintf(message, sizeof(message), format, args);
-  if (written > 0 && std::strstr(message, "[GC]")) {
-    std::fprintf(stderr, "%s\n", message);
-    std::fflush(stderr);
+  switch (level) {
+    case LOG_ERROR: return "error";
+    case LOG_WARNING: return "warn";
+    case LOG_INFO: return "info";
+    case LOG_DEBUG: return "debug";
+    default: return "unknown";
   }
 }
 
-bool gameCaptureDiagnosticsEnabled()
+void coreObsLog(int level, const char* format, va_list args, void*)
 {
-  const char* value = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
-  return value && *value && std::strcmp(value, "0") != 0;
+  va_list measureArgs;
+  va_copy(measureArgs, args);
+  const int length = std::vsnprintf(nullptr, 0, format, measureArgs);
+  va_end(measureArgs);
+  if (length < 0) {
+    std::fprintf(stderr, "[obs][error] could not format OBS log message\n");
+    std::fflush(stderr);
+    return;
+  }
+
+  std::vector<char> message(static_cast<size_t>(length) + 1);
+  va_list formatArgs;
+  va_copy(formatArgs, args);
+  std::vsnprintf(message.data(), message.size(), format, formatArgs);
+  va_end(formatArgs);
+  std::fprintf(stderr, "[obs][%s] %s\n", obsLogLevelName(level), message.data());
+  std::fflush(stderr);
 }
 
 struct CliOptions {
@@ -210,9 +228,10 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
 int main(int argc, char** argv)
 {
   setProcessDpiAware(); // before any window/obs_startup: WGC needs DPI awareness
+  // Keep all OBS levels and arbitrarily long messages in the diagnostic log
+  // while preserving stdout's first-line PORT handshake for Electron.
+  base_set_log_handler(coreObsLog, nullptr);
   CliOptions opt = parseArgs(argc, argv);
-  if (gameCaptureDiagnosticsEnabled())
-    base_set_log_handler(gameCaptureDiagnosticLog, nullptr);
   if (opt.configDir.empty()) {
     std::fprintf(stderr, "shardcore: --config-dir is required\n");
     return 2;
@@ -243,6 +262,14 @@ int main(int argc, char** argv)
   }
 
   EncoderManager encoders(config);
+  const std::string preferredEncoder = encoders.resolveVideoEncoderId(config.video.encoder);
+  std::fprintf(stderr,
+               "[startup][info] capture_mode=%s encoder_requested=%s encoder_preferred=%s video_preset=%s"
+               " fps=%d bitrate_kbps=%d replay_max_seconds=%d replay_max_mb=%d\n",
+               config.capture.mode.c_str(), config.video.encoder.c_str(), preferredEncoder.c_str(),
+               config.video.preset.c_str(), config.video.fps, encoders.effectiveBitrateKbps(),
+               config.replay.maxSeconds, config.replay.maxMb);
+  std::fflush(stderr);
   SourceManager sources(app, config, events);
   ReplayRing ring(app, config, events, encoders);
   Recorder recorder(app, config, events, encoders);

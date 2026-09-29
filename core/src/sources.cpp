@@ -21,8 +21,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <iomanip>
 #include <iterator>
 #include <set>
+#include <sstream>
 
 namespace shard {
 
@@ -292,6 +294,10 @@ void SourceManager::applyVideoSource()
   lastHookRetry_ = now;
   hookRetryCount_ = 0;
   wgcRetryCount_ = 0;
+  lastHookAction_ = "none";
+  lastHookActionMs_ = 0;
+  lastWindowAction_ = "none";
+  lastWindowActionMs_ = 0;
   windowNoFramesReported_ = false;
   windowSuppressedForMinimize_ = false;
   activeBackend_ = ActiveBackend::None;
@@ -530,6 +536,10 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
   lastHookRetry_ = now;
   hookRetryCount_ = 0;
   wgcRetryCount_ = 0;
+  lastHookAction_ = "none";
+  lastHookActionMs_ = 0;
+  lastWindowAction_ = "none";
+  lastWindowActionMs_ = 0;
   windowNoFramesReported_ = false;
   windowSuppressedForMinimize_ = false;
   activeBackend_ = ActiveBackend::None;
@@ -569,6 +579,8 @@ void SourceManager::recreateGameCaptureLocked()
   }
   if (windowItem_) obs_sceneitem_set_order(windowItem_, OBS_ORDER_MOVE_TOP);
   activeBackend_ = windowItem_ ? ActiveBackend::Wgc : ActiveBackend::None;
+  lastHookAction_ = "recreate";
+  lastHookActionMs_ = duration_ms_now();
   std::fprintf(stderr, "capture: recreated stalled game hook for pid=%lu; keeping WGC fallback\n",
                static_cast<unsigned long>(subject_.pid));
 }
@@ -578,6 +590,10 @@ void SourceManager::resetFrameProbeLocked()
   backendHealth_ = {};
   probePending_ = false;
   lastProbeMs_ = 0;
+  lastHookContent_ = CaptureFrameContent::Unknown;
+  lastWindowContent_ = CaptureFrameContent::Unknown;
+  lastContentProbeMs_ = 0;
+  diagnosticSchedule_.reset();
   // releaseAll runs before obs_shutdown; the destructor may run afterward.
   if (!probeRender_ && !probeHook_ && !probeWindow_) return;
   obs_enter_graphics();
@@ -600,6 +616,9 @@ void SourceManager::sampleCaptureFrames(void* data, uint32_t, uint32_t)
   self.lastProbeMs_ = now;
   if (subjectWindowMinimized(self.subject_)) {
     self.probePending_ = false;
+    self.lastHookContent_ = CaptureFrameContent::Unknown;
+    self.lastWindowContent_ = CaptureFrameContent::Unknown;
+    self.lastContentProbeMs_ = now;
     self.backendHealth_.sample(CaptureFrameContent::Unknown, CaptureFrameContent::Unknown, now);
     return;
   }
@@ -619,8 +638,12 @@ void SourceManager::sampleCaptureFrames(void* data, uint32_t, uint32_t)
     gs_stagesurface_unmap(surface);
     return result;
   };
-  if (self.probePending_)
-    self.backendHealth_.sample(read(self.probeHook_), read(self.probeWindow_), now);
+  if (self.probePending_) {
+    self.lastHookContent_ = read(self.probeHook_);
+    self.lastWindowContent_ = read(self.probeWindow_);
+    self.lastContentProbeMs_ = now;
+    self.backendHealth_.sample(self.lastHookContent_, self.lastWindowContent_, now);
+  }
 
   const auto stage = [&](obs_source_t* source, gs_stagesurf_t* surface) {
     const uint32_t cx = source ? obs_source_get_width(source) : 0;
@@ -642,8 +665,12 @@ void SourceManager::sampleCaptureFrames(void* data, uint32_t, uint32_t)
   const bool hook = stage(self.gameSource_, self.probeHook_);
   const bool wgc = stage(self.windowSource_, self.probeWindow_);
   self.probePending_ = hook && wgc;
-  if (!self.probePending_)
+  if (!self.probePending_) {
+    self.lastHookContent_ = CaptureFrameContent::Unknown;
+    self.lastWindowContent_ = CaptureFrameContent::Unknown;
+    self.lastContentProbeMs_ = now;
     self.backendHealth_.sample(CaptureFrameContent::Unknown, CaptureFrameContent::Unknown, now);
+  }
 }
 
 void SourceManager::retryMonitorCaptureLocked()
@@ -671,6 +698,8 @@ void SourceManager::retryWindowCaptureLocked()
   obs_data_set_string(d, "window", desc.c_str());
   obs_source_update(windowSource_, d);
   obs_data_release(d);
+  lastWindowAction_ = "retry";
+  lastWindowActionMs_ = duration_ms_now();
 }
 
 void SourceManager::retryGameCaptureLocked()
@@ -683,6 +712,8 @@ void SourceManager::retryGameCaptureLocked()
   obs_data_set_string(d, "window", desc.c_str());
   obs_source_update(gameSource_, d);
   obs_data_release(d);
+  lastHookAction_ = "retry";
+  lastHookActionMs_ = duration_ms_now();
   const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
   if (diagnostics && *diagnostics && std::string(diagnostics) != "0") {
     std::fprintf(stderr,
@@ -853,6 +884,21 @@ void SourceManager::watchdogLoop()
             windowNoFramesReported_ = true;
           }
         }
+        std::ostringstream signature;
+        signature << "mode=" << mode << "|subject=monitor|source=" << (monitorSource_ != nullptr) << '|'
+                  << monitorWidth << 'x' << monitorHeight << "|ready=" << monitorReady;
+        const uint64_t diagnosticNowMs = duration_ms_now();
+        if (diagnosticSchedule_.shouldLog(signature.str(), diagnosticNowMs)) {
+          std::ostringstream line;
+          line << "[capture-health][" << (monitorReady ? "info" : "warn") << "] ts_ms=" << diagnosticNowMs
+               << " capture_mode=" << mode << " subject_kind=monitor selected_backend=monitor"
+               << " monitor_source=" << (monitorSource_ ? "present" : "missing") << " monitor_size=" << monitorWidth
+               << 'x' << monitorHeight << " monitor_size_ready=" << (monitorReady ? "true" : "false")
+               << " backend_ready_active=" << (active ? "true" : "false")
+               << " frame_content_probe=unavailable source_dimensions_mean_frame_size_only=true";
+          std::fprintf(stderr, "%s\n", line.str().c_str());
+          std::fflush(stderr);
+        }
       } else if (subject_.kind == Subject::Kind::Window && pidAlive(subject_.pid)) {
         refreshTargetWindowLocked();
         const bool minimized = subjectWindowMinimized(subject_);
@@ -964,6 +1010,96 @@ void SourceManager::watchdogLoop()
           lastHookRetry_ = now;
           if (hookRetryCount_ < 1000000)
             hookRetryCount_++;
+        }
+
+        obs_sceneitem_crop wgcCrop = {};
+        if (windowItem_)
+          obs_sceneitem_get_crop(windowItem_, &wgcCrop);
+        const uint32_t wgcVisibleWidth =
+            windowWidth > static_cast<uint32_t>(std::max(0, wgcCrop.left + wgcCrop.right))
+                ? windowWidth - static_cast<uint32_t>(wgcCrop.left + wgcCrop.right)
+                : 0;
+        const uint32_t wgcVisibleHeight =
+            windowHeight > static_cast<uint32_t>(std::max(0, wgcCrop.top + wgcCrop.bottom))
+                ? windowHeight - static_cast<uint32_t>(wgcCrop.top + wgcCrop.bottom)
+                : 0;
+        uint32_t clientWidth = 0, clientHeight = 0;
+#ifdef _WIN32
+        HWND diagnosticWindow = reinterpret_cast<HWND>(targetWindow_);
+        RECT diagnosticClient = {};
+        if (diagnosticWindow && IsWindow(diagnosticWindow) && GetClientRect(diagnosticWindow, &diagnosticClient)) {
+          clientWidth = static_cast<uint32_t>(std::max<LONG>(0, diagnosticClient.right - diagnosticClient.left));
+          clientHeight = static_cast<uint32_t>(std::max<LONG>(0, diagnosticClient.bottom - diagnosticClient.top));
+        }
+#endif
+        const char* selectedBackend = "none";
+        if (activeBackend_ == ActiveBackend::Hook)
+          selectedBackend = "hook";
+        else if (activeBackend_ == ActiveBackend::Wgc)
+          selectedBackend = "wgc";
+
+        // The signature excludes timestamps and ages so a steady game emits a
+        // heartbeat every ten seconds rather than a line on every watchdog tick.
+        std::ostringstream signature;
+        signature << subject_.exe << '|' << subject_.pid << '|' << targetWindow_ << '|'
+                  << minimized << '|' << active << '|' << (gameSource_ != nullptr) << '|'
+                  << (windowSource_ != nullptr) << '|'
+                  << gameWidth << 'x' << gameHeight << '|' << captureFrameContentName(lastHookContent_) << '|'
+                  << windowWidth << 'x' << windowHeight << '|' << captureFrameContentName(lastWindowContent_) << '|'
+                  << wgcCrop.left << ',' << wgcCrop.top << ',' << wgcCrop.right << ',' << wgcCrop.bottom << '|'
+                  << clientWidth << 'x' << clientHeight << '|' << hookRejected << '|'
+                  << selectedBackend << '|' << hookRetryCount_ << ':' << lastHookAction_ << '|'
+                  << wgcRetryCount_ << ':' << lastWindowAction_ << '|'
+                  << (lastContentProbeMs_ != 0);
+        const uint64_t diagnosticNowMs = duration_ms_now();
+        if (diagnosticSchedule_.shouldLog(signature.str(), diagnosticNowMs)) {
+          const auto ageText = [diagnosticNowMs](uint64_t thenMs) {
+            return thenMs ? std::to_string(diagnosticNowMs - thenMs) + "ms" : std::string("never");
+          };
+          const char* severity =
+              hookRejected || (!minimized && !gameReady && !usableWindowReady) ? "warn" : "info";
+          std::ostringstream line;
+          line << "[capture-health][" << severity << "] ts_ms=" << diagnosticNowMs
+               << " subject_exe=" << subject_.exe << " pid=" << subject_.pid << " hwnd=0x"
+               << std::hex << targetWindow_ << std::dec << " minimized=" << (minimized ? "true" : "false")
+               << " backend_ready_active=" << (active ? "true" : "false")
+               << " hook_source=" << (gameSource_ ? "present" : "missing") << " hook_size=" << gameWidth << 'x'
+               << gameHeight << " hook_size_ready=" << (gameWidth && gameHeight ? "true" : "false")
+               << " hook_content=" << captureFrameContentName(lastHookContent_)
+               << " wgc_source=" << (windowSource_ ? "present" : "missing") << " wgc_size=" << windowWidth << 'x'
+               << windowHeight << " wgc_size_ready=" << (windowReady ? "true" : "false")
+               << " wgc_content=" << captureFrameContentName(lastWindowContent_)
+               << " content_probe=paired_64x36_interior probe_age_ms="
+               << (lastContentProbeMs_ ? std::to_string(diagnosticNowMs - lastContentProbeMs_) : "never")
+               << " source_dimensions_mean_frame_size_only=true"
+               << " win32_client=" << (clientWidth && clientHeight ? std::to_string(clientWidth) + 'x' +
+                                                                  std::to_string(clientHeight)
+                                                                : std::string("unknown"))
+               << " wgc_crop=" << wgcCrop.left << ',' << wgcCrop.top << ',' << wgcCrop.right << ',' << wgcCrop.bottom
+               << " wgc_visible=" << wgcVisibleWidth << 'x' << wgcVisibleHeight
+               << " hook_rejected=" << (hookRejected ? "true" : "false")
+               << " hook_reject_reason="
+               << (hookRejected ? "hook_black_while_wgc_content_for_3s" : "none")
+               << " selected_backend=" << selectedBackend << " hook_retry_count=" << hookRetryCount_
+               << " hook_last_action=" << lastHookAction_ << " hook_last_action_age_ms="
+               << ageText(lastHookActionMs_) << " wgc_retry_count=" << wgcRetryCount_
+               << " wgc_last_action=" << lastWindowAction_ << " wgc_last_action_age_ms="
+               << ageText(lastWindowActionMs_);
+          std::fprintf(stderr, "%s\n", line.str().c_str());
+          std::fflush(stderr);
+        }
+      } else {
+        std::ostringstream signature;
+        signature << "mode=" << mode << "|subject=none|source=none|active=false";
+        const uint64_t diagnosticNowMs = duration_ms_now();
+        if (diagnosticSchedule_.shouldLog(signature.str(), diagnosticNowMs)) {
+          std::ostringstream line;
+          const char* severity = mode == "game" ? "info" : "warn";
+          line << "[capture-health][" << severity << "] ts_ms=" << diagnosticNowMs
+               << " capture_mode=" << mode << " subject_kind=none selected_backend=none"
+               << " backend_ready_active=false frame_content_probe=unavailable";
+          std::fprintf(stderr, "%s\n", line.str().c_str());
+          std::fflush(stderr);
         }
       }
     }

@@ -2,7 +2,6 @@
 // compare DB size against the limit; delete oldest unprotected clips until
 // under 0.9 * limit (hysteresis). Locked files are skipped and retried next
 // cycle. Exports never count toward the limit.
-import { promises as fs } from "node:fs";
 import { EventEmitter } from "node:events";
 import type { Library } from "./library";
 import { getSettings } from "./settings";
@@ -41,9 +40,7 @@ export class StorageWatchdog extends EventEmitter {
       if (this.locked.has(oldest.path)) break; // tried this cycle, still locked
 
       try {
-        await fs.unlink(oldest.path);
-        if (oldest.thumb) await fs.unlink(oldest.thumb).catch(() => {});
-        this.library.delete(oldest.id);
+        await this.library.deleteForStorage(oldest.id);
         used = this.library.autoDeleteBytes(settings.deleteEdited);
         deleted++;
       } catch {

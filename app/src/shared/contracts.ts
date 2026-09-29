@@ -319,6 +319,22 @@ export interface ClipRecord {
   fps: number | null;
   protected: number;
   source: "clip" | "recording" | "edited";
+  importedFrom?: "medal";
+}
+
+export type LibraryImportKind = "clips" | "edited";
+
+export interface LibraryImportResult {
+  cancelled: boolean;
+  imported: number;
+  skipped: number;
+  errors: string[];
+}
+
+export interface LibraryImportProgress {
+  completed: number;
+  total: number;
+  currentName: string;
 }
 
 // Media metadata and cached waveform peaks used by the editor. `streamIndex`
@@ -374,6 +390,8 @@ export interface DevConsoleLine {
   t: number; // epoch ms
   level: "core" | "app" | "rpc" | "event" | "updates";
   text: string;
+  severity?: "debug" | "info" | "warn" | "error";
+  stream?: "stdout" | "stderr";
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +438,9 @@ export interface ShardApi {
   getDefaultClipsFolder(): Promise<string>;
   // library
   listClips(): Promise<ClipRecord[]>;
+  renameClip(id: string, name: string): Promise<ClipRecord>;
+  importMedalFolder(kind: LibraryImportKind): Promise<LibraryImportResult>;
+  onLibraryImportProgress(cb: (progress: LibraryImportProgress) => void): () => void;
   deleteClip(id: string): Promise<void>;
   setProtected(id: string, prot: boolean): Promise<void>;
   probeTracks(clipId: string): Promise<AudioTrackInfo[]>;
@@ -453,6 +474,8 @@ export interface ShardApi {
   // developer console stream + window toggle (returns new open state)
   onDevConsoleLine(cb: (line: DevConsoleLine) => void): () => void;
   getDevConsoleHistory(): Promise<DevConsoleLine[]>;
+  clearDevConsoleHistory(): Promise<number>;
+  exportDevConsoleLog(): Promise<string | null>;
   toggleDevConsole(): Promise<boolean>;
   // Clip sound: pick custom file (dialog) and preview
   pickClipSound(): Promise<string | null>;

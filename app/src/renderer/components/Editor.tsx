@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ExportProgress, WaveformData } from "../../shared/contracts";
 import type { ClipRecord } from "../../shared/contracts";
 import { Button, Icon, Modal } from "./ui";
+import { ClipRename } from "./ClipRename";
 import { Timeline } from "../editor/Timeline";
 import { VideoPreview, formatEditorTime, mediaFileUrl } from "../editor/VideoPreview";
 import { usePlayerAudio } from "../editor/usePlayerAudio";
@@ -34,7 +35,9 @@ interface Props {
   onExport: () => void;
 }
 
-export function Editor({ clip, onClose, onExport }: Props) {
+export function Editor({ clip: originalClip, onClose, onExport }: Props) {
+  const [renamedClip, setRenamedClip] = useState<ClipRecord | null>(null);
+  const clip = renamedClip?.id === originalClip.id ? renamedClip : originalClip;
   const fallbackDuration = Math.max(0, clip.durationMs / 1000);
   const [mediaDuration, setMediaDuration] = useState(fallbackDuration);
   const duration = mediaDuration;
@@ -235,6 +238,8 @@ export function Editor({ clip, onClose, onExport }: Props) {
     for (const track of state.audioTracks) {
       const audio = audioRefs.current.get(track.streamIndex);
       if (!audio) continue;
+      audio.playbackRate = video.playbackRate;
+      audio.preservesPitch = true;
       if (forceSeek || Math.abs(audio.currentTime - video.currentTime) > 0.12) audio.currentTime = video.currentTime;
       audio.volume = Math.min(1, Math.max(0, volume * track.volume));
       audio.muted = muted || track.muted;
@@ -409,7 +414,7 @@ export function Editor({ clip, onClose, onExport }: Props) {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, select, [contenteditable=true]")) return;
+      if (target?.matches("input, textarea, select, [contenteditable=true]") || target?.closest('[role="listbox"]')) return;
       const key = event.key.toLowerCase();
       if (event.ctrlKey && key === "z") {
         event.preventDefault();
@@ -418,6 +423,7 @@ export function Editor({ clip, onClose, onExport }: Props) {
         event.preventDefault();
         redo();
       } else if (event.code === "Space") {
+        if (target?.closest("button")) return;
         event.preventDefault();
         togglePlayback();
       } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -483,6 +489,9 @@ export function Editor({ clip, onClose, onExport }: Props) {
             <span>{clip.game ?? "Untagged"} · {formatEditorTime(duration)} source</span>
           </div>
           <div className="editor-header__meta num">{formatEditorTime(outputDuration, true)} output</div>
+          <div data-shard-slot="editor-rename" className="editor-header__rename">
+            <ClipRename clip={clip} onRenamed={setRenamedClip} mediaRef={videoRef} disabled={exporting || loadingMedia} />
+          </div>
           <Button variant="primary" size="sm" icon={<Icon name="export" size={15} />} onClick={startExport} disabled={exporting || loadingMedia || !state.segments.length}>
             {exporting ? "Exporting…" : "Export clip"}
           </Button>
@@ -508,6 +517,7 @@ export function Editor({ clip, onClose, onExport }: Props) {
             onPlayingChange={handlePlayingChange}
             onMediaError={setMediaError}
             onLoadedMetadata={handleLoadedMetadata}
+            onPlaybackRateChange={() => synchronizePreviewAudio(true)}
           />
           <div className="editor-audio-previews" aria-hidden="true">
             {state.audioTracks.map((track) => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
-import { ContextMenu, Icon, IconButton } from "../components/ui";
+import { ContextMenu, Icon, IconButton, ShardSelect } from "../components/ui";
 import { measurePlayback } from "./playbackDiagnostics";
 import { usePlayerAudio } from "./usePlayerAudio";
 
@@ -26,6 +26,7 @@ interface VideoPreviewProps {
   onPlayingChange: (playing: boolean) => void;
   onMediaError: (message: string) => void;
   onLoadedMetadata?: () => void;
+  onPlaybackRateChange?: () => void;
 }
 
 export function VideoPreview({
@@ -50,8 +51,16 @@ export function VideoPreview({
   onPlayingChange,
   onMediaError,
   onLoadedMetadata,
+  onPlaybackRateChange,
 }: VideoPreviewProps) {
   const safeDuration = Math.max(resultDuration, 0.001);
+  const playerRef = useRef<HTMLElement>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
+  const hideControlsTimer = useRef<number | undefined>(undefined);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState("1");
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [mediaState, setMediaState] = useState<"loading" | "ready" | "error">("loading");
   const previousPlayback = useRef({ playing, sourcePath });
   const [feedback, setFeedback] = useState<{ name: "play" | "pause"; sequence: number } | null>(null);
   const feedbackSequence = useRef(0);
@@ -59,11 +68,49 @@ export function VideoPreview({
   const [reportStatus, setReportStatus] = useState("");
   const reportAbort = useRef<AbortController | null>(null);
   const reportTimer = useRef<number | undefined>(undefined);
+  const revealControls = useCallback(() => {
+    if (document.fullscreenElement !== playerRef.current) return;
+    setControlsVisible(true);
+    window.clearTimeout(hideControlsTimer.current);
+    hideControlsTimer.current = window.setTimeout(() => {
+      const focusedControl = controlsRef.current?.contains(document.activeElement)
+        && document.activeElement?.matches(":focus-visible");
+      if (!focusedControl && !controlsRef.current?.querySelector(":popover-open")) setControlsVisible(false);
+    }, playing ? 3200 : 5000);
+  }, [playing]);
+
+  useEffect(() => {
+    const syncFullscreen = () => {
+      const active = document.fullscreenElement === playerRef.current;
+      setFullscreen(active);
+      if (active) revealControls();
+      else {
+        window.clearTimeout(hideControlsTimer.current);
+        setControlsVisible(true);
+      }
+    };
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    document.addEventListener("keydown", revealControls);
+    syncFullscreen();
+    return () => {
+      document.removeEventListener("fullscreenchange", syncFullscreen);
+      document.removeEventListener("keydown", revealControls);
+      window.clearTimeout(hideControlsTimer.current);
+    };
+  }, [revealControls]);
   // Apply the remembered level before autoplay, including newly mounted media.
   useLayoutEffect(() => {
     if (videoRef.current) videoRef.current.volume = Math.max(0, Math.min(1, volume));
   }, [videoRef, sourcePath, volume]);
+  useLayoutEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.defaultPlaybackRate = Number(playbackRate);
+      videoRef.current.playbackRate = Number(playbackRate);
+      videoRef.current.preservesPitch = true;
+    }
+  }, [videoRef, sourcePath, playbackRate]);
   useEffect(() => {
+    setMediaState("loading");
     setMenu(null);
     setReportStatus("");
     return () => {
@@ -107,17 +154,20 @@ export function VideoPreview({
   }, [playing, sourcePath, videoRef]);
 
   const toggleFullscreen = async () => {
-    const stage = videoRef.current?.closest(".editor-player") as HTMLElement | null;
+    const stage = playerRef.current;
     if (!stage) return;
     if (document.fullscreenElement) await document.exitFullscreen();
     else await stage.requestFullscreen();
   };
 
   return (
-    <section data-shard-component="player" data-playing={playing} className={["editor-player", className].filter(Boolean).join(" ")} aria-label="Video preview">
-      <div className="editor-player__stage" onClick={onTogglePlayback}
+    <section ref={playerRef} data-shard-component="player" data-shard-state={mediaState} data-playing={playing} data-fullscreen={fullscreen}
+      data-controls-visible={controlsVisible} className={["editor-player", className].filter(Boolean).join(" ")}
+      aria-label="Video preview" onPointerMove={revealControls} onPointerDownCapture={revealControls}>
+      <div data-shard-slot="player-stage" className="editor-player__stage" onClick={onTogglePlayback}
         onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }}>
         <video
+          data-shard-slot="player-video"
           ref={videoRef}
           className="editor-player__video"
           src={mediaFileUrl(sourcePath)}
@@ -129,17 +179,23 @@ export function VideoPreview({
           loop={loop}
           muted={nativeMuted || muted}
           onLoadedMetadata={onLoadedMetadata}
+          onRateChange={onPlaybackRateChange}
+          onLoadedData={() => setMediaState("ready")}
+          onCanPlay={() => setMediaState("ready")}
+          onWaiting={() => setMediaState("loading")}
           onTimeUpdate={onTimeUpdate}
           onSeeked={onSeeked}
           onPlay={() => onPlayingChange(true)}
           onPause={() => onPlayingChange(false)}
           onError={(event) => {
+            setMediaState("error");
             const code = event.currentTarget.error?.code;
             onMediaError(code ? `The clip could not be decoded (media error ${code}).` : "The clip could not be loaded.");
           }}
         />
         {feedback && (
           <span
+            data-shard-slot="player-feedback"
             key={feedback.sequence}
             className="editor-player__feedback"
             aria-hidden="true"
@@ -148,7 +204,8 @@ export function VideoPreview({
             <Icon name={feedback.name} size={42} />
           </span>
         )}
-        {reportStatus && <span className="editor-player__report-status" role="status">{reportStatus}</span>}
+        {mediaState === "loading" && <span data-shard-slot="player-loading" className="editor-player__loading" role="status"><span className="spin" aria-hidden="true" />Loading preview…</span>}
+        {reportStatus && <span data-shard-slot="player-status" className="editor-player__report-status" role="status">{reportStatus}</span>}
       </div>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
@@ -158,14 +215,11 @@ export function VideoPreview({
         </button>
       </ContextMenu>}
 
-      <div data-shard-slot="player-controls" className="editor-player__controls" onClick={(event) => event.stopPropagation()}>
-        <IconButton label={playing ? "Pause (Space)" : "Play (Space)"} onClick={onTogglePlayback}>
-          <Icon name={playing ? "pause" : "play"} size={18} />
-        </IconButton>
-        <span className="editor-player__time num">
-          {formatEditorTime(resultTime, true)} <span>/</span> {formatEditorTime(resultDuration)}
-        </span>
+      <div ref={controlsRef} data-shard-slot="player-controls" className="editor-player__controls"
+        onClick={(event) => event.stopPropagation()}
+        onFocusCapture={revealControls} onBlurCapture={revealControls}>
         <input
+          data-shard-slot="player-seek"
           className="editor-player__seek"
           type="range"
           min={0}
@@ -173,41 +227,58 @@ export function VideoPreview({
           step={0.001}
           value={Math.min(resultTime, safeDuration)}
           aria-label="Playback position"
+          disabled={mediaState === "error" || resultDuration <= 0}
           style={{ "--seek-progress": `${Math.min(100, (resultTime / safeDuration) * 100)}%` } as CSSProperties}
           onChange={(event) => onSeekResult(Number(event.target.value))}
         />
-        <IconButton label={muted ? "Unmute" : "Mute"} active={muted} onClick={() => onMutedChange(!muted)}>
-          <Icon name={muted || volume === 0 ? "volumeOff" : "volume"} size={18} />
-        </IconButton>
-        <input
-          className="editor-player__volume volume-slider"
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={volume}
-          aria-label="Volume"
-          style={{
-            "--range-progress": `${Math.max(0, Math.min(100, volume * 100))}%`,
-            "--range-color": volume > 1 ? "var(--danger)" : "var(--accent)",
-          } as CSSProperties}
-          onChange={(event) => onVolumeChange(Number(event.target.value))}
-        />
-        <IconButton label="Fullscreen" onClick={() => void toggleFullscreen()}>
-          <Icon name="maximize" size={17} />
-        </IconButton>
+        <div data-shard-slot="player-transport" className="editor-player__controls-row">
+          <IconButton label={playing ? "Pause (Space)" : "Play (Space)"} disabled={mediaState === "error"} onClick={onTogglePlayback}>
+            <Icon name={playing ? "pause" : "play"} size={18} />
+          </IconButton>
+          <span data-shard-slot="player-time" className="editor-player__time num">
+            {formatEditorTime(resultTime, true)} <span>/</span> {formatEditorTime(resultDuration)}
+          </span>
+          <span className="spacer" />
+          <IconButton label={muted ? "Unmute" : "Mute"} active={muted} onClick={() => onMutedChange(!muted)}>
+            <Icon name={muted || volume === 0 ? "volumeOff" : "volume"} size={18} />
+          </IconButton>
+          <input
+            data-shard-slot="player-volume"
+            className="editor-player__volume volume-slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={volume}
+            aria-label="Volume"
+            style={{
+              "--range-progress": `${Math.max(0, Math.min(100, volume * 100))}%`,
+              "--range-color": "var(--accent)",
+            } as CSSProperties}
+            onChange={(event) => onVolumeChange(Number(event.target.value))}
+          />
+          <span data-shard-slot="player-speed" className="editor-player__speed" title="Preview playback speed">
+            <ShardSelect ariaLabel="Playback speed" value={playbackRate} onChange={setPlaybackRate}
+              options={["0.25", "0.5", "0.75", "1", "1.25", "1.5", "2"].map((value) => ({ value, label: `${value}×` }))} />
+          </span>
+          <IconButton label={fullscreen ? "Exit fullscreen" : "Fullscreen"} onClick={() => void toggleFullscreen()}>
+            <Icon name={fullscreen ? "restore" : "maximize"} size={17} />
+          </IconButton>
+        </div>
       </div>
     </section>
   );
 }
 
-export function StandaloneVideoPlayer({ sourcePath, loop = true }: { sourcePath: string; loop?: boolean }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
+export function StandaloneVideoPlayer({ sourcePath, posterPath, loop = true, mediaRef }: { sourcePath: string; posterPath?: string; loop?: boolean; mediaRef?: RefObject<HTMLVideoElement | null> }) {
+  const internalVideoRef = useRef<HTMLVideoElement>(null);
+  const videoRef = mediaRef ?? internalVideoRef;
   const [playing, setPlaying] = useState(false);
   const { volume, setVolume, muted, setMuted } = usePlayerAudio("preview");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => setError(null), [sourcePath]);
 
   const synchronizeTime = useCallback(() => {
     setCurrentTime(videoRef.current?.currentTime ?? 0);
@@ -248,7 +319,7 @@ export function StandaloneVideoPlayer({ sourcePath, loop = true }: { sourcePath:
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, select, [contenteditable=true]")) return;
+      if (target?.matches("input, textarea, select, button, [contenteditable=true]")) return;
       if (event.code === "Space") {
         event.preventDefault();
         togglePlayback();
@@ -281,6 +352,7 @@ export function StandaloneVideoPlayer({ sourcePath, loop = true }: { sourcePath:
       <VideoPreview
         videoRef={videoRef}
         sourcePath={sourcePath}
+        posterPath={posterPath}
         className="viewer-player"
         playing={playing}
         muted={muted}
@@ -302,7 +374,7 @@ export function StandaloneVideoPlayer({ sourcePath, loop = true }: { sourcePath:
         onLoadedMetadata={() => setDuration(videoRef.current?.duration ?? 0)}
         onMediaError={setError}
       />
-      {error && <div className="viewer-player__error">{error}</div>}
+      {error && <div data-shard-slot="player-error" className="viewer-player__error" role="alert">{error}</div>}
     </>
   );
 }

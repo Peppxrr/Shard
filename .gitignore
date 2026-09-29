@@ -49,9 +49,6 @@ core/deps/
 core/shared/
 core/cmake/
 
-# Internal repo guidelines (not published)
-AGENTS.md
-
 # Fetched by scripts/fetch-ffmpeg.ps1 (pinned SHA-256)
 vendor/ffmpeg/
 

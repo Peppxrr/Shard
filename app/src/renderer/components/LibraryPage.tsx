@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ClipRecord } from "../../shared/contracts";
 import { Icon, IconButton, Button, EmptyState, Modal, ShardSelect } from "./ui";
 import { mediaFileUrl, StandaloneVideoPlayer } from "../editor/VideoPreview";
+import { ClipRename } from "./ClipRename";
+import { MedalImport } from "./MedalImport";
 
 interface Props {
   clips: ClipRecord[];
@@ -9,6 +11,14 @@ interface Props {
 }
 
 type SortKey = "newest" | "oldest" | "duration" | "size" | "game" | "favorites";
+type SourceFilter = "all" | ClipRecord["source"];
+const SOURCES: { value: SourceFilter; label: string }[] = [
+  { value: "all", label: "All clips" },
+  { value: "clip", label: "Clips" },
+  { value: "recording", label: "Recordings" },
+  { value: "edited", label: "Edits" },
+];
+const SOURCE_NAMES = { clip: "Clip", recording: "Recording", edited: "Edited Clip" };
 
 const SORTS: { value: SortKey; label: string }[] = [
   { value: "newest", label: "Newest first" },
@@ -21,10 +31,20 @@ const SORTS: { value: SortKey; label: string }[] = [
 
 export function LibraryPage({ clips, onOpenEditor }: Props) {
   const [gameFilter, setGameFilter] = useState<string>("all");
-  const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>("newest");
-  const [selected, setSelected] = useState<ClipRecord | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const selected = clips.find((clip) => clip.id === selectedId);
+  const totalSize = useMemo(() => clips.reduce((total, clip) => total + clip.sizeBytes, 0), [clips]);
+  const counts = useMemo(() => ({
+    all: clips.length,
+    clip: clips.filter((clip) => clip.source === "clip").length,
+    recording: clips.filter((clip) => clip.source === "recording").length,
+    edited: clips.filter((clip) => clip.source === "edited").length,
+  }), [clips]);
 
   const games = useMemo(() => {
     const set = new Set<string>();
@@ -35,13 +55,10 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
     value: game,
     label: game.length > 28 ? `${game.slice(0, 27)}…` : game,
   })), [games]);
-  const gameLabel = gameFilter === "all"
-    ? "All games"
-    : (gameOptions.find((game) => game.value === gameFilter)?.label ?? "All games");
-  const sourceLabel = sourceFilter === "all"
-    ? "All sources"
-    : sourceFilter === "recording" ? "Recordings" : sourceFilter === "edited" ? "Edited" : "Clips";
-  const sortLabel = SORTS.find((entry) => entry.value === sort)?.label ?? "Newest first";
+  const hasFilters = gameFilter !== "all" || sourceFilter !== "all" || favoritesOnly || !!search.trim();
+  const resetFilters = () => {
+    setGameFilter("all"); setSourceFilter("all"); setFavoritesOnly(false); setSearch("");
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -50,6 +67,7 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
       return (
         (gameFilter === "all" || c.game === gameFilter) &&
         (sourceFilter === "all" || c.source === sourceFilter) &&
+        (!favoritesOnly || c.protected === 1) &&
         (!q || (c.game ?? "").toLowerCase().includes(q) || pathBase(c.path).toLowerCase().includes(q) ||
           dateStr.includes(q))
       );
@@ -68,62 +86,77 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
       default: // newest
         return out.sort((a, b) => b.createdAt - a.createdAt);
     }
-  }, [clips, gameFilter, sourceFilter, search, sort]);
+  }, [clips, gameFilter, sourceFilter, favoritesOnly, search, sort]);
 
   return (
     <div data-shard-page="library" className="library">
-      <header className="page__head">
-        <h1 className="page__title">Library</h1>
-        <p className="dim page__sub">Your clips, recordings, and edits in one place.</p>
+      <header data-shard-slot="library-header" className="library__header">
+        <div data-shard-slot="library-heading">
+          <h1 className="page__title">Library</h1>
+        </div>
+        <div data-shard-slot="library-header-actions" className="library__header-actions">
+          <div data-shard-slot="library-summary" className="library__summary">
+            <Icon name="film" size={16} />
+            <span><strong className="num">{clips.length}</strong> {clips.length === 1 ? "clip" : "clips"}</span>
+            <span aria-hidden="true">·</span><span className="num">{fmtSize(totalSize)}</span>
+          </div>
+          <Button icon={<Icon name="plus" size={15} />} onClick={() => setImportOpen(true)}>Import Medal</Button>
+        </div>
       </header>
-      <div data-shard-slot="toolbar" className="toolbar">
-        <label className="search">
+      <div data-shard-slot="library-navigation" className="library__navigation">
+        <div data-shard-component="library-filters" className="library__sources" role="group" aria-label="Clip source">
+          {SOURCES.map((source) => <button key={source.value} type="button"
+            data-shard-slot="library-source-filter" data-source={source.value}
+            className="library__source" aria-pressed={sourceFilter === source.value} onClick={() => setSourceFilter(source.value)}>
+            {source.label}<span data-shard-slot="library-filter-count" className="num">{counts[source.value]}</span>
+          </button>)}
+        </div>
+        <Button variant={favoritesOnly ? "soft" : "ghost"} aria-pressed={favoritesOnly}
+          icon={<Icon name="star" size={15} />} onClick={() => setFavoritesOnly(!favoritesOnly)}>Favorites</Button>
+      </div>
+      <div data-shard-slot="toolbar" className="toolbar library__toolbar">
+        <label data-shard-slot="library-search" className="search library__search">
           <Icon name="search" size={15} />
-          <input type="search" aria-label="Search clips" placeholder="Search clips…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <input type="search" aria-label="Search clips" placeholder="Search by game, date, or filename" value={search} onChange={(e) => setSearch(e.target.value)} />
         </label>
         <ShardSelect
+          ariaLabel="Filter by game" className="library__game-filter"
           value={gameFilter}
           onChange={setGameFilter}
-          style={{ width: filterWidth(gameLabel, 32) }}
           options={[{ value: "all", label: "All games" }, ...gameOptions]}
         />
         <ShardSelect
-          value={sourceFilter}
-          onChange={setSourceFilter}
-          style={{ width: filterWidth(sourceLabel, 18) }}
-          options={[
-            { value: "all", label: "All sources" },
-            { value: "clip", label: "Clips" },
-            { value: "recording", label: "Recordings" },
-            { value: "edited", label: "Edited" },
-          ]}
-        />
-        <ShardSelect
+          ariaLabel="Sort clips" className="library__sort"
           value={sort}
           onChange={(v) => setSort(v as SortKey)}
-          style={{ width: filterWidth(sortLabel, 20) }}
           options={SORTS}
         />
-        <span className="spacer" />
-        <span className="chip num">{filtered.length} {filtered.length === 1 ? "clip" : "clips"}</span>
+      </div>
+
+      <div data-shard-slot="library-results" className="library__results">
+        <h2>{favoritesOnly ? "Favorites" : SOURCES.find((source) => source.value === sourceFilter)!.label}
+          <span className="num" aria-live="polite">{filtered.length}</span></h2>
+        {hasFilters && <Button variant="ghost" size="sm" onClick={resetFilters}>Clear filters</Button>}
       </div>
 
       {filtered.length === 0 ? (
         <EmptyState
           icon={<Icon name="film" size={30} />}
           title={clips.length ? "No matching clips" : "No clips yet"}
+          action={hasFilters ? <Button onClick={resetFilters}>Clear filters</Button> : undefined}
         >
           {clips.length ? "Try another search or change your filters." : <>Use your <strong>Save clip</strong> hotkey to save a replay here.</>}
         </EmptyState>
       ) : (
-        <div data-shard-slot="clip-grid" className="grid">
+        <div data-shard-slot="clip-grid" className="grid library__grid">
           {filtered.map((c) => (
-            <ClipCard key={c.id} clip={c} onOpen={() => setSelected(c)} onEdit={() => onOpenEditor(c)} />
+            <ClipCard key={c.id} clip={c} onOpen={() => setSelectedId(c.id)} onEdit={() => onOpenEditor(c)} />
           ))}
         </div>
       )}
 
-      {selected && <Viewer clip={selected} onClose={() => setSelected(null)} onEdit={() => { const c = selected; setSelected(null); onOpenEditor(c); }} />}
+      {selected && <Viewer clip={selected} onClose={() => setSelectedId(null)} onEdit={(clip) => { setSelectedId(null); onOpenEditor(clip); }} />}
+      {importOpen && <MedalImport onClose={() => setImportOpen(false)} />}
     </div>
   );
 }
@@ -133,17 +166,24 @@ function pathBase(p: string): string {
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
-function filterWidth(label: string, maxChars: number): string {
-  return `${Math.max(11, Math.min(maxChars, Array.from(label).length + 4))}ch`;
-}
-
 function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => void; onEdit: () => void }) {
   const [confirming, setConfirming] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const isFav = clip.protected === 1;
+  const age = relativeAge(clip.createdAt);
+  const runAction = async (action: () => Promise<unknown>) => {
+    if (pending) return;
+    setPending(true); setError(null);
+    try { await action(); setConfirming(false); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update this clip. Try again."); }
+    finally { setPending(false); }
+  };
   return (
-    <div data-shard-component="clip" data-favorite={isFav} data-source={clip.source} className="clip card--hover" onClick={onOpen}>
-      <div
-        data-shard-slot="clip-thumbnail" className="clip__thumb"
+    <article data-shard-component="clip" data-favorite={isFav} data-source={clip.source} className="clip" aria-busy={pending}>
+      <button type="button"
+        data-shard-slot="clip-thumbnail" className="clip__thumb" onClick={onOpen}
+        aria-label={`Play ${clip.game ?? "untagged clip"}, ${fmtDateTime(clip.createdAt)}`}
         draggable
         title="Click to play · drag to share"
         onDragStart={(e) => {
@@ -151,40 +191,47 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
           window.shard.startDrag(clip.path, clip.thumb || undefined);
         }}
       >
-        {clip.thumb ? <img className="clip__img" src={mediaFileUrl(clip.thumb)} alt="" /> : <div className="clip__nothumb"><Icon name="film" size={26} /></div>}
-        <div className="clip__tags">
-          {isFav && <span className="badge badge--fav"><Icon name="star" size={11} /></span>}
-        </div>
-        <span className={`badge badge--type${clip.source === "edited" ? " badge--edited" : ""}`}>{clip.source}</span>
-        <span className="badge badge--dur num">{fmtDuration(clip.durationMs)}</span>
-      </div>
+        {clip.thumb ? <img data-shard-slot="clip-image" className="clip__img" src={mediaFileUrl(clip.thumb)} alt="" /> : <span data-shard-slot="clip-placeholder" className="clip__nothumb"><Icon name="film" size={26} /></span>}
+        <span data-shard-slot="clip-play" className="clip__play" aria-hidden="true"><Icon name="play" size={24} /></span>
+        <span data-shard-slot="clip-source" className="clip__source">{SOURCE_NAMES[clip.source]}</span>
+        <span data-shard-slot="clip-duration" className="badge badge--dur num">{fmtDuration(clip.durationMs)}</span>
+      </button>
       <div data-shard-slot="clip-details" className="clip__meta">
-        <div className="clip__title">{clip.game ?? "Untagged"}</div>
-        <div className="clip__sub">{relativeDate(clip.createdAt)} · {fmtSize(clip.sizeBytes)}</div>
-        <div className="clip__time mono">{fmtDateTime(clip.createdAt)}</div>
-        <div data-shard-slot="clip-actions" className="clip__actions" onClick={(e) => e.stopPropagation()}>
-          <IconButton size="sm" label="Edit" onClick={onEdit}><Icon name="scissor" size={15} /></IconButton>
-          <IconButton size="sm" label={isFav ? "Unfavorite" : "Favorite — keep from auto-delete"} active={isFav}
-            className={isFav ? "is-fav" : ""} onClick={() => void window.shard.setProtected(clip.id, !isFav)}>
+        <div data-shard-slot="clip-heading" className="clip__heading">
+          <button type="button" data-shard-slot="clip-title" className="clip__title" onClick={onOpen}>{clip.game ?? "Untagged"}</button>
+          <IconButton size="sm" label={isFav ? "Unfavorite" : "Favorite — keep from auto-delete"} active={isFav} disabled={pending}
+            className={isFav ? "is-fav" : ""} onClick={() => void runAction(() => window.shard.setProtected(clip.id, !isFav))}>
             <Icon name="star" size={15} />
           </IconButton>
-          <IconButton size="sm" label="Reveal in Explorer" onClick={() => window.shard.revealInExplorer(clip.path)}><Icon name="folderOpen" size={15} /></IconButton>
-          {confirming ? (
-            <span className="confirm-inline">
-              <Button size="sm" variant="danger" onClick={() => void window.shard.deleteClip(clip.id)}>Delete</Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>Cancel</Button>
-            </span>
-          ) : (
-            <IconButton size="sm" label="Delete" variant="danger" onClick={() => setConfirming(true)}><Icon name="trash" size={15} /></IconButton>
-          )}
         </div>
+        <span data-shard-slot="clip-filename" className="clip__filename" title={pathBase(clip.path)}>{pathBase(clip.path)}</span>
+        <time data-shard-slot="clip-date" className="clip__time" dateTime={new Date(clip.createdAt).toISOString()}>{fmtDateTime(clip.createdAt)}</time>
+        <div data-shard-slot="clip-size" className="clip__sub">{age ? `${age} · ` : ""}{fmtSize(clip.sizeBytes)}</div>
       </div>
-    </div>
+      <div data-shard-slot="clip-actions" className="clip__actions">
+        {confirming ? (
+          <div data-shard-slot="clip-delete-confirmation" className="clip__confirm">
+            <span>Delete this clip?</span>
+            <Button size="sm" variant="danger" loading={pending} onClick={() => void runAction(() => window.shard.deleteClip(clip.id))}>Delete</Button>
+            <Button size="sm" variant="ghost" disabled={pending} onClick={() => setConfirming(false)}>Cancel</Button>
+          </div>
+        ) : <>
+          <Button size="sm" variant="ghost" icon={<Icon name="scissor" size={14} />} onClick={onEdit}>Edit clip</Button>
+          <span className="spacer" />
+          <IconButton size="sm" label="Reveal in Explorer" onClick={() => window.shard.revealInExplorer(clip.path)}><Icon name="folderOpen" size={15} /></IconButton>
+          <IconButton size="sm" label="Delete clip" disabled={pending} onClick={() => setConfirming(true)}><Icon name="trash" size={15} /></IconButton>
+        </>}
+      </div>
+      {error && <p data-shard-slot="clip-error" className="clip__error" role="alert">{error}</p>}
+    </article>
   );
 }
 
 // Viewer modal — reuses the shared Modal. Preserves reveal + one-click export; Edit opens the trim editor.
-export function Viewer({ clip, onClose, onEdit }: { clip: ClipRecord; onClose: () => void; onEdit?: () => void }) {
+export function Viewer({ clip: originalClip, onClose, onEdit }: { clip: ClipRecord; onClose: () => void; onEdit?: (clip: ClipRecord) => void }) {
+  const [renamedClip, setRenamedClip] = useState<ClipRecord | null>(null);
+  const clip = renamedClip?.id === originalClip.id ? renamedClip : originalClip;
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [preparingExport, setPreparingExport] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const exportWholeClip = async () => {
@@ -211,16 +258,33 @@ export function Viewer({ clip, onClose, onEdit }: { clip: ClipRecord; onClose: (
     }
   };
   return (
-    <Modal open onClose={onClose} size="lg" title={clip.game ?? "Untagged"}
-      sub={<>{relativeDate(clip.createdAt)} · {fmtSize(clip.sizeBytes)} · {fmtDuration(clip.durationMs)}</>}
-      foot={<>
-        <Button icon={<Icon name="folderOpen" size={15} />} onClick={() => window.shard.revealInExplorer(clip.path)}>Reveal in Explorer</Button>
-        <span className="spacer" />
-        {onEdit && <Button icon={<Icon name="scissor" size={15} />} onClick={onEdit}>Edit</Button>}
-        <Button variant="primary" loading={preparingExport} icon={<Icon name="export" size={15} />} onClick={() => void exportWholeClip()}>Export</Button>
-      </>}>
-      <StandaloneVideoPlayer sourcePath={clip.path} loop />
-      {exportError && <p className="viewer-player__error" role="alert">{exportError}</p>}
+    <Modal open onClose={onClose} size="lg" variant="clip-viewer"
+      title={clip.game ?? "Untagged"} sub={SOURCE_NAMES[clip.source]}>
+      <div data-shard-component="clip-viewer" data-source={clip.source} className="clip-viewer">
+        <div data-shard-slot="viewer-media" className="clip-viewer__media">
+          <StandaloneVideoPlayer sourcePath={clip.path} posterPath={clip.thumb || undefined} loop mediaRef={videoRef} />
+        </div>
+        <aside data-shard-slot="viewer-details" className="clip-viewer__details" aria-label="Clip details">
+          <h2 data-shard-slot="viewer-heading">Clip details</h2>
+          <dl data-shard-slot="viewer-metadata" className="clip-viewer__metadata">
+            <div data-shard-slot="viewer-date"><dt>Captured</dt><dd>{fmtDateTime(clip.createdAt)}</dd></div>
+            <div data-shard-slot="viewer-duration"><dt>Duration</dt><dd className="num">{fmtDuration(clip.durationMs)}</dd></div>
+            <div data-shard-slot="viewer-size"><dt>File size</dt><dd className="num">{fmtSize(clip.sizeBytes)}</dd></div>
+            {!!clip.width && !!clip.height && <div data-shard-slot="viewer-resolution"><dt>Resolution</dt><dd className="num">{clip.width} × {clip.height}</dd></div>}
+            {!!clip.fps && <div data-shard-slot="viewer-framerate"><dt>Frame rate</dt><dd className="num">{Number(clip.fps.toFixed(2))} fps</dd></div>}
+          </dl>
+          <div data-shard-slot="viewer-actions" className="clip-viewer__actions">
+            {onEdit && <Button variant="primary" icon={<Icon name="scissor" size={15} />} onClick={() => onEdit(clip)}>Open in editor</Button>}
+            <Button variant={onEdit ? "default" : "primary"} loading={preparingExport} icon={<Icon name="export" size={15} />} onClick={() => void exportWholeClip()}>Export clip</Button>
+          </div>
+          {exportError && <p data-shard-slot="viewer-error" className="viewer-player__error" role="alert">{exportError}</p>}
+          <div data-shard-slot="viewer-file" className="clip-viewer__file">
+            <span data-shard-slot="viewer-filename" title={pathBase(clip.path)}>{pathBase(clip.path)}</span>
+            <ClipRename clip={clip} onRenamed={setRenamedClip} mediaRef={videoRef} disabled={preparingExport} />
+            <Button variant="ghost" size="sm" icon={<Icon name="folderOpen" size={14} />} onClick={() => window.shard.revealInExplorer(clip.path)}>Show in folder</Button>
+          </div>
+        </aside>
+      </div>
     </Modal>
   );
 }
@@ -238,8 +302,8 @@ export function fmtSize(bytes: number): string {
   return `${Math.round(bytes / 1024)} KB`;
 }
 
-// "just now" / "5m ago" / "3h ago"; after 24 h fall back to a date.
-export function relativeDate(ts: number): string {
+// Short relative age while a clip is less than 24 hours old.
+function relativeAge(ts: number): string | null {
   const diff = Date.now() - ts;
   const sec = Math.floor(diff / 1000);
   if (sec < 10) return "just now";
@@ -248,7 +312,12 @@ export function relativeDate(ts: number): string {
   if (min < 60) return `${min}m ago`;
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h ago`;
-  return fmtDate(ts);
+  return null;
+}
+
+// Capture's Recent area keeps a short date for older clips.
+export function relativeDate(ts: number): string {
+  return relativeAge(ts) ?? fmtDate(ts);
 }
 
 function fmtDate(ts: number): string {

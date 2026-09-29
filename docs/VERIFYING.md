@@ -12,9 +12,10 @@ Choose the smallest scope that exercises the changed behavior:
 | --- | --- | --- |
 | Documentation | None | Review the diff; no build |
 | UI, main process, preload, app-only settings | Default or `-- app` | TypeScript + production app build |
-| Editor, export, playback, thumbnails | `-- editor` | App build + editor and preview tests |
+| Editor, export, playback, thumbnails, library imports/renaming | `-- editor` | App build + editor, preview, and library tests |
 | Theme loader, manifests, options, or styling API | `-- themes` | App build + theme tests |
 | Updater state, IPC, or UI | `-- updater` | App build + updater tests |
+| Developer console, log streams, session export | `-- diagnostics` | App build + diagnostics tests |
 | C++ logic/detection | `-- core` | Debug core build + detection/capture unit tests |
 | Captured frames/audio, replay/mux/timestamps, core capture settings | `-- capture` | Core scope + one E2E with duration/video/audio checks |
 | Release, packaging/build pipeline, packaged-only regression | `-- release` | Release core, unit/JS tests, app packaging, artifact checks |

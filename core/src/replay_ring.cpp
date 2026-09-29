@@ -229,8 +229,11 @@ bool ReplayRing::startLocked()
 
   const auto candidates = encoders_.videoEncoderCandidates(config_.video.encoder);
   for (const auto& videoId : candidates) {
-    if (startWithVideoEncoderLocked(videoId))
+    if (startWithVideoEncoderLocked(videoId)) {
+      std::fprintf(stderr, "[encoder][info] replay ring using %s\n", videoId.c_str());
+      std::fflush(stderr);
       return true;
+    }
     std::fprintf(stderr, "[encoder] replay ring rejected %s; trying fallback\n", videoId.c_str());
   }
   events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "No supported video encoder could start the replay ring"}});

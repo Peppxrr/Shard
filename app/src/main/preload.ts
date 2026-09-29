@@ -6,6 +6,9 @@ import type {
   AudioTrackInfo,
   ShardApi,
   ClipRecord,
+  LibraryImportKind,
+  LibraryImportProgress,
+  LibraryImportResult,
   DevConsoleLine,
   EditorExportProject,
   ExportProgress,
@@ -24,6 +27,8 @@ const api: ShardApi = {
   cancelScheduledUpdate: () => ipcRenderer.invoke("updates:unschedule") as Promise<UpdateState>,
   dismissUpdate: () => ipcRenderer.invoke("updates:dismiss") as Promise<UpdateState>,
   getDevConsoleHistory: () => ipcRenderer.invoke("devconsole:history"),
+  clearDevConsoleHistory: () => ipcRenderer.invoke("devconsole:clear") as Promise<number>,
+  exportDevConsoleLog: () => ipcRenderer.invoke("devconsole:export") as Promise<string | null>,
   openUpdateRelease: () => ipcRenderer.invoke("updates:release") as Promise<UpdateState>,
   onUpdateState: (cb) => {
     const listener = (_e: unknown, state: UpdateState) => cb(state);
@@ -47,6 +52,13 @@ const api: ShardApi = {
   getDefaultClipsFolder: () => ipcRenderer.invoke("storage:defaultFolder") as Promise<string>,
 
   listClips: () => ipcRenderer.invoke("library:list") as Promise<ClipRecord[]>,
+  renameClip: (id: string, name: string) => ipcRenderer.invoke("library:rename", id, name) as Promise<ClipRecord>,
+  importMedalFolder: (kind: LibraryImportKind) => ipcRenderer.invoke("library:importMedalFolder", kind) as Promise<LibraryImportResult>,
+  onLibraryImportProgress: (cb: (progress: LibraryImportProgress) => void) => {
+    const listener = (_event: unknown, progress: LibraryImportProgress) => cb(progress);
+    ipcRenderer.on("library:import-progress", listener);
+    return () => ipcRenderer.removeListener("library:import-progress", listener);
+  },
   deleteClip: (id: string) => ipcRenderer.invoke("library:delete", id) as Promise<void>,
   setProtected: (id: string, prot: boolean) => ipcRenderer.invoke("library:protect", id, prot) as Promise<void>,
   probeTracks: (clipId: string) => ipcRenderer.invoke("editor:probe", clipId) as Promise<AudioTrackInfo[]>,

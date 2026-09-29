@@ -2,10 +2,50 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 namespace shard {
 
 enum class CaptureFrameContent { Unknown, Black, Content };
+
+inline const char* captureFrameContentName(CaptureFrameContent content) noexcept
+{
+  switch (content) {
+    case CaptureFrameContent::Black: return "black";
+    case CaptureFrameContent::Content: return "content";
+    default: return "unknown";
+  }
+}
+
+// Emit game-capture health when its state changes and at a bounded interval
+// while unchanged. The caller owns formatting and the actual output stream.
+class CaptureDiagnosticSchedule {
+public:
+  bool shouldLog(const std::string& snapshot, uint64_t nowMs,
+                 uint64_t intervalMs = 10000, uint64_t minChangeIntervalMs = 2000)
+  {
+    if (!hasLogged_ || nowMs - lastLogMs_ >= intervalMs ||
+        (snapshot != lastSnapshot_ && nowMs - lastLogMs_ >= minChangeIntervalMs)) {
+      lastSnapshot_ = snapshot;
+      lastLogMs_ = nowMs;
+      hasLogged_ = true;
+      return true;
+    }
+    return false;
+  }
+
+  void reset() noexcept
+  {
+    lastSnapshot_.clear();
+    lastLogMs_ = 0;
+    hasLogged_ = false;
+  }
+
+private:
+  std::string lastSnapshot_;
+  uint64_t lastLogMs_ = 0;
+  bool hasLogged_ = false;
+};
 
 // Inspect only the interior: WGC's title bar and a small cursor must not turn
 // an otherwise black surface into evidence of a working game image.

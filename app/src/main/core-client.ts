@@ -7,7 +7,9 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import { app } from "electron";
 import type { Settings } from "../shared/contracts";
+import { classifyDevConsoleSeverity, type DevConsoleStream } from "../shared/dev-console";
 import { coreGamePayload, gamesJsonPath, getSettings, seedGamesJson } from "./settings";
+import { CoreLineDecoder } from "./core-line-decoder";
 
 const MAX_RESTARTS = 5;
 
@@ -25,7 +27,6 @@ export class CoreClient extends EventEmitter {
   private restarts = 0;
   private shuttingDown = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
-  private stderrBuf = "";
   ready = false;
 
   get coreBinDir(): string {
@@ -53,39 +54,58 @@ export class CoreClient extends EventEmitter {
     this.emit("log", "core", `Spawning ${exe} with registry ${games}`);
 
     this.proc = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"] });
-    this.proc.stdout?.on("data", (buf: Buffer) => {
-      const text = buf.toString("utf8");
-      for (const line of text.split(/\r?\n/)) {
-        if (line.startsWith("PORT ")) {
-          const port = Number(line.slice(5).trim());
-          if (port > 0) this.connect(port);
-        }
+    const stdout = new CoreLineDecoder(line => {
+      this.emitCoreOutput(line, "stdout");
+      // Keep the first stdout PORT line visible while still consuming it as
+      // the WebSocket handshake value.
+      if (line.startsWith("PORT ")) {
+        const port = Number(line.slice(5).trim());
+        if (port > 0) this.connect(port);
       }
     });
-    this.proc.stderr?.on("data", (buf: Buffer) => {
-      // Line-buffer: chunks can split mid-line. Lines are forwarded to
-      // process.stderr (as before) and re-emitted for the developer console.
-      const text = this.stderrBuf + buf.toString("utf8");
-      this.stderrBuf = "";
-      const lines = text.split(/\r?\n/);
-      this.stderrBuf = lines.pop() ?? "";
-      for (const line of lines) {
-        process.stderr.write(`[core] ${line}\n`);
-        this.emit("log", "core", line);
-      }
+    const stderr = new CoreLineDecoder(line => {
+      process.stderr.write(`[core] ${line}\n`);
+      this.emitCoreOutput(line, "stderr");
     });
-    this.proc.on("exit", (code) => {
+    const stdoutStream = this.proc.stdout;
+    const stderrStream = this.proc.stderr;
+    stdoutStream?.on("data", (buf: Buffer) => stdout.push(buf));
+    stderrStream?.on("data", (buf: Buffer) => stderr.push(buf));
+    stdoutStream?.on("error", error => {
+      this.emit("log", "core", `Core stdout stream error: ${error.message}`, { stream: "stdout", severity: "error" });
+    });
+    stderrStream?.on("error", error => {
+      this.emit("log", "core", `Core stderr stream error: ${error.message}`, { stream: "stderr", severity: "error" });
+    });
+    this.proc.on("error", error => {
+      const text = `Core process error: ${error.message}`;
+      process.stderr.write(`[core] ${text}\n`);
+      this.emit("log", "core", text, { stream: "stderr", severity: "error" });
+    });
+    // `close` follows the stdio streams, so finish() sees every last byte.
+    // This also covers spawn failures, where Node emits `error` and `close`
+    // without an `exit` event.
+    this.proc.on("close", (code, signal) => {
+      stdout.finish();
+      stderr.finish();
       this.ws?.close();
       this.ws = null;
       this.ready = false;
       if (this.shuttingDown) return;
-      this.emit("core-exited", code);
+      this.emit("core-exited", code, signal);
       if (this.restarts < MAX_RESTARTS) {
         this.restarts++;
         this.reconnectTimer = setTimeout(() => this.spawnCore(), 1500 * this.restarts);
       } else {
         this.emit("fatal", `Core crashed ${MAX_RESTARTS} times. Restart the app.`);
       }
+    });
+  }
+
+  private emitCoreOutput(text: string, stream: DevConsoleStream): void {
+    this.emit("log", "core", text, {
+      stream,
+      severity: classifyDevConsoleSeverity(text, stream),
     });
   }
 

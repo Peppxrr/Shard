@@ -164,6 +164,14 @@ private:
   gs_stagesurf_t* probeWindow_ = nullptr;
   bool probePending_ = false;
   uint64_t lastProbeMs_ = 0;
+  CaptureFrameContent lastHookContent_ = CaptureFrameContent::Unknown;
+  CaptureFrameContent lastWindowContent_ = CaptureFrameContent::Unknown;
+  uint64_t lastContentProbeMs_ = 0;
+  CaptureDiagnosticSchedule diagnosticSchedule_;
+  uint64_t lastHookActionMs_ = 0;
+  uint64_t lastWindowActionMs_ = 0;
+  std::string lastHookAction_ = "none";
+  std::string lastWindowAction_ = "none";
   uintptr_t targetWindow_ = 0;
   std::function<void(bool)> captureActivityCb_;
 

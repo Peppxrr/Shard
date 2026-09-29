@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipRecord, CoreState, ExportProgress, Settings } from "../shared/contracts";
 import { DEFAULT_SETTINGS } from "../shared/contracts";
 import { CapturePage } from "./components/CapturePage";
 import { LibraryPage } from "./components/LibraryPage";
 import { GamesPage } from "./components/GamesPage";
-import { SettingsPage } from "./components/SettingsPage";
+import { getSavedSettingsSection, SettingsPage, type SettingsSection } from "./components/SettingsPage";
 import { Editor } from "./components/Editor";
 import { Button, Icon, Modal, Spinner, Toasts, type ToastItem } from "./components/ui";
 import { setTheme } from "./themeManager";
@@ -55,7 +55,40 @@ function WindowControls({ floating = false }: { floating?: boolean }) {
 export function App() {
   const [tab, setTab] = useState<Tab>("capture");
   const mainRef = useRef<HTMLElement>(null);
-  useEffect(() => { mainRef.current?.scrollTo({ top: 0 }); }, [tab]);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>(getSavedSettingsSection);
+  const [updatesRequest, setUpdatesRequest] = useState(0);
+  const scrollPositions = useRef(new Map<string, number>());
+  const pendingScrollRestore = useRef<{ key: string; top: number } | null>(null);
+  const scrollKey = (nextTab: Tab, section: SettingsSection) => nextTab === "settings" ? `settings:${section}` : nextTab;
+  const currentScrollKey = useRef("capture");
+  const rememberScroll = () => {
+    if (!mainRef.current) return;
+    const pending = pendingScrollRestore.current;
+    const top = pending?.key === currentScrollKey.current ? pending.top : mainRef.current.scrollTop;
+    scrollPositions.current.set(currentScrollKey.current, top);
+  };
+  const handleUpdatesRequestHandled = useCallback(() => {
+    pendingScrollRestore.current = null;
+    setUpdatesRequest(0);
+  }, []);
+  useLayoutEffect(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    const key = scrollKey(tab, settingsSection);
+    const top = scrollPositions.current.get(key) ?? 0;
+    pendingScrollRestore.current = top > 0 ? { key, top } : null;
+    const restore = () => {
+      const pending = pendingScrollRestore.current;
+      if (!pending || pending.key !== currentScrollKey.current) return;
+      main.scrollTop = pending.top;
+      if (main.scrollTop >= pending.top) pendingScrollRestore.current = null;
+    };
+    main.scrollTop = top;
+    if (main.scrollTop >= top) pendingScrollRestore.current = null;
+    const observer = new ResizeObserver(restore);
+    if (main.firstElementChild) observer.observe(main.firstElementChild);
+    return () => observer.disconnect();
+  }, [tab, settingsSection]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [savedSettings, setSavedSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [pendingTab, setPendingTab] = useState<Tab | null>(null);
@@ -191,20 +224,39 @@ export function App() {
 
   const isDirty = JSON.stringify(settings) !== JSON.stringify(savedSettings);
 
-  const requestTab = (next: Tab) => {
+  const navigateTab = (next: Tab, section = settingsSection) => {
+    rememberScroll();
+    currentScrollKey.current = scrollKey(next, section);
+    if (next === "settings") setSettingsSection(section);
+    setTab(next);
+  };
+
+  const requestTab = (next: Tab, section = settingsSection) => {
     if (tab === "settings" && isDirty && next !== "settings") {
       setPendingTab(next);
       setShowUnsaved(true);
       return;
     }
-    setTab(next);
+    navigateTab(next, section);
+  };
+
+  const requestSettingsSection = (next: SettingsSection) => {
+    if (next === settingsSection) return;
+    rememberScroll();
+    currentScrollKey.current = scrollKey("settings", next);
+    setSettingsSection(next);
+  };
+
+  const openUpdatesSettings = () => {
+    setUpdatesRequest((request) => request + 1);
+    requestTab("settings", "app");
   };
 
   const applyAndLeave = async () => {
     await window.shard.setSettings(settings);
     setSavedSettings(settings);
     setShowUnsaved(false);
-    if (pendingTab) { setTab(pendingTab); setPendingTab(null); }
+    if (pendingTab) { navigateTab(pendingTab); setPendingTab(null); }
     setSaved(true);
     window.setTimeout(() => setSaved(false), 2500);
   };
@@ -218,7 +270,7 @@ export function App() {
     }
     setSettings(savedSettings);
     setShowUnsaved(false);
-    if (pendingTab) { setTab(pendingTab); setPendingTab(null); }
+    if (pendingTab) { navigateTab(pendingTab); setPendingTab(null); }
   };
 
   if (booting) return <div className="boot app--frameless"><WindowControls floating /><Spinner size={22} /><span>Starting…</span></div>;
@@ -247,7 +299,22 @@ export function App() {
         <WindowControls />
       </header>
 
-      <main data-shard-slot="content" className="app__main" ref={mainRef}>
+      <main data-shard-slot="content" className="app__main" ref={mainRef}
+        onScroll={() => {
+          const main = mainRef.current;
+          if (!main) return;
+          const pending = pendingScrollRestore.current;
+          if (pending?.key === currentScrollKey.current && main.scrollTop < pending.top) return;
+          pendingScrollRestore.current = null;
+          scrollPositions.current.set(currentScrollKey.current, main.scrollTop);
+        }}
+        onPointerDown={() => { if (pendingScrollRestore.current?.key === currentScrollKey.current) pendingScrollRestore.current = null; }}
+        onWheel={() => { if (pendingScrollRestore.current?.key === currentScrollKey.current) pendingScrollRestore.current = null; }}
+        onTouchMove={() => { if (pendingScrollRestore.current?.key === currentScrollKey.current) pendingScrollRestore.current = null; }}
+        onKeyDown={(event) => {
+          if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End", " "].includes(event.key) &&
+            pendingScrollRestore.current?.key === currentScrollKey.current) pendingScrollRestore.current = null;
+        }}>
         {tab === "capture" && <CapturePage settings={settings} clips={clips} />}
         {tab === "library" && <LibraryPage clips={clips} onOpenEditor={setEditingClip} />}
         {tab === "games" && <GamesPage settings={settings} onChange={(next) => {
@@ -255,7 +322,9 @@ export function App() {
           setSavedSettings(next);
           void window.shard.setSettings(next).catch(() => {});
         }} />}
-        {tab === "settings" && <SettingsPage settings={settings} onChange={setSettings}
+        {tab === "settings" && <SettingsPage settings={settings} onChange={setSettings} activeSection={settingsSection}
+          onSectionChange={requestSettingsSection} updatesRequest={updatesRequest}
+          onUpdatesRequestHandled={handleUpdatesRequestHandled}
           onCommit={(next) => {
             setSettings(next);
             const committed = { ...savedSettings, audio: next.audio };
@@ -268,8 +337,14 @@ export function App() {
       </main>
       <footer data-shard-slot="statusbar" className="app__status">
         <LiveStatus />
-        <UpdateNotice />
-        <StorageMeter usedBytes={usedBytes} limitGb={settings.storage.limitGb} />
+        <UpdateNotice onOpenUpdates={openUpdatesSettings} />
+        <div data-shard-slot="status-tools" className="app__status-tools">
+          {settings.app.developerConsole && <Button size="sm" variant="ghost" data-shard-slot="console-launcher"
+            icon={<Icon name="terminal" size={14} />} onClick={() => void window.shard.toggleDevConsole()}>
+            Developer console
+          </Button>}
+          <StorageMeter usedBytes={usedBytes} limitGb={settings.storage.limitGb} />
+        </div>
       </footer>
 
       {editingClip && (
@@ -304,16 +379,6 @@ export function App() {
         </Modal>
       )}
 
-      {settings.app.developerConsole && (
-        <button
-          type="button"
-          className="dev-chip"
-          title="Developer console (click to toggle the log window)"
-          onClick={() => void window.shard.toggleDevConsole()}
-        >
-          <Icon name="terminal" size={12} /> console
-        </button>
-      )}
     </div>
   );
 }

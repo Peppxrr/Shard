@@ -79,7 +79,7 @@ export function AppSettingsPanel({ settings, onChange, version }: Props & { vers
     <SwitchRow title="Hardware acceleration" description="Use GPU acceleration for the app. Changing this requires a restart." checked={settings.app.hardwareAcceleration ?? true} onChange={setPending} />
     <SwitchRow title="Developer console" description="Show detailed logs in a separate window." checked={settings.app.developerConsole} onChange={developerConsole => patch({ developerConsole })} />
     {error && <p className="form-error" role="alert">{error}</p>}
-  </Card><UpdatesSettings version={version} /><div className="settings-credits"><p>Icons by Feather (MIT) and Lucide (ISC). Licenses included with the app.</p></div>
+  </Card><div id="settings-updates"><UpdatesSettings version={version} /></div><div className="settings-credits"><p>Icons by Feather (MIT) and Lucide (ISC). Licenses included with the app.</p></div>
     <Confirm open={pending !== null} title="Save and restart?" message="Your settings will be saved before the app restarts to apply hardware acceleration." confirmLabel="Save and restart" onConfirm={() => void restart()} onCancel={() => setPending(null)} />
   </div>;
 }

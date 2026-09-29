@@ -5,13 +5,14 @@ import type { NativeImage } from "electron";
 import { join as joinPath } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { cpSync, existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
+import { cpSync, existsSync, readdirSync, readFileSync, unlinkSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { ThemeStore } from "./themes";
 import { CoreClient } from "./core-client";
 import { loadSettings, getSettings, saveSettings, seedGamesJson } from "./settings";
 import { HotkeyManager } from "./hotkeys";
-import { Library, clipsDir } from "./library";
+import { Library, clipsDir, editorDir } from "./library";
+import { medalImportMetadata, scanMp4Tree } from "./library-import";
 import { StorageWatchdog } from "./storage";
 import { ExportManager } from "./export";
 import { ffprobe, listExportEncoders, remuxToMp4, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews } from "./ffmpeg";
@@ -20,7 +21,7 @@ import { getDefaultSoundPath, playClipSound, previewClipSound, setSoundWindow } 
 import { DevConsole } from "./dev-console";
 import { copyPlaybackReport } from "./playback-diagnostics";
 import { registerUpdater } from "./updater";
-import type { AudioSourceConfig, AudioTrackInfo, ClipRecord, DevConsoleLine, EditorExportProject, ExportProgress, Settings } from "../shared/contracts";
+import type { AudioSourceConfig, AudioTrackInfo, ClipRecord, DevConsoleLine, EditorExportProject, ExportProgress, Settings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -104,6 +105,7 @@ let core: CoreClient;
 let hotkeys: HotkeyManager;
 let library: Library;
 let storage: StorageWatchdog;
+let libraryImportActive = false;
 let exporter: ExportManager;
 let tray: Tray | null = null;
 let quitting = false;
@@ -221,11 +223,12 @@ async function main(): Promise<void> {
 
   core = new CoreClient();
   core.on("event", onCoreEvent);
-  core.on("core-exited", (code: number | null) => {
-    devConsole.feed({ t: Date.now(), level: "app", text: `Core exited (code ${code})` });
+  core.on("core-exited", (code: number | null, signal?: string | null) => {
+    devConsole.feed({ t: Date.now(), level: "app", severity: code === 0 && !signal ? "info" : "error",
+      text: `Core exited (code ${code}, signal ${signal ?? "none"})` });
   });
-  core.on("log", (level: "core" | "rpc", text: string) => {
-    devConsole.feed({ t: Date.now(), level, text });
+  core.on("log", (level: "core" | "rpc", text: string, metadata?: Pick<DevConsoleLine, "stream" | "severity">) => {
+    devConsole.feed({ t: Date.now(), level, text, ...metadata });
   });
   core.on("fatal", (msg: string) => {
     coreFatal = msg;
@@ -293,6 +296,14 @@ function createWindow(): void {
     },
   });
   win.once("ready-to-show", () => win?.show());
+  win.webContents.on("console-message", details => {
+    const severity = details.level === "error" ? "error" : details.level === "warning" ? "warn" : details.level === "debug" ? "debug" : "info";
+    devConsole.feed({ t: Date.now(), level: "app", severity,
+      text: `[renderer] ${details.message} (${details.sourceId}:${details.lineNumber})` });
+  });
+  win.webContents.on("render-process-gone", (_event, details) => {
+    devConsole.feed({ t: Date.now(), level: "app", severity: "error", text: `Renderer process exited: ${details.reason}; code=${details.exitCode}` });
+  });
   win.on("maximize", () => win?.webContents.send("window:maximized", true));
   win.on("unmaximize", () => win?.webContents.send("window:maximized", false));
   setSoundWindow(win);
@@ -336,10 +347,49 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("library:list", () => library.list());
-  ipcMain.handle("library:delete", (_e, id: string) => {
-    library.delete(id);
+  ipcMain.handle("library:delete", async (_e, id: string) => {
+    await library.delete(id);
     void storage.check();
     win?.webContents.send("library:changed");
+  });
+  ipcMain.handle("library:rename", async (_e, id: string, name: string) => {
+    if (typeof id !== "string" || typeof name !== "string") throw new Error("Invalid clip name");
+    try { return await library.renameClip(id, name); }
+    finally { editorProbeCache.delete(id); win?.webContents.send("library:changed"); }
+  });
+  ipcMain.handle("library:importMedalFolder", async (_e, kind: LibraryImportKind): Promise<LibraryImportResult> => {
+    if (kind !== "clips" && kind !== "edited") throw new Error("Unknown import type");
+    if (libraryImportActive) throw new Error("A library import is already running");
+    libraryImportActive = true;
+    const result: LibraryImportResult = { cancelled: false, imported: 0, skipped: 0, errors: [] };
+    try {
+      const options: Electron.OpenDialogOptions = {
+        title: kind === "clips" ? "Choose your Medal Clips folder" : "Choose your Medal editor exports folder",
+        defaultPath: kind === "clips" ? "C:\\Medal\\Clips" : "C:\\Medal\\Video-Editor\\exports",
+        properties: ["openDirectory"], buttonLabel: "Import videos",
+      };
+      const picked = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+      if (picked.canceled || !picked.filePaths[0]) return { ...result, cancelled: true };
+      const folder = picked.filePaths[0];
+      win?.webContents.send("library:import-progress", { completed: 0, total: 0, currentName: path.basename(folder) });
+      const scan = await scanMp4Tree(folder);
+      result.skipped = scan.skipped;
+      result.errors = scan.errors;
+      const destination = kind === "clips" ? clipsDir() : editorDir();
+      for (let i = 0; i < scan.files.length; i++) {
+        const file = scan.files[i];
+        win?.webContents.send("library:import-progress", { completed: i, total: scan.files.length, currentName: path.basename(file) });
+        try {
+          const stat = await fs.stat(file);
+          const metadata = kind === "clips" ? medalImportMetadata(folder, file, stat.mtimeMs) : { game: null, createdAt: stat.mtimeMs };
+          const imported = await library.importCopiedMp4Async(file, destination, kind === "clips" ? "clip" : "edited", metadata);
+          if (imported.duplicate) result.skipped++;
+          else { result.imported++; win?.webContents.send("library:changed"); }
+        } catch (error) { result.errors.push(`${path.basename(file)}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      win?.webContents.send("library:import-progress", { completed: scan.files.length, total: scan.files.length, currentName: "" });
+      return result;
+    } finally { libraryImportActive = false; void storage.check(); }
   });
   ipcMain.handle("library:protect", (_e, id: string, prot: boolean) => {
     library.setProtected(id, prot);
@@ -480,7 +530,10 @@ async function doExport(clipId: string, project: EditorExportProject): Promise<v
   if (!project || !Array.isArray(project.segments) || !Array.isArray(project.audioTracks)) {
     throw new Error("The editor project is malformed");
   }
-  await exporter.export(clip, project, getSettings().export);
+  const release = library.tryLockPath(clip.path);
+  if (!release) throw new Error("This clip is being renamed or deleted. Try again in a moment.");
+  try { await exporter.export(clip, project, getSettings().export); }
+  finally { release(); }
 }
 
 function probeClipTracks(clipId: string): Promise<AudioTrackInfo[]> {
@@ -492,8 +545,9 @@ function probeClipTracks(clipId: string): Promise<AudioTrackInfo[]> {
     // Configured rows keep stable mix indexes while disabled so live toggles do
     // not restart the ring. Use the same stable row order when naming streams.
     const configuredSources = getSettings().audio.sources.slice(0, 5);
-    const sourceTracks = clip.source !== "edited" && probed.length > 1 ? probed.slice(1) : probed;
-    const tracks = sourceTracks.map((track, index) => identifyAudioTrack(track, configuredSources[index], sourceTracks.length));
+    const nativeCapture = clip.source !== "edited" && clip.importedFrom !== "medal";
+    const sourceTracks = nativeCapture && probed.length > 1 ? probed.slice(1) : probed;
+    const tracks = sourceTracks.map((track, index) => identifyAudioTrack(track, nativeCapture ? configuredSources[index] : undefined, sourceTracks.length));
     return tracks;
   });
   editorProbeCache.set(clipId, { path: clip.path, tracks: pending });

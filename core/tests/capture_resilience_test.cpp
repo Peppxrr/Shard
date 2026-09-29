@@ -28,6 +28,7 @@ int main()
   assert(!stable.ready({1280, 960}, 4000));
   using shard::CaptureFrameContent;
   using shard::CaptureBackendHealth;
+  using shard::CaptureDiagnosticSchedule;
   constexpr uint32_t probeWidth = 64, probeHeight = 36, stride = 272;
   std::array<uint8_t, stride * probeHeight> pixels{};
   assert(shard::captureFrameContent(nullptr, probeWidth, probeHeight, stride) == CaptureFrameContent::Unknown);
@@ -45,6 +46,20 @@ int main()
   assert(shard::captureFrameContent(pixels.data(), probeWidth, probeHeight, stride) == CaptureFrameContent::Black);
   pixels.fill(80);
   assert(shard::captureFrameContent(pixels.data(), probeWidth, probeHeight, stride) == CaptureFrameContent::Content);
+  assert(std::string(shard::captureFrameContentName(CaptureFrameContent::Unknown)) == "unknown");
+  assert(std::string(shard::captureFrameContentName(CaptureFrameContent::Black)) == "black");
+  assert(std::string(shard::captureFrameContentName(CaptureFrameContent::Content)) == "content");
+
+  CaptureDiagnosticSchedule diagnostics;
+  assert(diagnostics.shouldLog("healthy", 100)); // First game snapshot.
+  assert(!diagnostics.shouldLog("healthy", 500));
+  assert(!diagnostics.shouldLog("black", 600)); // Debounce a short-lived probe change.
+  assert(!diagnostics.shouldLog("content", 1100));
+  assert(diagnostics.shouldLog("content", 2100)); // Stable state change after two seconds.
+  assert(!diagnostics.shouldLog("content", 12099));
+  assert(diagnostics.shouldLog("content", 12100)); // Unchanged state heartbeat at ten seconds.
+  diagnostics.reset();
+  assert(diagnostics.shouldLog("new subject", 12200));
 
   CaptureBackendHealth health;
   for (uint64_t t = 500; t <= 10000; t += 500)

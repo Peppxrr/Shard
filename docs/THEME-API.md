@@ -33,7 +33,7 @@ Use `[data-shard-component="<value>"]` with these values:
 | `select` | Button with `aria-expanded="true|false"`, native disabled state |
 | `select-menu` | Dropdown listbox; options use `aria-selected` |
 | `context-menu` | Player/editor context menu |
-| `modal` | Dialog overlay |
+| `modal` | Dialog overlay; `data-shard-modal="clip-viewer"` identifies the clip preview dialog |
 | `toast` | `data-shard-state="info|ok|error"` |
 | `empty` | Empty-state content |
 | `theme-picker` | Theme selection/options area |
@@ -41,8 +41,13 @@ Use `[data-shard-component="<value>"]` with these values:
 | `capture-button` | Save-clip button; `data-shard-state="ready|saving"` |
 | `record-button` | `data-shard-state="idle|recording"` |
 | `clip` | `data-favorite="true|false"`, `data-source="clip|recording|edited"` |
+| `library-filters` | Source filter group; child filter buttons expose `data-source="all|clip|recording|edited"` and `aria-pressed` |
+| `clip-viewer` | Video and details layout inside the preview dialog; `data-source="clip|recording|edited"` |
 | `game` | Running entry: `data-running="true|false"`; excluded entry: `data-excluded="true"` |
-| `player` | `data-playing="true|false"` |
+| `player` | `data-playing`, `data-fullscreen`, `data-controls-visible`, each `"true|false"`; `data-shard-state="loading|ready|error"` |
+| `clip-rename` | `data-shard-state="idle|editing|saving"`; inline file rename form shared by viewer and editor |
+| `medal-import` | `data-shard-state="idle|importing|complete"`; folder selection and import results |
+| `developer-console` | `data-shard-state="loading|ready|error"`, `data-stream-state="live|paused"`, `data-action-state="idle|clearing|copying|exporting"`; diagnostic log viewer |
 | `timeline` | Editor timeline |
 | `timeline-segment` | `data-selected="true|false"` |
 | `audio-track` | `data-selected`, `data-muted`, `data-included`, each `"true"` or `"false"` |
@@ -57,15 +62,29 @@ Dropdowns and context menus use native popovers in Chromium's top layer. Their D
 
 `[data-shard-slot="<value>"]` identifies a region inside a component:
 
-- Shell: `titlebar`, `content`, `statusbar`.
+- Shell: `titlebar`, `content`, `statusbar`, `status-tools`, `console-launcher`.
 - Cards: `card-header`, `card-body`, `card-footer`.
 - Settings: `settings-navigation`, `settings-content`.
 - Capture: `capture-actions`.
-- Library: `toolbar`, `clip-grid`, `clip-thumbnail`, `clip-details`, `clip-actions`.
-- Games, editor, and timeline: `toolbar`.
-- Player: `player-controls`.
+- Library: `library-header`, `library-heading`, `library-header-actions`, `library-summary`, `library-navigation`, `library-source-filter`, `library-filter-count`, `toolbar`, `library-search`, `library-results`, `clip-grid`.
+- Clip cards: `clip-thumbnail`, `clip-image`, `clip-placeholder`, `clip-play`, `clip-source`, `clip-duration`, `clip-details`, `clip-heading`, `clip-title`, `clip-filename`, `clip-date`, `clip-size`, `clip-actions`, `clip-delete-confirmation`, `clip-error`.
+- Dialogs: `modal-panel`, `modal-header`, `modal-heading`, `modal-title`, `modal-subtitle`, `modal-body`, `modal-footer`.
+- Clip viewer: `viewer-media`, `viewer-details`, `viewer-heading`, `viewer-metadata`, `viewer-date`, `viewer-duration`, `viewer-size`, `viewer-resolution`, `viewer-framerate`, `viewer-actions`, `viewer-file`, `viewer-filename`, `viewer-error`.
+- Games, editor, and timeline: `toolbar`, `editor-rename`.
+- Player: `player-stage`, `player-video`, `player-feedback`, `player-loading`, `player-status`, `player-controls`, `player-seek`, `player-transport`, `player-time`, `player-volume`, `player-speed`, `player-error`.
+- Renaming: `rename-form`, `rename-input`, `rename-actions`, `rename-error`.
+- Medal import: `import-description`, `import-options`, `import-progress`, `import-result`, `import-error`, `import-actions`.
+- Developer console: `console-shell`, `console-header`, `console-identity`, `console-heading`, `console-live-state`, `console-controls`, `console-filters`, `console-search`, `console-actions`, `console-workspace`, `console-overflow`, `console-feedback`, `console-results`, `console-list`, `console-empty`, `console-pagination`, `console-row`, `console-time`, `console-source`, `console-severity`, `console-message`, `console-footer`, `console-counts`, `console-paging`, `console-keyboard-help`.
 
 Slots are intentionally reusable; scope a toolbar to its page/component. Modal placement is controlled by Shard, so do not assume all dialogs descend from a particular page.
+
+The clip viewer's outer overlay uses `[data-shard-component="modal"][data-shard-modal="clip-viewer"]`; its video/details layout uses `[data-shard-component="clip-viewer"]`. Use the former for dialog placement, panel, and header styling, and the latter for media, metadata, and actions. The same viewer opens from Library and Capture. Clip cards keep `.clip`, `.clip__thumb`, and `.clip__meta`, but the thumbnail and title are now keyboard-accessible buttons; reset button-specific styling through the corresponding slots if needed.
+
+The Medal import dialog uses `[data-shard-component="modal"][data-shard-modal="medal-import"]`. Rename and import controls use the shared button/input tokens. Playback speed uses the existing select and select-menu components inside `player-speed`; its value affects preview playback only.
+
+The developer-console root exposes `data-shard-state="loading|ready|error"` for history loading, `data-stream-state="live|paused"` for the live feed, and `data-action-state="idle|clearing|copying|exporting"` for the current asynchronous action. The `console-actions` slot also exposes that action state as `data-shard-state`. Console rows expose `data-severity="debug|info|warn|error"` and `data-source="core|core.stdout|core.stderr|app|rpc|event|updates"`. Source identifies where a line came from; severity describes its content. In particular, `core.stderr` is not itself an error or warning. Use status tokens for severity emphasis and preserve selectable log text. The live view retains bounded history; its overflow notice and pagination remain independent of the full-session export.
+
+Fullscreen player controls animate out of view after inactivity. Style their colors and surfaces through the slots/tokens, while preserving Shard's visibility, transforms, focus behavior, and media geometry. Keyboard-focused controls remain visible. Loading, errors, and optional metadata slots are rendered only when relevant.
 
 ## Design tokens
 
@@ -87,12 +106,14 @@ Define tokens on `:root`. Values inherit unless explicitly overridden by a compo
 | Elevation | `--shadow-1`, `--shadow-2`, `--shadow-3` |
 | Transitions | `--t`, `--t-fast` (duration plus timing function) |
 | Overlays | `--overlay-bg`, `--media-badge-bg`, `--media-badge-fg` |
-| Player | `--player-bg`, `--player-controls-bg` |
+| Player | `--player-bg`, `--player-controls-bg`, `--player-overlay-bg`, `--player-overlay-fg` |
 | Timeline | `--timeline-bg`, `--timeline-label-bg`, `--timeline-ruler-bg`, `--timeline-track-bg`, `--timeline-cut`, `--timeline-selection`, `--timeline-handle`, `--timeline-playhead` |
 | Waveform | `--waveform`, `--waveform-muted` (canvas colors repaint on theme/option changes) |
 | Icons | `--icon-<name>`; see below |
 
 `--bg-0` is the deepest background and higher numbers are raised surfaces. `--fg` is primary text, with decreasing emphasis through `--fg-4`. `--accent-ink` is text on solid accent buttons. `--accent-grad` and `--accent-grad-soft` accept CSS background images. Token changes do not alter video pixels; the actual video canvas stays black outside the image. Fixed media-coordinate geometry and some internal decoration intentionally are not tokenized.
+
+`--player-overlay-bg` accepts a CSS background, including a gradient, for fullscreen controls. `--player-overlay-fg` controls their foreground and derives from `--media-badge-fg` by default. Keep both readable over light and dark video frames. Media thumbnails, loading indicators, and playback feedback use the existing media badge tokens.
 
 ## Icons
 

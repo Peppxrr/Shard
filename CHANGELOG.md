@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.7
+
+- Redesigned the Library with source counts, Favorites filtering, clearer search and sort controls, larger clip previews, and simpler metadata.
+- Added a video-focused clip preview with capture details, responsive layout, keyboard navigation, and themed loading and error states.
+- Added safe file renaming in the clip preview and editor while preserving playback position and editor changes. Rename and Show in folder now align consistently.
+- Added playback speeds from 0.25x to 2x in the clip preview and editor, including fullscreen playback.
+- Added Medal imports for clips and edited exports, with progress, duplicate detection, and supported game and capture-date metadata. Imports leave the original files untouched.
+- Made fullscreen playback controls hide after inactivity and return with pointer or keyboard activity.
+- Tabs and Settings sections now remember their scroll position. The footer update notice opens the Updates panel; only its close button dismisses it.
+- Redesigned the Developer Console with source and severity filters, search, pause, filtered copying, and complete session-log export.
+- Added more detailed startup and capture diagnostics to help investigate black video and capture recovery, with documented theme support for the new interface regions.
+
 ## 0.1.6
 
 - Added automatic window-capture fallback when the game hook produces black video. Shard keeps retrying the hook and switches back once usable frames return.
