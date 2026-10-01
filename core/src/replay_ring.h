@@ -3,6 +3,7 @@
 #include "app.h"
 #include "config.h"
 #include "encoders.h"
+#include "replay_timing.h"
 
 #include <obs.h>
 
@@ -35,8 +36,7 @@ public:
   ReplayRing(const ReplayRing&) = delete;
   ReplayRing& operator=(const ReplayRing&) = delete;
 
-  // Create output + encoders and begin capture. The ring is always warm
-  // (auto-started at boot) so hotkeys work at any moment.
+  // Create output + encoders and begin capture when a subject is available.
   bool start();
   void stop();
   // Tear down and re-create (encoder/video setting changes).
@@ -98,12 +98,7 @@ private:
   std::atomic<bool> muxing_{false};
 
   mutable std::mutex lifecycleMtx_;
-  std::chrono::steady_clock::time_point inactiveSince_{};
-  // True once the watchdog has reported healthy capture since the last start.
-  // The ring is started eagerly at boot (and on config restarts) before any
-  // subject exists; until real activity arrives, an inactive signal stops it
-  // immediately instead of buffering uselessly through the 15 s grace.
-  bool sawActivity_ = false;
+  ReplayActivityGrace activityGrace_;
 
   std::mutex saveMtx_;
   std::condition_variable saveCv_;

@@ -55,6 +55,7 @@ private:
   std::atomic<bool> shutdownRequested_{false};
   mutable std::recursive_mutex dispatchMutex_;
   CaptureSizeStability captureSizeStability_;
+  CaptureSize preservedCaptureSize_; // Bounds state-change diagnostics only.
 };
 
 } // namespace shard

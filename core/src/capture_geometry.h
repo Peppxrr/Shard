@@ -22,6 +22,19 @@ inline CaptureSize fitCaptureSize(CaptureSize source, CaptureSize bounds)
           std::max(16u, static_cast<uint32_t>(source.height * scale) & ~1u)};
 }
 
+// Live scene transforms can absorb source-size changes without discarding
+// encoded history when the canvas proportions and output format stay fixed.
+// An aspect/encoded-size change still needs the normal video reset boundary.
+inline bool captureCanPreserveVideo(CaptureSize source, CaptureSize canvas,
+                                    CaptureSize desiredOutput, CaptureSize currentOutput,
+                                    uint32_t desiredFps, uint32_t fpsNum, uint32_t fpsDen)
+{
+  return source.valid() && canvas.valid() && desiredOutput.valid() && currentOutput.valid() &&
+         uint64_t(source.width) * canvas.height == uint64_t(canvas.width) * source.height &&
+         desiredOutput == currentOutput && desiredFps && fpsDen &&
+         uint64_t(desiredFps) * fpsDen == fpsNum;
+}
+
 class CaptureSizeStability {
 public:
   bool ready(CaptureSize size, uint64_t nowMs)

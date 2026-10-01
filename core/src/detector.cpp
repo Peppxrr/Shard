@@ -137,6 +137,8 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
   const bool confirmedProduct =
       product && !runtimeProduct && product->classification() == "confirmed-game";
   const bool explicitUser = exact && exact->source == GameSource::User;
+  const bool minecraftClient = isMinecraftClientProcess(p.exe, p.commandLine);
+  const bool gameRuntime = ctx.runtime.gameRuntime || minecraftClient;
 
   if (isConfirmedNonGame(product)) {
     result.reasons.push_back({"authoritative product type", -200,
@@ -185,6 +187,11 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
     result.reasons.push_back({"game runtime", 40, "process loaded a game engine or game-oriented runtime"});
     result.score += 40;
   }
+  if (minecraftClient) {
+    result.reasons.push_back({"Minecraft Java client", 40,
+                              "Java invokes a recognized Minecraft client entry point or client launch target"});
+    result.score += 40;
+  }
   if (ctx.runtime.gameInput) {
     result.reasons.push_back({"gaming input stack", 25,
                               "process uses both modern gaming input and controller APIs"});
@@ -228,14 +235,14 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
 
   const bool mediaTarget = containsMediaTarget(p.commandLine) || containsMediaTarget(ctx.window.title);
   const bool mediaApplication = mediaTarget || (ctx.runtime.mediaRuntime && (!product || runtimeProduct));
-  if (mediaApplication && !ctx.runtime.gameRuntime) {
+  if (mediaApplication && !gameRuntime) {
     result.reasons.push_back({"media playback intent", -200,
                               "process targets media content or hosts a dedicated playback runtime"});
     result.score -= 200;
     return result;
   }
 
-  if (ctx.runtime.webRuntime && (!product || runtimeProduct) && !ctx.runtime.gameRuntime) {
+  if (ctx.runtime.webRuntime && (!product || runtimeProduct) && !gameRuntime) {
     result.reasons.push_back({"hosted web application", -200,
                               "untrusted process hosts Chromium, WebView, or Node native modules"});
     result.score -= 200;
@@ -243,7 +250,7 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
   }
 
   const bool operatingSystemApplication =
-      !ctx.runtime.gameRuntime && isOperatingSystemApplicationPath(p.path);
+      !gameRuntime && isOperatingSystemApplicationPath(p.path);
   if (operatingSystemApplication) {
     result.reasons.push_back({"operating-system application", -200,
                               "Windows/SystemApps/WindowsApps process has no game-runtime evidence"});
@@ -252,6 +259,7 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
   }
 
   const bool largeRenderWindow = ctx.window.area >= (int64_t)640 * 360;
+  const bool minecraftRenderSurface = minecraftClient && ctx.runtime.graphicsApi && largeRenderWindow;
   // Render behavior corroborates identity; it is never identity. Fullscreen
   // alone is intentionally excluded because browsers, file dialogs, Python
   // GUIs, media tools, and desktop shells can all own fullscreen GPU surfaces.
@@ -286,7 +294,7 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
   const bool untrustedProduct = !product || runtimeProduct;
   const bool unknownShape = untrustedProduct && !ctx.runtime.webRuntime &&
                             (((ctx.recentProcess || runtimeProduct || ctx.visibleWindowMs >= 1500) && ctx.runtime.gameRuntime) ||
-                             stableGameInputSurface);
+                             stableGameInputSurface || minecraftRenderSurface);
   const bool liveGameShape = ctx.window.captureable &&
                              (knownProductShape || unknownShape);
 
@@ -295,7 +303,7 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
     // product immediately, then re-runs detection to bind the process to it.
     result.decision = DetectionResult::Decision::Detected;
     if (!product) {
-      result.gameName = trim(ctx.window.title);
+      result.gameName = minecraftClient ? "Minecraft" : trim(ctx.window.title);
       if (result.gameName.empty()) {
         result.gameName = baseName(p.exe);
         const size_t dot = result.gameName.rfind('.');

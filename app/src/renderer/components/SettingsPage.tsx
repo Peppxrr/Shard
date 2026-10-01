@@ -7,6 +7,8 @@ import { CaptureSettingsPanel, ExportSettingsPanel, StorageSettingsPanel, AppSet
 import { AudioSourcesSettings } from "./AudioSourcesSettings";
 import { HotkeysSettings } from "./HotkeysSettings";
 import { AppearancePanel } from "./AppearancePanel";
+import { searchSettings, type SettingsSearchResult } from "./settingsSearch";
+import { FloatingMenu } from "./FloatingMenu";
 
 interface Props {
   settings: Settings;
@@ -60,6 +62,33 @@ export function SettingsPage({ settings, onChange, onCommit, activeSection, onSe
   const [version, setVersion] = useState("");
   const [defaultClipsFolder, setDefaultClipsFolder] = useState("");
   const pageRef = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const [searchTarget, setSearchTarget] = useState<SettingsSearchResult | null>(null);
+  const searchResults = searchSettings(query, settings.hotkeys.map(hotkey => `${hotkey.label} ${hotkey.accelerator}`).join(" "));
+  const searching = query.trim().length > 0;
+  const openSearchResult = (result: SettingsSearchResult) => {
+    setQuery("");
+    setSearchOpen(false);
+    setSearchTarget(result);
+    onSectionChange(result.section);
+  };
+
+  useEffect(() => {
+    if (!searchTarget || active !== searchTarget.section || searching) return;
+    const frame = requestAnimationFrame(() => {
+      const content = pageRef.current?.querySelector<HTMLElement>(".settings__content");
+      const heading = Array.from(content?.querySelectorAll<HTMLElement>(".card__title, h3, .setting-row__copy > strong") ?? [])
+        .find(element => element.textContent === searchTarget.title);
+      const target = heading?.closest<HTMLElement>(".setting-row, .video-setting, .card") ?? content;
+      target?.scrollIntoView({ block: "center" });
+      const control = target?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled)");
+      control?.focus({ preventScroll: true });
+      setSearchTarget(null);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [searchTarget, active, searching]);
 
   useEffect(() => {
     try { localStorage.setItem("shard:settingsTab", active); } catch {}
@@ -67,9 +96,10 @@ export function SettingsPage({ settings, onChange, onCommit, activeSection, onSe
 
   useEffect(() => {
     if (!updatesRequest || active !== "app") return;
+    if (searching) { setQuery(""); return; }
     pageRef.current?.querySelector<HTMLElement>("#settings-updates")?.scrollIntoView({ behavior: "smooth", block: "start" });
     onUpdatesRequestHandled();
-  }, [updatesRequest, active, onUpdatesRequestHandled]);
+  }, [updatesRequest, active, searching, onUpdatesRequestHandled]);
 
   useEffect(() => {
     window.shard.version().then(setVersion).catch(() => {});
@@ -137,10 +167,44 @@ export function SettingsPage({ settings, onChange, onCommit, activeSection, onSe
     <div data-shard-page="settings" data-shard-section={active} className="page settings" ref={pageRef}>
       <aside data-shard-slot="settings-navigation" className="settings__nav">
         <h1 className="page__title settings__title">Settings</h1>
+        <div data-shard-slot="settings-search" className="settings-search" ref={searchRef}>
+          <Icon name="search" size={18} />
+          <input type="search" aria-label="Search Settings" placeholder="Search Settings" value={query}
+            aria-controls={searching && searchOpen ? "settings-search-results" : undefined}
+            onFocus={() => setSearchOpen(true)} onChange={event => { setQuery(event.target.value); setSearchOpen(true); }} onKeyDown={event => {
+              if (event.key === "Escape") { event.preventDefault(); setSearchOpen(false); }
+              if (event.key === "Enter" && searching && searchResults.length) { event.preventDefault(); openSearchResult(searchResults[0]); }
+              if (event.key === "ArrowDown" && searching) {
+                event.preventDefault(); setSearchOpen(true);
+                const focusFirst = () => pageRef.current?.querySelector<HTMLButtonElement>(".settings-search-results button")?.focus();
+                if (searchOpen) focusFirst(); else requestAnimationFrame(focusFirst);
+              }
+            }} />
+          {query && <IconButton size="sm" label="Clear settings search" onClick={() => { setQuery(""); searchRef.current?.querySelector<HTMLInputElement>("input")?.focus(); }}><Icon name="x" size={15} /></IconButton>}
+        </div>
+        {searching && searchOpen && <FloatingMenu anchor={searchRef} placement="inline" onClose={() => setSearchOpen(false)} role="menu"
+          id="settings-search-results" slot="settings-search-results" className="settings-search-results" ariaLabel="Matching settings">
+          <div onKeyDown={event => {
+            if (event.key === "Escape") { searchRef.current?.querySelector<HTMLInputElement>("input")?.focus(); setSearchOpen(false); }
+            const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+            const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            if (buttons.length && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+              event.preventDefault();
+              const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+                : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+              buttons[next].focus();
+            }
+          }}>
+            {searchResults.length ? searchResults.map(result => <button key={`${result.section}:${result.title}`} type="button" role="menuitem" onClick={() => openSearchResult(result)}>
+              <span>{result.title}</span><span className="dim">{NAV.find(section => section.id === result.section)?.label}</span>
+            </button>) : <p className="dim" role="status">No matching settings.</p>}
+          </div>
+        </FloatingMenu>}
+        <div data-shard-slot="settings-navigation-divider" className="settings__divider" aria-hidden="true" />
         {NAV.map((s) => (
           <button key={s.id} type="button" className={active === s.id ? "nav__item settings__nav-item active" : "nav__item settings__nav-item"}
-            aria-current={active === s.id ? "page" : undefined} onClick={() => onSectionChange(s.id)}>
-            <span className="ico"><Icon name={s.icon} size={15} /></span> {s.label}
+            aria-current={active === s.id ? "page" : undefined} onClick={() => { setQuery(""); setSearchOpen(false); setSearchTarget(null); onSectionChange(s.id); }}>
+            <span className="ico"><Icon name={s.icon} size={18} /></span> {s.label}
           </button>
         ))}
       </aside>
@@ -163,7 +227,7 @@ export function SettingsPage({ settings, onChange, onCommit, activeSection, onSe
 
         {active === "export" && (<ExportSettingsPanel settings={settings} onChange={onChange} encoders={exportEncoders} />)}
 
-        {active === "audio" && (<div className="stack"><Card title="Recording audio" sub="Choose the sounds included in your clips."><AudioSourcesSettings sources={settings.audio.sources} devices={devices} onChange={sources => patchDeep("audio", { sources })} onCommit={sources => onCommit({ ...settings, audio: { ...settings.audio, sources } })} /></Card><ClipSoundSettings settings={settings} onChange={onChange} /></div>)}
+        {active === "audio" && (<div data-shard-slot="settings-section-layout" className="settings-sections"><Card title="Recording audio" sub="Choose the sounds included in your clips."><AudioSourcesSettings sources={settings.audio.sources} devices={devices} onChange={sources => patchDeep("audio", { sources })} onCommit={sources => onCommit({ ...settings, audio: { ...settings.audio, sources } })} /></Card><ClipSoundSettings settings={settings} onChange={onChange} /></div>)}
 
         {active === "hotkeys" && <HotkeysSettings hotkeys={settings.hotkeys} onChange={hotkeys => patch({ hotkeys })} />}
 

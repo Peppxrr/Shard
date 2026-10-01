@@ -51,7 +51,12 @@ build_x64\Debug\shard_capture_backend_fixture.exe "$PWD/app/resources/core-bin-d
 ```
 
 It checks loading-screen tolerance, visible WGC takeover, recreation of a
-black hook, and return to recovered hook output. The existing
+black hook, frozen-content hook takeover against animated WGC, recovery after
+hook movement returns, independent probes when WGC dimensions disappear,
+and downstream scene rebinding without healthy hook recreation. Pure native
+tests simulate long outages/cooldowns, stale/unknown probes, static menus,
+wake coalescing, desktop escalation and adapter-index/LUID selection without
+waiting minutes. The existing
 `scripts/game-capture-test.mjs` separately verifies real signed-hook capture,
 including minimized games. Neither fixture establishes compatibility with a
 specific protected game on another machine.
@@ -66,6 +71,15 @@ Debug paths, then run `node scripts/game-capture-test.mjs` with
 continue decodable recording segments. `CF_GC_IGNORE_EXES` is an optional
 comma-separated exclusion list for games already running during the test; it
 affects only the fixture's temporary profile.
+
+To verify same-aspect capture continuity at a fixed encoded size, run
+`$env:CF_GC_CONTINUITY='1'; node scripts/game-capture-test.mjs`. This mode starts
+the explicitly registered D3D11 fixture at 1280x720, replaces its window at
+1600x900 and 1920x1080, and uses game-only capture with a 960x540 custom output
+and bounded replay caps. It checks idle startup before the fixture launches,
+preserved ring history and the `replay_preserved=true` diagnostics across both
+replacements, fresh decodable clips at the fixed output size, and one continuous
+decodable recording file.
 
 The release workflow calls the same `release` scope. Do not also perform a full
 local release run when CI has verified the same changes. Hosted CI does not

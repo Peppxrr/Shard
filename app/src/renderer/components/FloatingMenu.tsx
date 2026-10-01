@@ -4,16 +4,18 @@ import { THEME_CHANGE_EVENT } from "../themeManager";
 
 /** The top layer escapes filtered/transformed ancestors without moving the DOM:
  * page-scoped theme selectors and inherited variables still work. */
-export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, className, role, id, ariaLabel }: {
-  anchor?: RefObject<HTMLButtonElement | null>;
+export function FloatingMenu({ anchor, x = 0, y = 0, placement = "block", onClose, children, className, role, id, ariaLabel, slot }: {
+  anchor?: RefObject<HTMLElement | null>;
   x?: number;
   y?: number;
+  placement?: "block" | "inline";
   onClose: () => void;
   children: ReactNode;
   className: string;
   role: "menu" | "listbox";
   id?: string;
   ariaLabel?: string;
+  slot?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const positionRef = useRef<(() => void) | null>(null);
@@ -30,11 +32,21 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
       menu.style.maxWidth = `${width}px`;
       menu.style.maxHeight = `${height}px`;
       const target = button?.getBoundingClientRect();
-      if (target) menu.style.width = `${Math.min(width, Math.max(target.width, 180))}px`;
+      const right = target ? window.innerWidth - margin - target.right - gap : 0;
+      const leftSpace = target ? target.left - margin - gap : 0;
+      const inline = !!target && placement === "inline" && Math.max(right, leftSpace) >= 180;
+      if (target) menu.style.width = `${placement === "inline"
+        ? Math.min(width, 320, inline ? Math.max(right, leftSpace) : width)
+        : Math.min(width, Math.max(target.width, 180))}px`;
       const wanted = Math.min(menu.getBoundingClientRect().height, target ? 280 : height);
       let left = target?.left ?? x;
       let top = y;
-      if (target) {
+      if (target && inline) {
+        menu.style.maxHeight = `${Math.min(wanted, height)}px`;
+        left = right >= menu.getBoundingClientRect().width || right >= leftSpace
+          ? target.right + gap : target.left - gap - menu.getBoundingClientRect().width;
+        top = target.top;
+      } else if (target) {
         const below = Math.max(0, window.innerHeight - margin - target.bottom - gap);
         const above = Math.max(0, target.top - margin - gap);
         const useBelow = below >= wanted || below >= above;
@@ -86,13 +98,14 @@ export function FloatingMenu({ anchor, x = 0, y = 0, onClose, children, classNam
       menu.removeEventListener("toggle", toggled);
       if (menu.matches(":popover-open")) menu.hidePopover();
     };
-  }, [anchor, x, y]);
+  }, [anchor, x, y, placement]);
 
   // React commits child changes before layout effects run. Measuring here
   // forces current layout synchronously and avoids frame scheduling entirely.
   useLayoutEffect(() => { positionRef.current?.(); }, [children]);
 
   return <div ref={ref} id={id} popover="auto" role={role} aria-label={ariaLabel}
+    data-shard-slot={slot}
     data-shard-component={role === "listbox" ? "select-menu" : "context-menu"}
     className={className}
     style={{ position: "fixed", inset: "auto", margin: 0, overflowY: "auto" }}

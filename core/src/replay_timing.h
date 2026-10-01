@@ -31,4 +31,21 @@ inline bool replayCanPurge(bool empty, int keyframes)
   return !empty && keyframes > 2;
 }
 
+// Apply the same inactivity grace during initial source acquisition and
+// later target/window transitions. An eagerly started ring may already hold
+// useful packets before the first watchdog readiness signal arrives.
+class ReplayActivityGrace {
+public:
+  bool shouldStop(bool captureActive, bool buffering, uint64_t nowMs)
+  {
+    if (captureActive || !buffering) { reset(); return false; }
+    if (!inactive_) { inactive_ = true; sinceMs_ = nowMs; }
+    return nowMs - sinceMs_ >= 15000;
+  }
+  void reset() { inactive_ = false; }
+private:
+  bool inactive_ = false;
+  uint64_t sinceMs_ = 0;
+};
+
 } // namespace shard

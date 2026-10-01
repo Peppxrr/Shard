@@ -181,27 +181,11 @@ void ReplayRing::restart()
 void ReplayRing::setCaptureActive(bool active)
 {
   std::lock_guard<std::mutex> lock(lifecycleMtx_);
-  const auto now = steady_clock::now();
-  if (active) {
-    sawActivity_ = true;
-    inactiveSince_ = steady_clock::time_point{};
-    if (!active_.load())
-      startLocked();
-  } else if (!active_.load()) {
-    // Already idle; keep the timer clear so a later stop gets a fresh window.
-    inactiveSince_ = steady_clock::time_point{};
-  } else if (!sawActivity_) {
-    // Eagerly started (boot or config restart) but the watchdog has never
-    // seen healthy capture: nothing valuable is buffered, so stop now rather
-    // than buffering dead frames through the grace period.
+  if (active && !active_.load()) startLocked();
+  const auto nowMs = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+  if (activityGrace_.shouldStop(active, active_.load(), nowMs)) {
+    std::fprintf(stderr, "[replay-ring][info] action=stop reason=capture_inactive grace_ms=15000 history_cleared=true\n");
     stopLocked();
-  } else {
-    if (inactiveSince_ == steady_clock::time_point{}) {
-      inactiveSince_ = now;
-    } else if (now - inactiveSince_ >= seconds(15)) {
-      // Safety margin elapsed: stop buffering and free the RAM.
-      stopLocked();
-    }
   }
 }
 
@@ -209,7 +193,7 @@ bool ReplayRing::startLocked()
 {
   if (active_.load())
     return true;
-  sawActivity_ = false;
+  activityGrace_.reset();
 
   static bool registered = false;
   if (!registered) {

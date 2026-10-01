@@ -252,11 +252,13 @@ void Rpc::restartCaptureOutputs()
 
 void Rpc::restartVideoPipeline()
 {
+  preservedCaptureSize_ = {};
   // Resolution/fps/monitor changes need obs_reset_video, which requires every
   // output and source stopped and released. Stop the watchdog first so its
   // activity callback cannot restart the ring during the reset.
   const auto captureSize = sources_.subject().kind == SourceManager::Subject::Kind::Window
       ? sources_.captureSize() : CaptureSize{};
+  const CaptureSize previousCanvas{app_.baseWidth(), app_.baseHeight()};
   sources_.stopWatchdog();
   auto recordingLock = recorder_.lockLifecycle();
   const bool wasRecording = recorder_.active();
@@ -270,26 +272,67 @@ void Rpc::restartVideoPipeline()
 
   if (!app_.resetVideo(captureSize.width, captureSize.height)) {
     events_.emit("error", {{"code", "CAPTURE_INIT_FAILED"}, {"message", app_.lastError()}});
-    return;
+    // A failed automatic reset must not permanently stop capture monitoring.
+    // Attempt the last accepted canvas once; the watchdog's retained cooldown
+    // governs subsequent recovery if the driver is still unavailable.
+    const bool restored = app_.resetVideo(previousCanvas.width, previousCanvas.height);
+    std::fprintf(stderr, "[capture-pipeline][warn] reset_failed previous_canvas_restored=%s error=\"%s\"\n",
+                 restored ? "true" : "false", app_.lastError().c_str());
   }
 
   sources_.applyVideoSource();
   sources_.applyAudioSources();
-  const bool ringStarted = ring_.start();
+  const bool ringStarted = obs_get_video() && ring_.start();
   if (!ringStarted)
     events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Replay ring failed to restart"}});
   if (wasRecording && ringStarted)
     recorder_.start();
   sources_.startWatchdog();
+  std::fprintf(stderr, "[capture-pipeline][info] video_mix_available=%s replay_started=%s recording_resumed=%s\n",
+               obs_get_video() ? "true" : "false", ringStarted ? "true" : "false",
+               wasRecording && recorder_.active() ? "true" : "false");
 }
 
 void Rpc::updateCaptureGeometry()
 {
   std::lock_guard<std::recursive_mutex> lock(dispatchMutex_);
   if (shutdownRequested()) return;
+  if (sources_.consumeVideoRecoveryRequest()) {
+    // SourceManager has exhausted conservative source/scene recovery. This
+    // thread owns output lifecycle and can safely join the watchdog first.
+    restartVideoPipeline();
+    captureSizeStability_.reset();
+    return;
+  }
   const auto size = sources_.captureSize();
-  if (!captureSizeStability_.ready(size, duration_ms_now()) ||
-      (size.width == app_.baseWidth() && size.height == app_.baseHeight())) return;
+  const bool sizeStable = captureSizeStability_.ready(size, duration_ms_now());
+  if (!size.valid() || (size.width == app_.baseWidth() && size.height == app_.baseHeight())) {
+    preservedCaptureSize_ = {};
+    return;
+  }
+  if (!sizeStable) return;
+
+  int width = 0, height = 0, fps = 0, bitrate = 0;
+  encoders_.effectiveVideoParams(size.width, size.height, width, height, fps, bitrate);
+  obs_video_info current{};
+  if (obs_get_video_info(&current) && captureCanPreserveVideo(size,
+      {app_.baseWidth(), app_.baseHeight()}, {uint32_t(width), uint32_t(height)},
+      {current.output_width, current.output_height}, uint32_t(fps), current.fps_num, current.fps_den)) {
+    // The watchdog already fits each source to the live canvas. Resetting
+    // OBS here would clear real replay packets and split recording despite
+    // producing exactly the same encoded size, aspect ratio and cadence.
+    if (size != preservedCaptureSize_) {
+      std::fprintf(stderr, "[capture-geometry][info] source=%ux%u canvas=%ux%u output=%ux%u fps=%u/%u replay_preserved=true reason=compatible_source_resize\n",
+                   size.width, size.height, app_.baseWidth(), app_.baseHeight(),
+                   current.output_width, current.output_height, current.fps_num, current.fps_den);
+      preservedCaptureSize_ = size;
+    }
+    return;
+  }
+  preservedCaptureSize_ = {};
+  std::fprintf(stderr, "[capture-geometry][info] source=%ux%u previous_canvas=%ux%u previous_output=%ux%u output=%dx%d fps=%d replay_preserved=false reason=video_format_or_aspect_change\n",
+               size.width, size.height, app_.baseWidth(), app_.baseHeight(),
+               current.output_width, current.output_height, width, height, fps);
 
   sources_.stopWatchdog();
   auto recordingLock = recorder_.lockLifecycle();

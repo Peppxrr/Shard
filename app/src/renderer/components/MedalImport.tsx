@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import type { LibraryImportProgress, LibraryImportResult } from "../../shared/contracts";
-import { Button, Icon, Modal } from "./ui";
+import { Button, Icon } from "./ui";
 
-export function MedalImport({ onClose }: { onClose: () => void }) {
+export function MedalImport() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<LibraryImportProgress | null>(null);
   const [result, setResult] = useState<LibraryImportResult | null>(null);
@@ -14,9 +14,7 @@ export function MedalImport({ onClose }: { onClose: () => void }) {
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
   };
-  return <Modal open size="sm" variant="medal-import" title="Import from Medal" sub="Bring your clips into your Shard library."
-    onClose={busy ? undefined : onClose} closeOnBackdrop={!busy}>
-    <div data-shard-component="medal-import" data-shard-state={busy ? "importing" : result ? "complete" : "idle"} className="medal-import">
+  return <div data-shard-component="medal-import" data-shard-state={busy ? "importing" : result ? "complete" : "idle"} className="medal-import" aria-busy={busy}>
       <p data-shard-slot="import-description">Choose a Medal folder. Shard copies its MP4 videos and keeps the originals in place. Files already imported are skipped.</p>
       <div data-shard-slot="import-options" className="medal-import__options">
         <Button block disabled={busy} icon={<Icon name="folderOpen" size={18} />} onClick={() => void start("clips")}>
@@ -36,7 +34,5 @@ export function MedalImport({ onClose }: { onClose: () => void }) {
         {result.errors.length > 0 && <details><summary>View errors</summary><ul>{result.errors.map((message, index) => <li key={index}>{message}</li>)}</ul></details>}
       </div>}
       {error && <p data-shard-slot="import-error" className="clip-rename__error" role="alert">{error}</p>}
-      <div data-shard-slot="import-actions" className="medal-import__actions"><Button disabled={busy} onClick={onClose}>{result && !result.cancelled ? "Done" : "Close"}</Button></div>
-    </div>
-  </Modal>;
+    </div>;
 }

@@ -284,13 +284,14 @@ int main(int argc, char** argv)
 
   sources.applyVideoSource();
   sources.applyAudioSources();
-  sources.startWatchdog();
 
-  if (!ring.start()) {
+  // Game-only startup has no subject until a game is detected. Avoid showing
+  // a briefly counting buffer of empty video before the first real capture.
+  if (sources.subject().kind != SourceManager::Subject::Kind::None && !ring.start()) {
     std::fprintf(stderr, "shardcore: replay ring failed to start\n");
-    sources.stopWatchdog();
     return 3;
   }
+  sources.startWatchdog();
 
   Rpc rpc(app, config, events, sources, encoders, ring, recorder, games);
   Server server(config, rpc);

@@ -67,6 +67,8 @@ private:
   obs_scene_t* scene_ = nullptr;
   uint32_t baseWidth_ = 1920;
   uint32_t baseHeight_ = 1080;
+  uint32_t graphicsAdapter_ = 0;
+  bool graphicsAdapterSelected_ = false;
 };
 
 } // namespace shard

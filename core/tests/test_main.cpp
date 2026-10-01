@@ -393,14 +393,108 @@ static void testDetectorUserGame()
   CHECK(liveUnknown.gameId.empty());
   CHECK_EQ(liveUnknown.gameName, std::string("new-game"));
 
-  const auto minecraft =
-      detectWith(reg, proc("javaw.exe", 102, 50, "c:\\java\\bin\\javaw.exe", 59000), {}, {},
-                 gameWindow(true, "Minecraft 1.21.4"), 60000, graphicsRuntime(true));
-  CHECK_EQ((int)minecraft.decision, (int)DetectionResult::Decision::Detected);
-  CHECK_EQ(minecraft.gameName, std::string("Minecraft 1.21.4"));
   CHECK(!GameDetector::canOwnQualifiedDescendant("d:runtime:curseforge"));
   CHECK(GameDetector::canOwnQualifiedDescendant("d:steam:438100"));
   CHECK(GameDetector::canOwnQualifiedDescendant("u:minecraft"));
+}
+
+static void testMinecraftJavaClientIdentity()
+{
+  TestDir dir("minecraft-client");
+  GameRegistry reg;
+  reg.setPath((dir.root / "games.json").string());
+  reg.load();
+  const std::string java = "\"C:\\Program Files\\Java\\bin\\javaw.exe\" ";
+  const std::string vanilla = java +
+      "-Xmx4G -Djava.library.path=\"C:\\Games\\Minecraft\\natives\" "
+      "-cp \"C:\\Games\\Minecraft\\client.jar;C:\\Games\\Minecraft\\libraries.jar\" "
+      "net.minecraft.client.main.Main --version 1.21.4 --gameDir \"C:\\Games\\Minecraft\"";
+  auto client = [&](const std::string& command, WindowFacts window = gameWindow(false, "Minecraft 1.21.4"),
+                    RuntimeFacts runtime = graphicsRuntime(), const std::string& exe = "javaw.exe") {
+    return detectWith(reg, proc(exe, 102, 50, "c:\\java\\bin\\" + exe, 1000, command),
+                      {}, {}, window, 60000, runtime);
+  };
+  // No engine DLL, paired controller APIs, recent launch, foreground focus, or
+  // title-based identity is needed once a Minecraft client owns a GPU window.
+  const auto detectedClient = client(vanilla);
+  CHECK_EQ((int)detectedClient.decision, (int)DetectionResult::Decision::Detected);
+  CHECK_EQ(detectedClient.gameName, std::string("Minecraft"));
+  CHECK_EQ(client(vanilla, gameWindow(false, "Java")).gameName, std::string("Minecraft"));
+  CHECK_EQ((int)client("java.exe net.minecraft.client.main.Main", gameWindow(), graphicsRuntime(),
+                      "java.exe").decision, (int)DetectionResult::Decision::Detected);
+  for (const auto& command : {
+      java + "net.fabricmc.loader.impl.launch.knot.KnotClient --gameDir C:\\Games\\Pack",
+      java + "net.fabricmc.loader.launch.knot.KnotClient",
+      java + "org.quiltmc.loader.impl.launch.knot.KnotClient",
+      java + "--module-path \"C:\\Games\\Pack\\libraries\" --add-opens java.base/java.lang=ALL-UNNAMED "
+             "cpw.mods.bootstraplauncher.BootstrapLauncher --launchTarget forgeclient",
+      java + "--module-path=C:\\Games\\Pack\\libraries cpw.mods.bootstraplauncher.BootstrapLauncher "
+             "--launchTarget=neoforgeclient",
+      java + "cpw.mods.modlauncher.Launcher --launchTarget forgeclient",
+      java + "net.minecraft.launchwrapper.Launch --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker",
+      java + "net.minecraft.launchwrapper.Launch --tweakClass cpw.mods.fml.common.launcher.FMLTweaker",
+  }) {
+    CHECK_EQ((int)client(command).decision, (int)DetectionResult::Decision::Detected);
+  }
+  CHECK_EQ((int)client(vanilla, gameWindow(), {}).decision, (int)DetectionResult::Decision::Candidate);
+  WindowFacts small = gameWindow();
+  small.area = 320 * 180;
+  CHECK_EQ((int)client(vanilla, small).decision, (int)DetectionResult::Decision::Candidate);
+  WindowFacts noCapture = gameWindow();
+  noCapture.captureable = false;
+  CHECK((int)client(vanilla, noCapture).decision != (int)DetectionResult::Decision::Detected);
+  RuntimeFacts editor = graphicsRuntime();
+  editor.editorRuntime = true;
+  CHECK_EQ((int)client(vanilla, gameWindow(), editor).decision, (int)DetectionResult::Decision::Ignored);
+
+  // Persisting javaw.exe is not a Java-wide allow rule. Every later process
+  // must still present client identity; launcher ancestry and titles cannot.
+  GameDefinition saved;
+  saved.id = "d:runtime:minecraft";
+  saved.name = "Minecraft";
+  saved.executables = {"javaw.exe"};
+  saved.installPaths = {"c:\\java\\bin\\"};
+  saved.productType = "game";
+  reg.mergeDiscovered(saved);
+  CHECK_EQ(client(vanilla).gameId, saved.id);
+  for (const auto& command : {
+      java + "com.example.DesktopApplication",
+      java + "com.example.Launcher net.minecraft.client.main.Main",
+      java + "-DmainClass=net.minecraft.client.main.Main com.example.Launcher",
+      java + "-cp net.minecraft.client.main.Main com.example.Launcher",
+      java + "-cp \"C:\\net.minecraft.client.main.Main\\client.jar\" com.example.Launcher",
+      java + "net.minecraft.client.main.MainWrapper",
+      java + "net.minecraft.server.Main",
+      java + "net.fabricmc.loader.impl.launch.knot.KnotServer",
+      java + "org.quiltmc.loader.impl.launch.knot.KnotServer",
+      java + "cpw.mods.bootstraplauncher.BootstrapLauncher --launchTarget forgeserver",
+      java + "cpw.mods.bootstraplauncher.BootstrapLauncher --launchTarget neoforgeserver",
+      java + "cpw.mods.modlauncher.Launcher --launchTarget forgeclientdev",
+      java + "cpw.mods.modlauncher.Launcher -DlaunchTarget=forgeclient",
+      java + "cpw.mods.modlauncher.Launcher --launchTarget forgeclient --launchTarget forgeserver",
+      java + "net.minecraft.launchwrapper.Launch --tweakClass net.minecraftforge.fml.common.launcher.FMLServerTweaker",
+      java + "-jar MinecraftLauncher.jar net.minecraft.client.main.Main",
+      java + "@client-args.txt net.minecraft.client.main.Main",
+      java + "--module com.example.Launcher net.minecraft.client.main.Main",
+      java + "\"net.minecraft.client.main.Main",
+      std::string(),
+  }) {
+    CHECK((int)client(command).decision != (int)DetectionResult::Decision::Detected);
+  }
+  auto chain = [](uint32_t) { return std::vector<uint32_t>{102, 50}; };
+  auto launcher = [](uint32_t) { return proc("curseforge.exe", 50); };
+  CHECK_EQ((int)detectWith(reg, proc("javaw.exe", 102, 50, "c:\\java\\bin\\javaw.exe", 1000, vanilla),
+                           chain, launcher, gameWindow(), 60000, graphicsRuntime()).decision,
+           (int)DetectionResult::Decision::Detected);
+  CHECK((int)detectWith(reg, proc("javaw.exe", 102, 50, "c:\\java\\bin\\javaw.exe", 1000),
+                        chain, launcher, gameWindow(true, "Minecraft"), 60000, graphicsRuntime(),
+                        10000, nullptr, 10000).decision != (int)DetectionResult::Decision::Detected);
+  CHECK((int)client(vanilla, gameWindow(true, "Minecraft"), graphicsRuntime(), "curseforge.exe").decision !=
+        (int)DetectionResult::Decision::Detected);
+  CHECK((int)client(vanilla, gameWindow(true, "Minecraft"), graphicsRuntime(), "windowsterminal.exe").decision !=
+        (int)DetectionResult::Decision::Detected);
+  reg.addIgnoredExe("javaw.exe");
+  CHECK_EQ((int)client(vanilla).decision, (int)DetectionResult::Decision::Ignored);
 }
 
 static void testDetectorNonGames()
@@ -1238,6 +1332,8 @@ int main()
     // Detector
     testDetectorUserGame();
     std::printf("ok: detector/user\n");
+    testMinecraftJavaClientIdentity();
+    std::printf("ok: detector/minecraft-java\n");
     testDetectorNonGames();
     testEditorsAndVisibleGames();
     std::printf("ok: detector/non-games\n");

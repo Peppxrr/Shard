@@ -10,15 +10,32 @@
 namespace {
 std::atomic<bool> hookContent{false};
 std::atomic<bool> windowContent{false};
+std::atomic<bool> hookAnimated{false};
+std::atomic<bool> windowAnimated{false};
+std::atomic<bool> windowSized{true};
 std::atomic<int> hookCreates{0};
 std::atomic<int> outputColor{0};
 struct Source { bool hook; };
+void pause(DWORD milliseconds)
+{
+  const auto deadline = GetTickCount64() + milliseconds;
+  do {
+    MSG message;
+    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+      TranslateMessage(&message);
+      DispatchMessageW(&message);
+    }
+    Sleep(10);
+  } while (GetTickCount64() < deadline);
+}
 void render(void* data, gs_effect_t*)
 {
   const bool hook = static_cast<Source*>(data)->hook;
   struct vec4 color = {0, 0, 0, 1};
   if (hook ? hookContent.load() : windowContent.load()) {
     if (hook) color.x = 1; else color.y = 1;
+    if (hook ? hookAnimated.load() : windowAnimated.load())
+      color.z = static_cast<float>((GetTickCount64() / 250) % 5) / 20.0f;
   }
   auto* effect = obs_get_base_effect(OBS_EFFECT_SOLID);
   gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
@@ -34,7 +51,9 @@ void registerSource(const char* id, bool hook)
   info.create = hook ? +[](obs_data_t*, obs_source_t*) -> void* { ++hookCreates; return new Source{true}; }
                      : +[](obs_data_t*, obs_source_t*) -> void* { return new Source{false}; };
   info.destroy = [](void* p) { delete static_cast<Source*>(p); };
-  info.get_width = [](void*) -> uint32_t { return 640; };
+  info.get_width = [](void* p) -> uint32_t {
+    return static_cast<Source*>(p)->hook || windowSized.load() ? 640 : 0;
+  };
   info.get_height = [](void*) -> uint32_t { return 360; };
   info.video_render = render;
   obs_register_source(&info);
@@ -48,7 +67,7 @@ bool waitColor(int expected, int seconds)
 {
   for (int i = 0; i < seconds * 10; ++i) {
     if (outputColor == expected) return true;
-    Sleep(100);
+    pause(100);
   }
   return false;
 }
@@ -113,25 +132,61 @@ int main(int argc, char** argv)
   shard::Events events;
   shard::App app(config, events);
   require(app.init(), "initialize D3D11 fixture");
+  // A real non-minimized target is needed to exercise the production recovery
+  // eligibility gate; the controlled textures still avoid any hook injection.
+  WNDCLASSW wc{};
+  wc.lpfnWndProc = DefWindowProcW;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = L"ShardCaptureRecoveryFixture";
+  require(RegisterClassW(&wc) != 0, "register recovery target window");
+  HWND target = CreateWindowExW(WS_EX_NOACTIVATE, wc.lpszClassName, L"Shard capture fixture",
+                                WS_POPUP | WS_VISIBLE, 0, 0, 640, 360, nullptr, nullptr, wc.hInstance, nullptr);
+  require(target != nullptr, "create live recovery target window");
   {
     shard::SourceManager sources(app, config, events);
     sources.applyVideoSource();
-    sources.setGameSubject("cs2.exe", "Synthetic CS2", "", "", GetCurrentProcessId());
+    sources.setGameSubject("cs2.exe", "Synthetic CS2", "Shard capture fixture",
+                           "ShardCaptureRecoveryFixture", GetCurrentProcessId());
     sources.startWatchdog();
     obs_add_raw_video_callback(nullptr, frame, nullptr);
-    Sleep(4500);
+    pause(4500);
     require(outputColor == 0 && hookCreates == 1, "both-black loading screen does not trigger recovery");
     windowContent = true;
+    windowAnimated = true;
     require(waitColor(2, 7), "nonzero-sized black hook gives way to actual WGC output");
     // Keep the hook broken long enough to exercise recreation, not just order.
     const auto deadline = GetTickCount64() + 18000;
-    while (hookCreates == 1 && GetTickCount64() < deadline) Sleep(100);
+    while (hookCreates == 1 && GetTickCount64() < deadline) pause(100);
     require(hookCreates > 1, "black acquired hook is recreated without restarting the app");
     require(waitColor(2, 2), "WGC stays on top after hook recreation");
     hookContent = true;
     require(waitColor(1, 7), "recovered hook becomes visible after sustained good samples");
+    require(waitColor(2, 38), "content-but-frozen hook yields to changing WGC");
+    windowAnimated = false;
+    const int frozenCreates = hookCreates.load();
+    pause(17000);
+    require(outputColor == 2 && hookCreates == frozenCreates,
+            "static fallback after a proven freeze does not repeatedly recreate the hook");
+    windowAnimated = true;
+    hookAnimated = true;
+    require(waitColor(1, 7), "fingerprint movement restores the recovered hook");
+    const int healthyCreates = hookCreates.load();
+    windowSized = false;
+    pause(4000);
+    require(outputColor == 1 && hookCreates == healthyCreates,
+            "missing WGC dimensions do not discard healthy hook observations");
+    windowSized = true;
+    pause(1500);
+    obs_set_output_source(0, nullptr);
+    require(waitColor(0, 3), "unbound composed video is black while source pixels exist");
+    require(waitColor(1, 23), "downstream black scene is repaired by rebinding the output");
+    require(hookCreates == healthyCreates, "composition recovery preserves the healthy hook");
+    hookAnimated = windowAnimated = false;
+    pause(5000);
+    require(outputColor == 1 && hookCreates == healthyCreates, "static healthy content preserves capture");
     obs_remove_raw_video_callback(frame, nullptr);
     sources.stopWatchdog();
   }
+  DestroyWindow(target);
   std::puts("PASS: capture backend GPU integration");
 }

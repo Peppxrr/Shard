@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Settings } from "../../shared/contracts";
 import type { ThemeMeta, ThemeValue } from "../../shared/themes";
 import { Button, Card, Icon, ShardSelect, Toggle } from "./ui";
@@ -11,8 +11,41 @@ export function AppearancePanel({ settings, onChange }: { settings: Settings; on
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [themeQuery, setThemeQuery] = useState("");
+  const customList = useRef<HTMLDivElement>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  const custom = useMemo(() => themes.filter(theme => theme.kind === "custom"), [themes]);
+  const matchingCustom = useMemo(() => {
+    const terms = themeQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    return custom.filter(theme => terms.every(term =>
+      `${theme.name} ${theme.id} ${theme.author ?? ""} ${theme.description ?? ""}`.toLowerCase().includes(term)));
+  }, [custom, themeQuery]);
+
+  useLayoutEffect(() => {
+    const list = customList.current;
+    if (!list) return;
+    const entries = Array.from(list.children).slice(0, 5) as HTMLElement[];
+    const measure = () => {
+      const first = entries[0];
+      const last = entries[entries.length - 1];
+      if (first && last) {
+        const height = `${last.offsetTop - first.offsetTop + last.offsetHeight}px`;
+        if (list.style.maxHeight !== height) list.style.maxHeight = height;
+      }
+    };
+    measure();
+    let timer = 0;
+    const observer = new ResizeObserver(() => {
+      // Changing the observed list's height during delivery creates a resize loop.
+      if (!timer) timer = window.setTimeout(() => { timer = 0; measure(); }, 0);
+    });
+    observer.observe(list);
+    entries.forEach(entry => observer.observe(entry));
+    return () => { observer.disconnect(); window.clearTimeout(timer); };
+  }, [matchingCustom]);
+
+  useLayoutEffect(() => { if (customList.current) customList.current.scrollTop = 0; }, [themeQuery]);
 
   useEffect(() => {
     let live = true;
@@ -46,8 +79,7 @@ export function AppearancePanel({ settings, onChange }: { settings: Settings; on
     void setThemeValues({ ...getThemeState().theme.values, [key]: value }).catch(error => setError(String(error)));
   };
   const active = state.theme;
-  const custom = themes.filter(theme => theme.kind === "custom");
-  return <div className="stack" data-shard-component="theme-picker">
+  return <div className="settings-sections" data-shard-slot="settings-section-layout" data-shard-component="theme-picker">
     <Card title="App theme" sub="Choose a theme, then save your changes.">
       <div className="theme-grid" aria-label="Built-in themes">
         {themes.filter(theme => theme.kind === "builtin").map(theme => <button key={theme.id} type="button"
@@ -61,18 +93,19 @@ export function AppearancePanel({ settings, onChange }: { settings: Settings; on
       </div>
       {loading && <p className="field__hint">Loading themes…</p>}
     </Card>
-    {(error || state.error) && <div className="theme-feedback" role="alert"><Icon name="bell" size={17} /><span>{error || state.error} Your previous theme stays available.</span></div>}
+    {(error || state.error) && <div data-shard-span="full" className="theme-feedback" role="alert"><Icon name="bell" size={17} /><span>{error || state.error} Your previous theme stays available.</span></div>}
     <Card title="Custom themes" sub="Changes to theme files appear automatically."
-      actions={<Button size="sm" disabled={busy} icon={<Icon name="refresh" size={14} />} onClick={() => void run(() => reloadThemes(getSelectedId()))}>Reload themes</Button>}>
-      <div className="stack">{custom.map(theme => <button key={theme.id} type="button" className="theme-custom"
+      actions={<label data-shard-slot="theme-search" className="search theme-search"><Icon name="search" size={16} /><input type="search" aria-label="Search Themes" placeholder="Search Themes" value={themeQuery} onChange={event => setThemeQuery(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setThemeQuery(""); }} /></label>}>
+      {matchingCustom.length > 0 && <div data-shard-slot="custom-theme-list" className="stack theme-custom-list" ref={customList}>{matchingCustom.map(theme => <button key={theme.id} type="button" className="theme-custom"
         disabled={busy || !!theme.error} aria-pressed={active.meta.id === theme.id} onClick={() => void select(theme.id)}>
         <span className="theme-custom__identity"><span className="setting-symbol"><Icon name="paintbrush" size={18} /></span><span>
           <strong>{theme.name}</strong><span className={theme.error ? "theme-custom__error" : "field__hint"}>{theme.error || theme.description || (theme.author ? `Created by ${theme.author}` : "Custom theme")}</span>
           {!theme.error && (theme.author || theme.version) && <span className="field__hint">{[theme.author, theme.version && `v${theme.version}`].filter(Boolean).join(" · ")}</span>}
         </span></span>{active.meta.id === theme.id && <Icon name="check" size={16} />}
-      </button>)}</div>
-      {!custom.length && <p className="field__hint">No custom themes installed.</p>}
+      </button>)}</div>}
+      {!matchingCustom.length && <p className="field__hint">{custom.length ? "No matching themes." : "No custom themes installed."}</p>}
       <div className="theme-folder"><Button icon={<Icon name="folder" size={15} />} onClick={() => void run(openThemesFolder)}>Open themes folder</Button>
+        <Button disabled={busy} icon={<Icon name="refresh" size={15} />} onClick={() => void run(() => reloadThemes(getSelectedId()))}>Reload themes</Button>
         {folder && <span className="field__hint" title={folder}>{folder}</span>}
       </div>
       <details className="theme-help"><summary>Create a custom theme</summary>

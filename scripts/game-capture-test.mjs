@@ -11,7 +11,8 @@
 //   powershell -File scripts/build.ps1 -SkipApp
 // Run:
 //   node scripts/game-capture-test.mjs
-// env: CF_COREBIN, CF_GC_FIXTURE, CF_KEEP_TEMP=1
+//   $env:CF_GC_CONTINUITY='1'; node scripts/game-capture-test.mjs
+// env: CF_COREBIN, CF_GC_FIXTURE, CF_GC_CONTINUITY=1, CF_KEEP_TEMP=1
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import crypto from "node:crypto";
@@ -27,16 +28,30 @@ const fixtureExe = path.resolve(
 );
 const useExistingTarget = process.env.CF_GC_EXISTING_TARGET === "1";
 const targetLauncher = process.env.CF_GC_LAUNCHER ? path.resolve(process.env.CF_GC_LAUNCHER) : undefined;
-const states = (process.env.CF_GC_STATES ?? "focused,unfocused,covered,minimized")
-  .split(",")
-  .map((state) => state.trim())
-  .filter(Boolean);
 const expectedBlockStage = process.env.CF_GC_EXPECT_BLOCK_STAGE;
 const diagnosticsOnly = Boolean(expectedBlockStage);
 const geometryTest = process.env.CF_GC_GEOMETRY === "1";
+const continuityTest = process.env.CF_GC_CONTINUITY === "1";
 const geometryCases = { "four-three": [960, 720], laptop: [1280, 800], ultrawide: [1720, 720] };
-let expectedSize = [Number(process.env.SHARD_GC_FIXTURE_WIDTH || 960), Number(process.env.SHARD_GC_FIXTURE_HEIGHT || 540)];
-const recordingTest = process.env.CF_GC_RECORDING === "1";
+const continuityCases = { "continuity-1600x900": [1600, 900], "continuity-1920x1080": [1920, 1080] };
+if (continuityTest) {
+  if (geometryTest || diagnosticsOnly || useExistingTarget || targetLauncher || api !== "D3D11") {
+    throw new Error("CF_GC_CONTINUITY requires the D3D11 fixture without geometry, diagnostics, or external-target modes");
+  }
+  process.env.SHARD_GC_FIXTURE_WIDTH = "1280";
+  process.env.SHARD_GC_FIXTURE_HEIGHT = "720";
+}
+const states = (continuityTest
+  ? "focused,continuity-1600x900,continuity-1920x1080"
+  : process.env.CF_GC_STATES ?? "focused,unfocused,covered,minimized")
+  .split(",")
+  .map((state) => state.trim())
+  .filter(Boolean);
+let expectedSize = continuityTest
+  ? [1280, 720]
+  : [Number(process.env.SHARD_GC_FIXTURE_WIDTH || 960), Number(process.env.SHARD_GC_FIXTURE_HEIGHT || 540)];
+const continuityOutputSize = [960, 540];
+const recordingTest = continuityTest || process.env.CF_GC_RECORDING === "1";
 const recordingPaths = new Set();
 const coreExe = path.join(coreBin, "shardcore.exe");
 const ffmpegExe = path.join(coreBin, "ffmpeg.exe");
@@ -77,6 +92,16 @@ fs.writeFileSync(
     verboseDetection: true,
   }),
 );
+if (continuityTest) {
+  fs.writeFileSync(
+    path.join(tmp, "config.json"),
+    JSON.stringify({
+      capture: { mode: "game", monitor: 0 },
+      video: { preset: "custom", custom: true, bitrateKbps: 5000, fps: 60, width: 960, height: 540 },
+      replay: { maxSeconds: 60, maxMb: 512 },
+    }),
+  );
+}
 
 let core;
 let fixture;
@@ -87,6 +112,8 @@ let stdoutBuf = "";
 let nextId = 1;
 const pending = new Map();
 const waiters = [];
+const ringHistory = [];
+let latestRingStats;
 
 function waitEvent(name, timeoutMs = 90_000, predicate = () => true) {
   return new Promise((resolve, reject) => {
@@ -123,9 +150,9 @@ function call(method, params = {}) {
   });
 }
 
-async function saveClip() {
+async function saveClip(durationSec = 3) {
   const savedEvent = waitEvent("clip.saved", 90_000);
-  await call("clip.save", { durationSec: 3 });
+  await call("clip.save", { durationSec });
   return savedEvent;
 }
 
@@ -212,6 +239,8 @@ if ('${state}' -eq 'focused') {
   [GcWindow]::ShowWindow($h, 6) | Out-Null
 } elseif (${geometryCases[state] ? "$true" : "$false"}) {
   [GcWindow]::PostMessage($h, 0x8001, [IntPtr](${geometryCases[state]?.[0] ?? 0}), [IntPtr](${geometryCases[state]?.[1] ?? 0})) | Out-Null
+} elseif (${continuityCases[state] ? "$true" : "$false"}) {
+  [GcWindow]::PostMessage($h, 0x8001, [IntPtr](${continuityCases[state]?.[0] ?? 0}), [IntPtr](${continuityCases[state]?.[1] ?? 0})) | Out-Null
 }
 $target.Refresh()
 "hwnd=$h minimized=$($target.MainWindowHandle -eq [IntPtr]::Zero -or '${state}' -eq 'minimized')"
@@ -311,6 +340,10 @@ try {
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
     if (message.method === "recording.state" && message.params?.path) recordingPaths.add(message.params.path);
+    if (message.method === "ring.stats" && typeof message.params?.secondsBuffered === "number") {
+      latestRingStats = message.params;
+      ringHistory.push({ at: Date.now(), secondsBuffered: message.params.secondsBuffered });
+    }
     if (message.id !== undefined) {
       const request = pending.get(message.id);
       if (!request) return;
@@ -333,11 +366,29 @@ try {
         60_000,
         (params) => params?.kind === "game" && params?.name?.toLowerCase() === expectedSubjectName,
       );
-  await readyEvent;
+  const ready = await readyEvent;
+  if (continuityTest) {
+    await waitEvent("ring.stats", 10_000, (params) => params?.secondsBuffered === 0);
+    const initialState = await call("state.get");
+    if (ready.capture?.mode !== "game" || ready.capture?.subject?.kind !== "none" ||
+        ready.ring?.active !== false || ready.ring?.secondsBuffered !== 0) {
+      throw new Error(`continuity startup ready state was not idle game-only capture: ${JSON.stringify(ready)}`);
+    }
+    if (initialState.capture?.mode !== "game" || initialState.capture?.subject?.kind !== "none" ||
+        initialState.ring?.active !== false || initialState.ring?.secondsBuffered !== 0) {
+      throw new Error(`continuity startup state was not idle before fixture launch: ${JSON.stringify(initialState)}`);
+    }
+    log("game-only startup is idle with an empty replay ring before fixture launch");
+  }
   if (targetLauncher) {
     fixture = spawn(targetLauncher, [], { cwd: path.dirname(targetLauncher), stdio: "ignore" });
   } else if (!useExistingTarget) {
-    fixture = spawn(fixtureExe, [], { stdio: "ignore" });
+    fixture = spawn(fixtureExe, [], {
+      stdio: "ignore",
+      env: continuityTest
+        ? { ...process.env, SHARD_GC_FIXTURE_WIDTH: "1280", SHARD_GC_FIXTURE_HEIGHT: "720" }
+        : process.env,
+    });
   }
   await focusTargetWhenReady();
   const focusedAt = Date.now();
@@ -362,16 +413,35 @@ try {
 
   if (!diagnosticsOnly) {
     let buffered = 0;
+    let peakBuffered = 0;
     const warmDeadline = Date.now() + 60_000;
-    while (buffered < 6 && Date.now() < warmDeadline) {
+    const initialHookObserved = () => coreErr.split(/\r?\n/).some((line) =>
+      line.includes("[capture-health]") && line.includes("hook_size=1280x720") && line.includes("hook_healthy=true"));
+    while ((buffered < 6 || (continuityTest && !initialHookObserved())) && Date.now() < warmDeadline) {
       const stats = await waitEvent("ring.stats", 10_000);
       buffered = stats.secondsBuffered ?? 0;
+      if (continuityTest && buffered < peakBuffered)
+        throw new Error(`initial capture acquisition discarded replay history: ${peakBuffered}s -> ${buffered}s`);
+      peakBuffered = Math.max(peakBuffered, buffered);
     }
+    if (continuityTest && buffered < 6) throw new Error(`replay ring did not warm to 6s: ${buffered}s`);
+    if (continuityTest && !initialHookObserved())
+      throw new Error("capture diagnostics did not confirm the initial healthy 1280x720 hook");
   }
   const rows = [];
-  if (recordingTest) await call("recording.start");
+  if (recordingTest) {
+    if (continuityTest) {
+      const started = waitEvent("recording.state", 15_000, (params) => params?.active && params?.path);
+      await call("recording.start");
+      await started;
+    } else {
+      await call("recording.start");
+    }
+  }
   for (const state of states) {
     const phaseStart = coreErr.length;
+    const ringStart = ringHistory.length;
+    const ringBaseline = latestRingStats?.secondsBuffered ?? 0;
     if (state === "unfocused") {
       cover = spawn(
         "powershell",
@@ -382,6 +452,35 @@ try {
     }
     const stateDetail = setTargetState(state);
     log(`${state}: ${stateDetail}`);
+    if (continuityCases[state]) {
+      expectedSize = continuityCases[state];
+      const [sourceWidth, sourceHeight] = expectedSize;
+      const expectedPreservedLog = `source=${sourceWidth}x${sourceHeight}`;
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        const samples = ringHistory.slice(ringStart);
+        const minimum = Math.max(6, ringBaseline);
+        const dropped = samples.find((sample) => sample.secondsBuffered < minimum);
+        if (dropped) {
+          throw new Error(`replay history dropped below ${minimum}s during ${state}: ${dropped.secondsBuffered}s`);
+        }
+        const phaseLogs = coreErr.slice(phaseStart);
+        if (phaseLogs.includes(expectedPreservedLog) && phaseLogs.includes("replay_preserved=true")) break;
+        await delay(100);
+      }
+      const continuityLogs = coreErr.slice(phaseStart);
+      if (!continuityLogs.includes(expectedPreservedLog) ||
+          !continuityLogs.includes("replay_preserved=true")) {
+        throw new Error(`capture did not log the expected preserved source size for ${state}\n${continuityLogs}`);
+      }
+      const stats = await waitEvent("ring.stats", 10_000);
+      if ((stats.secondsBuffered ?? 0) < Math.max(6, ringBaseline)) {
+        throw new Error(`replay history did not continue after ${state}: ${stats.secondsBuffered}s (before ${ringBaseline}s)`);
+      }
+      if (recordingPaths.size !== 1) {
+        throw new Error(`recording split during ${state}: ${recordingPaths.size} files`);
+      }
+    }
     if (geometryTest) {
       const replacement = geometryCases[state];
       if (replacement) expectedSize = replacement;
@@ -405,6 +504,17 @@ try {
     }
     const saved = await saveClip();
     const freshness = uniqueFrameHashes(saved.path);
+    if (continuityTest) {
+      if ((saved.actualSec ?? 0) < 2.5)
+        throw new Error(`continuity clip contains too little buffered history: ${saved.actualSec ?? 0}s`);
+      const probe = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-of", "json", saved.path], {encoding:"utf8"});
+      if (probe.status !== 0) throw new Error(`continuity clip probe failed: ${probe.stderr}`);
+      const stream = JSON.parse(probe.stdout).streams[0];
+      if (stream.width !== continuityOutputSize[0] || stream.height !== continuityOutputSize[1])
+        throw new Error(`continuity clip has wrong output size: ${JSON.stringify(stream)}`);
+      log(`continuity clip ${stream.width}x${stream.height}, ${saved.actualSec.toFixed(2)}s`);
+    }
     if (geometryTest) {
       const probe = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=width,height", "-of", "json", saved.path], {encoding:"utf8"});
@@ -426,6 +536,15 @@ try {
     if (!fresh) throw new Error(`${state} capture froze: ${JSON.stringify(freshness)}`);
   }
 
+  if (continuityTest) {
+    const minimumHistory = Math.max(6, (latestRingStats?.secondsBuffered ?? 0) - 1);
+    const saved = await saveClip(0);
+    if ((saved.actualSec ?? 0) < minimumHistory)
+      throw new Error(`saved history does not span window replacements: ${saved.actualSec}s < ${minimumHistory}s`);
+    const decoded = spawnSync(ffmpegExe, ["-v", "error", "-i", saved.path, "-map", "0:v:0", "-f", "null", "-"], {encoding:"utf8"});
+    if (decoded.status !== 0 || decoded.stderr.trim()) throw new Error(`continuous history decode failed: ${decoded.stderr}`);
+    log(`full replay history decodes across both replacements: ${saved.actualSec.toFixed(2)}s`);
+  }
   await delay(500);
   if (recordingTest) {
     const stopped = waitEvent("recording.state", 15_000, params => !params.active);
@@ -441,9 +560,16 @@ try {
       const decoded = spawnSync(ffmpegExe, ["-v", "error", "-i", recording, "-map", "0:v:0", "-f", "null", "-"], {encoding:"utf8"});
       if (decoded.status !== 0 || decoded.stderr.trim()) throw new Error(`recording decode failed: ${decoded.stderr}`);
     }
-    if (recordingPaths.size < 2 || !sizes.includes(expectedSize.join("x")))
-      throw new Error(`recording did not continue at new size: ${sizes}`);
-    log(`recording segments finalized and decode cleanly: ${sizes.join(", ")}`);
+    if (continuityTest) {
+      if (recordingPaths.size !== 1 || sizes.length !== 1 || sizes[0] !== continuityOutputSize.join("x")) {
+        throw new Error(`continuity recording was split or changed output size: files=${recordingPaths.size}, sizes=${sizes}`);
+      }
+      log(`one continuous recording decodes at ${sizes[0]}`);
+    } else {
+      if (recordingPaths.size < 2 || !sizes.includes(expectedSize.join("x")))
+        throw new Error(`recording did not continue at new size: ${sizes}`);
+      log(`recording segments finalized and decode cleanly: ${sizes.join(", ")}`);
+    }
   }
   const diagnostics = coreErr.split(/\r?\n/).filter((line) => line.includes("[GC]"));
   if (!diagnosticsOnly && states.includes("minimized") &&

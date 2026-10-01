@@ -26,7 +26,8 @@ Use `[data-shard-component="<value>"]` with these values:
 | --- | --- |
 | `app` | Application shell |
 | `navigation` | Main navigation; items have `data-shard-nav="capture|library|games|settings"` and active `aria-current="page"` |
-| `card` | Shared panel |
+| `card` | Shared panel; optional `data-shard-span="full"` spans the Settings section grid |
+| `utility-rail` | Secondary information grouped with dividers and quiet, unbordered panels; Capture summary and Games options |
 | `button` | `data-variant="default|primary|ghost|soft|danger"`, `data-loading="true|false"`, native `:disabled` |
 | `icon-button` | Native disabled state, `aria-pressed` where applicable |
 | `toggle` | `data-checked="true|false"`; nested checkbox carries disabled state |
@@ -41,7 +42,7 @@ Use `[data-shard-component="<value>"]` with these values:
 | `capture-button` | Save-clip button; `data-shard-state="ready|saving"` |
 | `record-button` | `data-shard-state="idle|recording"` |
 | `clip` | `data-favorite="true|false"`, `data-source="clip|recording|edited"` |
-| `library-filters` | Source filter group; child filter buttons expose `data-source="all|clip|recording|edited"` and `aria-pressed` |
+| `library-filters` | Library tab group; child filter buttons expose `data-source="all|clip|recording|edited|favorites"` and `aria-pressed`. Favorites includes protected clips from every source. |
 | `clip-viewer` | Video and details layout inside the preview dialog; `data-source="clip|recording|edited"` |
 | `game` | Running entry: `data-running="true|false"`; excluded entry: `data-excluded="true"` |
 | `player` | `data-playing`, `data-fullscreen`, `data-controls-visible`, each `"true|false"`; `data-shard-state="loading|ready|error"` |
@@ -64,13 +65,14 @@ Dropdowns and context menus use native popovers in Chromium's top layer. Their D
 
 - Shell: `titlebar`, `content`, `statusbar`, `status-tools`, `console-launcher`.
 - Cards: `card-header`, `card-body`, `card-footer`.
-- Settings: `settings-navigation`, `settings-content`.
-- Capture: `capture-actions`.
+- Settings: `settings-navigation`, `settings-content`, `settings-search` (navigation search input), `settings-navigation-divider` (separator between search and categories), `settings-search-results` (scrollable matching destinations in a top-layer popup), `settings-section-layout` (responsive arrangement of independent panels), `storage-import` (Import section in Storage).
+- Appearance: `theme-search` (custom-theme filter), `custom-theme-list` (scrollable list showing up to five entries at a time).
+- Capture: `capture-primary` (compact status and clip controls), `capture-actions`, `capture-summary` (supporting hotkey, encoding, and storage panels), `capture-recent` (clip grid without an enclosing card).
 - Library: `library-header`, `library-heading`, `library-header-actions`, `library-summary`, `library-navigation`, `library-source-filter`, `library-filter-count`, `toolbar`, `library-search`, `library-results`, `clip-grid`.
 - Clip cards: `clip-thumbnail`, `clip-image`, `clip-placeholder`, `clip-play`, `clip-source`, `clip-duration`, `clip-details`, `clip-heading`, `clip-title`, `clip-filename`, `clip-date`, `clip-size`, `clip-actions`, `clip-delete-confirmation`, `clip-error`.
 - Dialogs: `modal-panel`, `modal-header`, `modal-heading`, `modal-title`, `modal-subtitle`, `modal-body`, `modal-footer`.
 - Clip viewer: `viewer-media`, `viewer-details`, `viewer-heading`, `viewer-metadata`, `viewer-date`, `viewer-duration`, `viewer-size`, `viewer-resolution`, `viewer-framerate`, `viewer-actions`, `viewer-file`, `viewer-filename`, `viewer-error`.
-- Games, editor, and timeline: `toolbar`, `editor-rename`.
+- Games, editor, and timeline: `toolbar`, `games-status` (compact detection status), `games-workspace` (game list beside supporting options on wide windows), `games-options` (secondary recording and detection settings), `editor-rename`.
 - Player: `player-stage`, `player-video`, `player-feedback`, `player-loading`, `player-status`, `player-controls`, `player-seek`, `player-transport`, `player-time`, `player-volume`, `player-speed`, `player-error`.
 - Renaming: `rename-form`, `rename-input`, `rename-actions`, `rename-error`.
 - Medal import: `import-description`, `import-options`, `import-progress`, `import-result`, `import-error`, `import-actions`.
@@ -80,7 +82,7 @@ Slots are intentionally reusable; scope a toolbar to its page/component. Modal p
 
 The clip viewer's outer overlay uses `[data-shard-component="modal"][data-shard-modal="clip-viewer"]`; its video/details layout uses `[data-shard-component="clip-viewer"]`. Use the former for dialog placement, panel, and header styling, and the latter for media, metadata, and actions. The same viewer opens from Library and Capture. Clip cards keep `.clip`, `.clip__thumb`, and `.clip__meta`, but the thumbnail and title are now keyboard-accessible buttons; reset button-specific styling through the corresponding slots if needed.
 
-The Medal import dialog uses `[data-shard-component="modal"][data-shard-modal="medal-import"]`. Rename and import controls use the shared button/input tokens. Playback speed uses the existing select and select-menu components inside `player-speed`; its value affects preview playback only.
+Medal import is embedded in Settings → Storage under `storage-import`, with its existing `medal-import` component and description/options/progress/result/error slots. The former `medal-import` modal and `import-actions` slot are no longer rendered. `library-results` wraps the grid or empty state; the active tab label is shown only in the library navigation. Rename and import controls use the shared button/input tokens. Playback speed uses the existing select and select-menu components inside `player-speed`; its value affects preview playback only.
 
 The developer-console root exposes `data-shard-state="loading|ready|error"` for history loading, `data-stream-state="live|paused"` for the live feed, and `data-action-state="idle|clearing|copying|exporting"` for the current asynchronous action. The `console-actions` slot also exposes that action state as `data-shard-state`. Console rows expose `data-severity="debug|info|warn|error"` and `data-source="core|core.stdout|core.stderr|app|rpc|event|updates"`. Source identifies where a line came from; severity describes its content. In particular, `core.stderr` is not itself an error or warning. Use status tokens for severity emphasis and preserve selectable log text. The live view retains bounded history; its overflow notice and pagination remain independent of the full-session export.
 
@@ -102,7 +104,7 @@ Define tokens on `:root`. Values inherit unless explicitly overridden by a compo
 | Fonts | `--font-ui`, `--font-mono`; legacy aliases `--font`, `--mono` |
 | Font sizes | `--fs-10`, `--fs-11`, `--fs-12`, `--fs-13`, `--fs-14`, `--fs-15`, `--fs-17`, `--fs-20`, `--fs-26` |
 | Controls | `--control-height`, `--control-radius`, `--focus` |
-| Layout | `--page-width`, `--page-gutter` |
+| Layout | `--page-width`, `--page-gutter`, `--page-padding-block`, `--settings-content-width` |
 | Elevation | `--shadow-1`, `--shadow-2`, `--shadow-3` |
 | Transitions | `--t`, `--t-fast` (duration plus timing function) |
 | Overlays | `--overlay-bg`, `--media-badge-bg`, `--media-badge-fg` |
@@ -114,6 +116,14 @@ Define tokens on `:root`. Values inherit unless explicitly overridden by a compo
 `--bg-0` is the deepest background and higher numbers are raised surfaces. `--fg` is primary text, with decreasing emphasis through `--fg-4`. `--accent-ink` is text on solid accent buttons. `--accent-grad` and `--accent-grad-soft` accept CSS background images. Token changes do not alter video pixels; the actual video canvas stays black outside the image. Fixed media-coordinate geometry and some internal decoration intentionally are not tokenized.
 
 `--player-overlay-bg` accepts a CSS background, including a gradient, for fullscreen controls. `--player-overlay-fg` controls their foreground and derives from `--media-badge-fg` by default. Keep both readable over light and dark video frames. Media thumbnails, loading indicators, and playback feedback use the existing media badge tokens.
+
+Overview pages use a broad workspace centered within wide windows, with left-aligned content and fluid horizontal gutters. `--page-width` caps that workspace (Capture and Games, 1800px including padding by default). Library retains full available width so its clip grid can gain columns. `--page-gutter` also aligns the titlebar and statusbar; `--page-padding-block` sets page vertical padding and the sticky Settings navigation inset.
+
+Settings navigation aligns with the left page gutter and uses compact desktop category labels, icons, and targets. Its search field sits above Appearance, separated from the categories by a token-colored divider, and matches the navigation targets. Matching settings appear in a compact top-layer popup beside the field, with internal scrolling; narrow windows can place it below the field. Search keeps the current settings content mounted and moves focus to the chosen destination. The main column is capped by `--settings-content-width` (1080px by default) and centered in the window from 1440px; smaller desktops reclaim the spare right column. Sections stack vertically at every width; `settings-section-layout` identifies that flow. Children marked `data-shard-span="full"` span the section layout, which currently has one column. Horizontal choices and import options adapt inside their sections. Form rows are bounded by the main column, and text hints retain readability limits. Card internals respond to their own panel width. Below 700px window width, Settings navigation wraps above the content. Unused space beyond the comfortable column is intentional.
+
+Custom themes have a header search field that filters names, authors, descriptions, and IDs. The list measures its first five entries to bound its height even when text wraps; remaining entries scroll internally. Open themes folder and Reload themes share a footer row with equal control dimensions. Built-in themes, selection, and theme options retain their existing behavior.
+
+From 1200px window width, Capture places a quiet information rail beside its compact primary capture area and unframed Recent grid. The rendered grid column count sets the recent-clip capacity to two rows and updates on resize; spare tracks remain when fewer clips exist. Status and clip controls share one surface; `capture-hero` remains the status component inside it. From 1280px, Games places recording/detection options beside its list; its detection status is a small utility strip. At smaller widths supporting sections return beneath the primary content. `utility-rail` groups existing card components using spacing and dividers rather than large enclosing panels. Library card dates and file sizes share a compact line, with sizes aligned right and recent relative ages available on the date tooltip. Dialogs and editors keep their existing focused widths and viewport geometry. Existing page, component, and Settings slots are preserved; themes should avoid assuming DOM depth inside these regions.
 
 ## Icons
 

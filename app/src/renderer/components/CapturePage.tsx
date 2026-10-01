@@ -1,5 +1,5 @@
 import { KeyCaps } from "./HotkeyControls";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipRecord, CoreState, Settings } from "../../shared/contracts";
 import { fmtDuration, fmtSize, relativeDate, Viewer } from "./LibraryPage";
 import { Button, Card, EmptyState, Icon, Segmented, StatusDot } from "./ui";
@@ -40,6 +40,22 @@ export function CapturePage({ settings, clips }: Props) {
   const [saving, setSaving] = useState(false);
   const [dur, setDur] = useState<Dur>("60");
   const [recent, setRecent] = useState<ClipRecord | null>(null);
+  const recentGrid = useRef<HTMLDivElement>(null);
+  const [recentCapacity, setRecentCapacity] = useState(0);
+  const hasClips = clips.length > 0;
+
+  useLayoutEffect(() => {
+    const grid = recentGrid.current;
+    if (!grid) return;
+    const measure = () => {
+      const columns = getComputedStyle(grid).gridTemplateColumns.split(" ").filter(Boolean).length;
+      setRecentCapacity(Math.max(1, columns) * 2);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [hasClips]);
 
   useEffect(() => {
     const loadState = () => {
@@ -87,7 +103,7 @@ export function CapturePage({ settings, clips }: Props) {
   const usedGb = usedBytes / 1024 / 1024 / 1024;
   const pct = limitBytes > 0 ? Math.min(100, (usedBytes / limitBytes) * 100) : 0;
   const fillClass = pct >= 100 ? "is-over" : pct >= 75 ? "is-warn" : "";
-  const lastClips = [...clips].sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
+  const lastClips = [...clips].sort((a, b) => b.createdAt - a.createdAt).slice(0, recentCapacity);
 
   return (
     <div data-shard-page="capture" data-shard-state={recording ? "recording" : capturing ? "capturing" : "idle"} data-saving={saving} className="capture">
@@ -95,43 +111,47 @@ export function CapturePage({ settings, clips }: Props) {
         <h1 className="page__title">Capture</h1>
         <p className="dim page__sub">Keep the moments worth saving.</p>
       </header>
-      <section data-shard-component="capture-hero" className="capture__hero card">
-        <div className="capture__hero-main">
-          <span className="eyebrow">Replay buffer</span>
-          <h2 className="capture__title"><StatusDot state={dotState} /> {stateTitle}</h2>
-          <p className="capture__subject">
-            {subject?.kind === "game" ? subject.name
-              : subject?.kind === "monitor" ? (subject.name ?? "Desktop")
-              : "Waiting for a game or desktop…"}
-          </p>
-          <p className="capture__meta num dim">
-            {MODE_LABEL[settings.capture.mode]} · {v.fps} FPS · {resLabel} · {settings.replay.maxSeconds}s buffer
-          </p>
+      <section data-shard-slot="capture-primary" className="capture__primary">
+        <div data-shard-component="capture-hero" className="capture__hero">
+          <div className="capture__hero-main">
+            <span className="eyebrow">Replay buffer</span>
+            <div className="capture__identity">
+              <h2 className="capture__title"><StatusDot state={dotState} /> {stateTitle}</h2>
+              <p className="capture__subject">
+                {subject?.kind === "game" ? subject.name
+                  : subject?.kind === "monitor" ? (subject.name ?? "Desktop")
+                  : "Waiting for a game or desktop…"}
+              </p>
+            </div>
+            <p className="capture__meta num dim">
+              {MODE_LABEL[settings.capture.mode]} · {v.fps} FPS · {resLabel} · {settings.replay.maxSeconds}s buffer
+            </p>
+          </div>
+          <div className="capture__ring">
+            <div className="capture__ring-num num">{ringSeconds === null ? "—" : Math.floor(ringSeconds)}</div>
+            <div className="eyebrow" style={{ marginTop: 2 }}>sec buffered</div>
+            {recording && <span className="chip chip--rec"><span className="dot dot--rec" /> REC</span>}
+          </div>
         </div>
-        <div className="capture__ring">
-          <div className="capture__ring-num num">{ringSeconds === null ? "—" : Math.floor(ringSeconds)}</div>
-          <div className="eyebrow" style={{ marginTop: 2 }}>sec buffered</div>
-          {recording && <span className="chip chip--rec"><span className="dot dot--rec" /> REC</span>}
+
+        <div data-shard-slot="capture-actions" className="capture__actions">
+          <div className="capture__save">
+            <Segmented<Dur>
+              value={dur}
+              onChange={setDur}
+              options={[{ value: "30", label: "30s" }, { value: "60", label: "60s" }, { value: "120", label: "2m" }, { value: "300", label: "5m" }]}
+            />
+            <Button data-shard-component="capture-button" data-shard-state={saving ? "saving" : "ready"} variant="primary" icon={<Icon name="save" size={16} />} loading={saving} onClick={saveClip}>Save clip</Button>
+          </div>
+          <Button data-shard-component="record-button" data-shard-state={recording ? "recording" : "idle"} variant={recording ? "danger" : "soft"}
+            icon={recording ? <Icon name="stop" size={16} /> : <Icon name="record" size={16} />}
+            onClick={toggleRecord}>
+            {recording ? "Stop recording" : "Start recording"}
+          </Button>
         </div>
       </section>
 
-      <section data-shard-slot="capture-actions" className="capture__actions">
-        <div className="capture__save">
-          <Segmented<Dur>
-            value={dur}
-            onChange={setDur}
-            options={[{ value: "30", label: "30s" }, { value: "60", label: "60s" }, { value: "120", label: "2m" }, { value: "300", label: "5m" }]}
-          />
-          <Button data-shard-component="capture-button" data-shard-state={saving ? "saving" : "ready"} variant="primary" icon={<Icon name="save" size={16} />} loading={saving} onClick={saveClip}>Save clip</Button>
-        </div>
-        <Button data-shard-component="record-button" data-shard-state={recording ? "recording" : "idle"} variant={recording ? "danger" : "soft"}
-          icon={recording ? <Icon name="stop" size={16} /> : <Icon name="record" size={16} />}
-          onClick={toggleRecord}>
-          {recording ? "Stop recording" : "Start recording"}
-        </Button>
-      </section>
-
-      <div className="capture__grid">
+      <div data-shard-component="utility-rail" data-shard-slot="capture-summary" className="capture__grid utility-rail">
         <Card title="Hotkeys" icon={<Icon name="key" size={16} />}>
           <ul className="hotkey-list">
             {settings.hotkeys.map((h) => (
@@ -164,9 +184,10 @@ export function CapturePage({ settings, clips }: Props) {
         </Card>
       </div>
 
-      {lastClips.length > 0 ? (
-        <Card title="Recent" icon={<Icon name="film" size={16} />}>
-          <div className="recents">
+      {hasClips ? (
+        <section data-shard-slot="capture-recent" className="capture__recent">
+          <h2 className="card__title"><Icon name="film" size={16} />Recent</h2>
+          <div className="recents" ref={recentGrid}>
             {lastClips.map((c) => (
               <button key={c.id} className="recent" onClick={() => setRecent(c)} title={c.game ?? "Untagged"}>
                 <div className="recent__thumb">
@@ -181,13 +202,13 @@ export function CapturePage({ settings, clips }: Props) {
               </button>
             ))}
           </div>
-        </Card>
+        </section>
       ) : (
-        <Card flat>
+        <section data-shard-slot="capture-recent" className="capture__recent">
           <EmptyState icon={<Icon name="film" size={28} />} title="No clips captured yet">
             Your saved clips and recordings will appear here.
           </EmptyState>
-        </Card>
+        </section>
       )}
 
       {recent && <Viewer clip={recent} onClose={() => setRecent(null)} />}

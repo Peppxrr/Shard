@@ -3,7 +3,6 @@ import type { ClipRecord } from "../../shared/contracts";
 import { Icon, IconButton, Button, EmptyState, Modal, ShardSelect } from "./ui";
 import { mediaFileUrl, StandaloneVideoPlayer } from "../editor/VideoPreview";
 import { ClipRename } from "./ClipRename";
-import { MedalImport } from "./MedalImport";
 
 interface Props {
   clips: ClipRecord[];
@@ -11,12 +10,13 @@ interface Props {
 }
 
 type SortKey = "newest" | "oldest" | "duration" | "size" | "game" | "favorites";
-type SourceFilter = "all" | ClipRecord["source"];
+type SourceFilter = "all" | "favorites" | ClipRecord["source"];
 const SOURCES: { value: SourceFilter; label: string }[] = [
   { value: "all", label: "All clips" },
   { value: "clip", label: "Clips" },
   { value: "recording", label: "Recordings" },
   { value: "edited", label: "Edits" },
+  { value: "favorites", label: "Favorites" },
 ];
 const SOURCE_NAMES = { clip: "Clip", recording: "Recording", edited: "Edited Clip" };
 
@@ -32,11 +32,9 @@ const SORTS: { value: SortKey; label: string }[] = [
 export function LibraryPage({ clips, onOpenEditor }: Props) {
   const [gameFilter, setGameFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
-  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>("newest");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [importOpen, setImportOpen] = useState(false);
   const selected = clips.find((clip) => clip.id === selectedId);
   const totalSize = useMemo(() => clips.reduce((total, clip) => total + clip.sizeBytes, 0), [clips]);
   const counts = useMemo(() => ({
@@ -44,6 +42,7 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
     clip: clips.filter((clip) => clip.source === "clip").length,
     recording: clips.filter((clip) => clip.source === "recording").length,
     edited: clips.filter((clip) => clip.source === "edited").length,
+    favorites: clips.filter((clip) => clip.protected === 1).length,
   }), [clips]);
 
   const games = useMemo(() => {
@@ -55,9 +54,9 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
     value: game,
     label: game.length > 28 ? `${game.slice(0, 27)}…` : game,
   })), [games]);
-  const hasFilters = gameFilter !== "all" || sourceFilter !== "all" || favoritesOnly || !!search.trim();
+  const hasFilters = gameFilter !== "all" || sourceFilter !== "all" || !!search.trim();
   const resetFilters = () => {
-    setGameFilter("all"); setSourceFilter("all"); setFavoritesOnly(false); setSearch("");
+    setGameFilter("all"); setSourceFilter("all"); setSearch("");
   };
 
   const filtered = useMemo(() => {
@@ -66,8 +65,7 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
       const dateStr = fmtDateTime(c.createdAt).toLowerCase();
       return (
         (gameFilter === "all" || c.game === gameFilter) &&
-        (sourceFilter === "all" || c.source === sourceFilter) &&
-        (!favoritesOnly || c.protected === 1) &&
+        (sourceFilter === "all" || (sourceFilter === "favorites" ? c.protected === 1 : c.source === sourceFilter)) &&
         (!q || (c.game ?? "").toLowerCase().includes(q) || pathBase(c.path).toLowerCase().includes(q) ||
           dateStr.includes(q))
       );
@@ -86,7 +84,7 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
       default: // newest
         return out.sort((a, b) => b.createdAt - a.createdAt);
     }
-  }, [clips, gameFilter, sourceFilter, favoritesOnly, search, sort]);
+  }, [clips, gameFilter, sourceFilter, search, sort]);
 
   return (
     <div data-shard-page="library" className="library">
@@ -100,19 +98,16 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
             <span><strong className="num">{clips.length}</strong> {clips.length === 1 ? "clip" : "clips"}</span>
             <span aria-hidden="true">·</span><span className="num">{fmtSize(totalSize)}</span>
           </div>
-          <Button icon={<Icon name="plus" size={15} />} onClick={() => setImportOpen(true)}>Import Medal</Button>
         </div>
       </header>
       <div data-shard-slot="library-navigation" className="library__navigation">
-        <div data-shard-component="library-filters" className="library__sources" role="group" aria-label="Clip source">
+        <div data-shard-component="library-filters" className="library__sources" role="group" aria-label="Library tabs">
           {SOURCES.map((source) => <button key={source.value} type="button"
             data-shard-slot="library-source-filter" data-source={source.value}
             className="library__source" aria-pressed={sourceFilter === source.value} onClick={() => setSourceFilter(source.value)}>
             {source.label}<span data-shard-slot="library-filter-count" className="num">{counts[source.value]}</span>
           </button>)}
         </div>
-        <Button variant={favoritesOnly ? "soft" : "ghost"} aria-pressed={favoritesOnly}
-          icon={<Icon name="star" size={15} />} onClick={() => setFavoritesOnly(!favoritesOnly)}>Favorites</Button>
       </div>
       <div data-shard-slot="toolbar" className="toolbar library__toolbar">
         <label data-shard-slot="library-search" className="search library__search">
@@ -131,14 +126,10 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
           onChange={(v) => setSort(v as SortKey)}
           options={SORTS}
         />
-      </div>
-
-      <div data-shard-slot="library-results" className="library__results">
-        <h2>{favoritesOnly ? "Favorites" : SOURCES.find((source) => source.value === sourceFilter)!.label}
-          <span className="num" aria-live="polite">{filtered.length}</span></h2>
         {hasFilters && <Button variant="ghost" size="sm" onClick={resetFilters}>Clear filters</Button>}
       </div>
 
+      <div data-shard-slot="library-results">
       {filtered.length === 0 ? (
         <EmptyState
           icon={<Icon name="film" size={30} />}
@@ -154,9 +145,9 @@ export function LibraryPage({ clips, onOpenEditor }: Props) {
           ))}
         </div>
       )}
+      </div>
 
       {selected && <Viewer clip={selected} onClose={() => setSelectedId(null)} onEdit={(clip) => { setSelectedId(null); onOpenEditor(clip); }} />}
-      {importOpen && <MedalImport onClose={() => setImportOpen(false)} />}
     </div>
   );
 }
@@ -205,8 +196,10 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
           </IconButton>
         </div>
         <span data-shard-slot="clip-filename" className="clip__filename" title={pathBase(clip.path)}>{pathBase(clip.path)}</span>
-        <time data-shard-slot="clip-date" className="clip__time" dateTime={new Date(clip.createdAt).toISOString()}>{fmtDateTime(clip.createdAt)}</time>
-        <div data-shard-slot="clip-size" className="clip__sub">{age ? `${age} · ` : ""}{fmtSize(clip.sizeBytes)}</div>
+        <div className="clip__metadata-line">
+          <time data-shard-slot="clip-date" className="clip__time" title={age || undefined} dateTime={new Date(clip.createdAt).toISOString()}>{fmtDateTime(clip.createdAt)}</time>
+          <span data-shard-slot="clip-size" className="clip__sub num">{fmtSize(clip.sizeBytes)}</span>
+        </div>
       </div>
       <div data-shard-slot="clip-actions" className="clip__actions">
         {confirming ? (

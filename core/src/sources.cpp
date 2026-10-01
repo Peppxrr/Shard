@@ -228,6 +228,7 @@ void SourceManager::removeVideoSourceItem()
     obs_source_release(windowSource_);
     windowSource_ = nullptr;
   }
+  windowClientSize_ = {};
 }
 
 void SourceManager::releaseAll()
@@ -249,6 +250,13 @@ void SourceManager::releaseAll()
 void SourceManager::applyVideoSource()
 {
   std::lock_guard<std::mutex> lock(sourceMutex_);
+  healthRecovery_.resetEvidence();
+  videoRecoveryRequested_ = false;
+  applyVideoSourceLocked();
+}
+
+void SourceManager::applyVideoSourceLocked()
+{
   removeVideoSourceItem();
 
   // Desktop: WGC monitor capture of the configured monitor. With graphics
@@ -360,6 +368,7 @@ CaptureSize SourceManager::captureSize() const
   }
   if (!source) return {};
   const uint32_t width = obs_source_get_width(source), height = obs_source_get_height(source);
+  if (item && width && height && windowClientSize_.valid()) return windowClientSize_;
   obs_sceneitem_crop crop = {};
   if (item) obs_sceneitem_get_crop(item, &crop);
   const uint32_t horizontal = crop.left + crop.right, vertical = crop.top + crop.bottom;
@@ -398,13 +407,11 @@ void SourceManager::refreshTargetWindowLocked()
   GetClassNameW(window, cls, static_cast<int>(std::size(cls)));
   subject_.title = utf8FromWide(title);
   subject_.cls = utf8FromWide(cls);
+  logRecoveryLocked("target_window_replaced", "recreate_game_and_wgc", 2, duration_ms_now());
+  healthRecovery_.resetEvidence();
   resetFrameProbeLocked();
   recreateGameCaptureLocked();
-  if (windowItem_) obs_sceneitem_remove(windowItem_);
-  windowItem_ = nullptr;
-  if (windowSource_) obs_source_release(windowSource_);
-  createWindowCaptureLocked();
-  if (windowSource_) windowItem_ = obs_scene_add(app_.scene(), windowSource_);
+  recreateWindowCaptureLocked();
   setWindowTargetLocked(subject_);
   std::fprintf(stderr, "capture: game window replaced for pid=%lu; reacquiring capture\n",
                static_cast<unsigned long>(subject_.pid));
@@ -483,6 +490,7 @@ void SourceManager::fillFrame(obs_sceneitem_t* item, const struct obs_sceneitem_
 void SourceManager::fillWindowFrameLocked()
 {
   struct obs_sceneitem_crop sceneCrop = {};
+  windowClientSize_ = {};
 #ifdef _WIN32
   if (windowItem_ && windowSource_ && subject_.kind == Subject::Kind::Window) {
     const uint32_t sourceWidth = obs_source_get_width(windowSource_);
@@ -509,6 +517,14 @@ void SourceManager::fillWindowFrameLocked()
         sceneCrop.top = static_cast<int>(crop.top);
         sceneCrop.right = static_cast<int>(crop.right);
         sceneCrop.bottom = static_cast<int>(crop.bottom);
+        // The small caption-boundary inset is display cleanup, not a change
+        // in the game's aspect ratio. Keep video geometry consistent with
+        // the hook/client so fallback switching cannot discard replay history.
+        const auto clientCrop = computeClientAreaCrop(sourceWidth, sourceHeight, frame.left, frame.top,
+            clientOrigin.x, clientOrigin.y, client.right - client.left, clientHeight);
+        if (clientCrop.valid)
+          windowClientSize_ = {sourceWidth - clientCrop.left - clientCrop.right,
+                               sourceHeight - clientCrop.top - clientCrop.bottom};
       }
     }
   }
@@ -518,6 +534,7 @@ void SourceManager::fillWindowFrameLocked()
 
 void SourceManager::setWindowTargetLocked(const Subject& s)
 {
+  windowClientSize_ = {};
   if (!windowSource_ && !gameSource_)
     return;
   resetFrameProbeLocked();
@@ -564,7 +581,8 @@ void SourceManager::recreateGameCaptureLocked()
 {
   // Updating the same descriptor does not reset an already acquired texture
   // in OBS. Recreate only the failed hook, leaving WGC and audio uninterrupted.
-  probePending_ = false;
+  probeHookPending_ = false;
+  hookObservation_ = {};
   if (gameItem_) {
     obs_sceneitem_remove(gameItem_);
     gameItem_ = nullptr;
@@ -585,70 +603,89 @@ void SourceManager::recreateGameCaptureLocked()
                static_cast<unsigned long>(subject_.pid));
 }
 
+void SourceManager::recreateWindowCaptureLocked()
+{
+  probeWindowPending_ = false;
+  windowObservation_ = {};
+  if (windowItem_) obs_sceneitem_remove(windowItem_);
+  windowItem_ = nullptr;
+  if (windowSource_) obs_source_release(windowSource_);
+  windowSource_ = nullptr;
+  createWindowCaptureLocked();
+  if (windowSource_) windowItem_ = obs_scene_add(app_.scene(), windowSource_);
+  retryWindowCaptureLocked();
+  if (windowItem_) obs_sceneitem_set_visible(windowItem_, !windowSuppressedForMinimize_);
+  fillWindowFrameLocked();
+  if (activeBackend_ == ActiveBackend::Hook && gameItem_)
+    obs_sceneitem_set_order(gameItem_, OBS_ORDER_MOVE_TOP);
+  lastWindowAction_ = "recreate";
+  lastWindowActionMs_ = duration_ms_now();
+}
+
 void SourceManager::resetFrameProbeLocked()
 {
   backendHealth_ = {};
-  probePending_ = false;
+  probeHookPending_ = probeWindowPending_ = probeScenePending_ = false;
   lastProbeMs_ = 0;
-  lastHookContent_ = CaptureFrameContent::Unknown;
-  lastWindowContent_ = CaptureFrameContent::Unknown;
-  lastContentProbeMs_ = 0;
+  hookObservation_ = windowObservation_ = monitorObservation_ = sceneObservation_ = {};
   diagnosticSchedule_.reset();
   // releaseAll runs before obs_shutdown; the destructor may run afterward.
-  if (!probeRender_ && !probeHook_ && !probeWindow_) return;
+  if (!probeRender_ && !probeHook_ && !probeWindow_ && !probeScene_) return;
   obs_enter_graphics();
   gs_texrender_destroy(probeRender_);
   gs_stagesurface_destroy(probeHook_);
   gs_stagesurface_destroy(probeWindow_);
+  gs_stagesurface_destroy(probeScene_);
   probeRender_ = nullptr;
-  probeHook_ = probeWindow_ = nullptr;
+  probeHook_ = probeWindow_ = probeScene_ = nullptr;
   obs_leave_graphics();
 }
 
-void SourceManager::sampleCaptureFrames(void* data, uint32_t, uint32_t)
+void SourceManager::sampleCaptureFrames(void* data)
 {
   auto& self = *static_cast<SourceManager*>(data);
   // Never block the graphics thread on a watchdog source update/teardown.
   std::unique_lock<std::mutex> lock(self.sourceMutex_, std::try_to_lock);
-  if (!lock || self.subject_.kind != Subject::Kind::Window) return;
+  if (!lock || self.subject_.kind == Subject::Kind::None) return;
   const uint64_t now = duration_ms_now();
   if (now - self.lastProbeMs_ < 500) return;
+  const uint64_t stagedMs = self.lastProbeMs_;
   self.lastProbeMs_ = now;
-  if (subjectWindowMinimized(self.subject_)) {
-    self.probePending_ = false;
-    self.lastHookContent_ = CaptureFrameContent::Unknown;
-    self.lastWindowContent_ = CaptureFrameContent::Unknown;
-    self.lastContentProbeMs_ = now;
-    self.backendHealth_.sample(CaptureFrameContent::Unknown, CaptureFrameContent::Unknown, now);
+  if (self.subject_.kind == Subject::Kind::Window && self.windowSuppressedForMinimize_) {
+    self.probeHookPending_ = self.probeWindowPending_ = self.probeScenePending_ = false;
+    self.hookObservation_ = self.windowObservation_ = self.sceneObservation_ = {};
     return;
   }
   constexpr uint32_t width = 64, height = 36;
   if (!self.probeRender_) self.probeRender_ = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
   if (!self.probeHook_) self.probeHook_ = gs_stagesurface_create(width, height, GS_RGBA);
   if (!self.probeWindow_) self.probeWindow_ = gs_stagesurface_create(width, height, GS_RGBA);
-  if (!self.probeRender_ || !self.probeHook_ || !self.probeWindow_) return;
+  if (!self.probeScene_) self.probeScene_ = gs_stagesurface_create(width, height, GS_RGBA);
+  if (!self.probeRender_) return;
 
   // Read the previous sample, giving the GPU half a second to finish the
   // tiny copy instead of synchronously reading a full-resolution frame.
-  const auto read = [&](gs_stagesurf_t* surface) {
+  const auto read = [&](gs_stagesurf_t* surface, bool pending, CaptureFrameObservation& observation) {
+    // A scheduling/sleep gap must not relabel an old staged frame as fresh.
+    if (!surface || !pending || !stagedMs || now - stagedMs > 1500) return;
     uint8_t* pixels = nullptr;
     uint32_t stride = 0;
-    if (!gs_stagesurface_map(surface, &pixels, &stride)) return CaptureFrameContent::Unknown;
-    const auto result = captureFrameContent(pixels, width, height, stride);
+    if (!gs_stagesurface_map(surface, &pixels, &stride)) return;
+    observation.observePixels(pixels, width, height, stride, stagedMs);
     gs_stagesurface_unmap(surface);
-    return result;
   };
-  if (self.probePending_) {
-    self.lastHookContent_ = read(self.probeHook_);
-    self.lastWindowContent_ = read(self.probeWindow_);
-    self.lastContentProbeMs_ = now;
-    self.backendHealth_.sample(self.lastHookContent_, self.lastWindowContent_, now);
+  if (self.subject_.kind == Subject::Kind::Window) {
+    read(self.probeHook_, self.probeHookPending_, self.hookObservation_);
+    read(self.probeWindow_, self.probeWindowPending_, self.windowObservation_);
+  } else {
+    read(self.probeHook_, self.probeHookPending_, self.monitorObservation_);
   }
+  read(self.probeScene_, self.probeScenePending_, self.sceneObservation_);
 
   const auto stage = [&](obs_source_t* source, gs_stagesurf_t* surface) {
     const uint32_t cx = source ? obs_source_get_width(source) : 0;
     const uint32_t cy = source ? obs_source_get_height(source) : 0;
-    if (!cx || !cy) return false;
+    if (!surface || !cx || !cy) return false;
     gs_texrender_reset(self.probeRender_);
     if (!gs_texrender_begin(self.probeRender_, width, height)) return false;
     struct vec4 clear = {};
@@ -662,14 +699,35 @@ void SourceManager::sampleCaptureFrames(void* data, uint32_t, uint32_t)
     gs_stage_texture(surface, gs_texrender_get_texture(self.probeRender_));
     return true;
   };
-  const bool hook = stage(self.gameSource_, self.probeHook_);
-  const bool wgc = stage(self.windowSource_, self.probeWindow_);
-  self.probePending_ = hook && wgc;
-  if (!self.probePending_) {
-    self.lastHookContent_ = CaptureFrameContent::Unknown;
-    self.lastWindowContent_ = CaptureFrameContent::Unknown;
-    self.lastContentProbeMs_ = now;
-    self.backendHealth_.sample(CaptureFrameContent::Unknown, CaptureFrameContent::Unknown, now);
+  self.probeHookPending_ = stage(self.subject_.kind == Subject::Kind::Monitor
+                                   ? self.monitorSource_ : self.gameSource_, self.probeHook_);
+  self.probeWindowPending_ = self.subject_.kind == Subject::Kind::Window &&
+                            stage(self.windowSource_, self.probeWindow_);
+
+  // Observe the real video mix AFTER composition, not another rendering of
+  // the scene. Only this path needs a new tiny readback; fingerprints reuse
+  // each surface's already mapped pixels.
+  self.probeScenePending_ = false;
+  auto* texture = obs_get_main_texture();
+  if (texture && self.probeScene_) {
+    gs_texrender_reset(self.probeRender_);
+    if (gs_texrender_begin(self.probeRender_, width, height)) {
+      struct vec4 clear = {};
+      gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+      gs_ortho(0.0f, static_cast<float>(width), 0.0f, static_cast<float>(height), -100.0f, 100.0f);
+      gs_blend_state_push();
+      gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+      const bool srgb = gs_framebuffer_srgb_enabled();
+      gs_enable_framebuffer_srgb(true);
+      auto* effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+      gs_effect_set_texture_srgb(gs_effect_get_param_by_name(effect, "image"), texture);
+      while (gs_effect_loop(effect, "Draw")) gs_draw_sprite(texture, 0, width, height);
+      gs_enable_framebuffer_srgb(srgb);
+      gs_blend_state_pop();
+      gs_texrender_end(self.probeRender_);
+      gs_stage_texture(self.probeScene_, gs_texrender_get_texture(self.probeRender_));
+      self.probeScenePending_ = true;
+    }
   }
 }
 
@@ -753,6 +811,8 @@ void SourceManager::setGameSubject(const std::string& exe, const std::string& na
   const bool visibleIdentityChanged =
       subject_.kind != Subject::Kind::Window || subject_.pid != cand.pid || subject_.name != cand.name;
   if (subject_.pid != cand.pid) targetWindow_ = 0;
+  healthRecovery_.resetEvidence();
+  videoRecoveryRequested_ = false;
   subject_ = std::move(cand);
   applySubjectLocked();
   if (visibleIdentityChanged)
@@ -764,11 +824,16 @@ void SourceManager::clearGameSubject()
   std::lock_guard<std::mutex> lock(sourceMutex_);
   if (subject_.kind != Subject::Kind::Window)
     return;
+  healthRecovery_.resetEvidence();
+  videoRecoveryRequested_ = false;
   if (config_.capture.mode == "auto") {
     subject_ = Subject{Subject::Kind::Monitor, "", "", "", "Desktop", 0};
   } else {
     subject_ = Subject{};
   }
+  // A pending hook surface must not become the first monitor observation
+  // when the probe's shared staging slot changes subjects.
+  resetFrameProbeLocked();
   applySubjectLocked();
   emitSubjectChanged();
 }
@@ -777,7 +842,7 @@ void SourceManager::startWatchdog()
 {
   if (watchdogRun_.exchange(true))
     return;
-  obs_add_main_render_callback(sampleCaptureFrames, this);
+  obs_add_main_rendered_callback(sampleCaptureFrames, this);
   watchdogThread_ = std::thread([this] { watchdogLoop(); });
 }
 
@@ -787,8 +852,144 @@ void SourceManager::stopWatchdog()
     return;
   if (watchdogThread_.joinable())
     watchdogThread_.join();
-  obs_remove_main_render_callback(sampleCaptureFrames, this);
+  obs_remove_main_rendered_callback(sampleCaptureFrames, this);
 }
+bool SourceManager::consumeVideoRecoveryRequest()
+{
+  std::lock_guard<std::mutex> lock(sourceMutex_);
+  const bool requested = videoRecoveryRequested_;
+  videoRecoveryRequested_ = false;
+  return requested;
+}
+
+std::string SourceManager::probeDiagnosticsLocked(uint64_t nowMs) const
+{
+  std::ostringstream text;
+  const auto append = [&](const char* name, const CaptureFrameObservation& frame) {
+    text << ' ' << name << "_pixels_observed=" << (frame.hasPixels ? "true" : "false")
+         << ' ' << name << "_probe_fresh=" << (frame.fresh(nowMs) ? "true" : "false")
+         << ' ' << name << "_frame_changed=" << (frame.frameChanged && frame.fresh(nowMs) ? "true" : "false")
+         << ' ' << name << "_changing=" << (frame.changing(nowMs) ? "true" : "false")
+         << ' ' << name << "_health=" << (frame.healthy(nowMs) ? "content" : frame.fresh(nowMs) &&
+                                          frame.content == CaptureFrameContent::Black ? "black" : "degraded_unknown")
+         << ' ' << name << "_probe_age_ms=" << (frame.hasPixels ? std::to_string(nowMs - frame.observedMs) : "never")
+         << ' ' << name << "_unchanged_age_ms=" << (frame.hasPixels ? std::to_string(frame.unchangedAge(nowMs)) : "never");
+  };
+  append("hook", hookObservation_);
+  append("wgc", windowObservation_);
+  append("scene", sceneObservation_);
+  text << " scene_content=" << captureFrameContentName(sceneObservation_.content);
+  if (subject_.kind == Subject::Kind::Monitor) {
+    append("monitor", monitorObservation_);
+    text << " monitor_content=" << captureFrameContentName(monitorObservation_.content);
+  }
+  return text.str();
+}
+
+void SourceManager::logRecoveryLocked(const char* reason, const char* action, int level, uint64_t nowMs)
+{
+  std::ostringstream line;
+  const char* backend = subject_.kind == Subject::Kind::Monitor ? "monitor" :
+      activeBackend_ == ActiveBackend::Hook ? "hook" : activeBackend_ == ActiveBackend::Wgc ? "wgc" : "none";
+  line << "[capture-recovery][warn] ts_ms=" << nowMs << " reason=" << reason
+       << " recovery_level=" << level << " action=" << action << " selected_backend_before=" << backend
+       << " pid=" << subject_.pid << " hwnd=0x" << std::hex << targetWindow_ << std::dec
+       << " hook_retry_count=" << hookRetryCount_ << " wgc_retry_count=" << wgcRetryCount_
+       << " hook_reject_reason=" << backendHealth_.rejectionReason()
+       << " previous_recovery_age_ms=" << (lastRecoveryMs_ ? std::to_string(nowMs - lastRecoveryMs_) : "never");
+  const auto observation = [&](const char* name, const CaptureFrameObservation& frame, obs_source_t* source) {
+    line << ' ' << name << "_source=" << (source ? "present" : "missing")
+         << ' ' << name << "_size=" << (source ? obs_source_get_width(source) : 0) << 'x'
+         << (source ? obs_source_get_height(source) : 0)
+         << ' ' << name << "_content=" << captureFrameContentName(frame.content)
+         << ' ' << name << "_pixels_observed=" << frame.hasPixels
+         << ' ' << name << "_frame_changed=" << frame.frameChanged
+         << ' ' << name << "_changing=" << frame.changing(nowMs)
+         << ' ' << name << "_healthy=" << frame.healthy(nowMs)
+         << ' ' << name << "_probe_age_ms=" << (frame.observedMs ? std::to_string(nowMs - frame.observedMs) : "never")
+         << ' ' << name << "_unchanged_age_ms=" << (frame.hasPixels ? std::to_string(frame.unchangedAge(nowMs)) : "never");
+  };
+  observation("hook", hookObservation_, gameSource_);
+  observation("wgc", windowObservation_, windowSource_);
+  observation("scene", sceneObservation_, obs_scene_get_source(app_.scene()));
+  if (subject_.kind == Subject::Kind::Monitor) observation("monitor", monitorObservation_, monitorSource_);
+  std::fprintf(stderr, "%s\n", line.str().c_str());
+  std::fflush(stderr);
+  lastRecoveryMs_ = nowMs;
+}
+
+void SourceManager::repairSceneLocked()
+{
+  // Repair downstream binding/visibility/transforms without reacquiring a
+  // healthy target or disturbing audio, replay packets or recording outputs.
+  obs_set_output_source(0, obs_scene_get_source(app_.scene()));
+  const bool monitor = subject_.kind == Subject::Kind::Monitor;
+  if (monitorItem_) obs_sceneitem_set_visible(monitorItem_, monitor);
+  if (gameItem_) obs_sceneitem_set_visible(gameItem_, !monitor && subject_.kind == Subject::Kind::Window);
+  if (windowItem_) obs_sceneitem_set_visible(windowItem_, !monitor && !windowSuppressedForMinimize_);
+  fillFrame(monitorItem_);
+  fillFrame(gameItem_);
+  fillWindowFrameLocked();
+  if (activeBackend_ == ActiveBackend::Wgc && windowItem_) obs_sceneitem_set_order(windowItem_, OBS_ORDER_MOVE_TOP);
+  else if (activeBackend_ == ActiveBackend::Hook && gameItem_) obs_sceneitem_set_order(gameItem_, OBS_ORDER_MOVE_TOP);
+}
+
+void SourceManager::recoverCaptureLocked(bool eligible, bool monitor, uint64_t nowMs)
+{
+  const bool hookHealthy = gameSource_ && obs_source_get_width(gameSource_) && obs_source_get_height(gameSource_) &&
+                           hookObservation_.healthy(nowMs) && !backendHealth_.hookRejected();
+  const bool wgcHealthy = windowSource_ && obs_source_get_width(windowSource_) && obs_source_get_height(windowSource_) &&
+                          windowObservation_.healthy(nowMs);
+  const bool sourceHealthy = monitor ? monitorSource_ && monitorObservation_.healthy(nowMs) : hookHealthy || wgcHealthy;
+  const auto& selected = monitor ? monitorObservation_ : activeBackend_ == ActiveBackend::Wgc
+                                                    ? windowObservation_ : hookObservation_;
+  const bool sceneFrozen = sceneObservation_.fresh(nowMs) && sceneObservation_.hasPixels &&
+      sceneObservation_.unchangedAge(nowMs) >= 30000 && selected.changing(nowMs);
+  const bool downstream = sourceHealthy && (!sceneObservation_.healthy(nowMs) || sceneFrozen);
+  const bool healthy = sourceHealthy && sceneObservation_.healthy(nowMs) && !sceneFrozen;
+  CaptureHealthRecovery::Input input;
+  input.eligible = eligible && !videoRecoveryRequested_;
+  input.healthy = healthy;
+  input.downstream = downstream;
+  input.unusable = !healthy;
+  input.stalePipeline = !sceneObservation_.fresh(nowMs);
+  input.monitor = monitor;
+  const auto action = healthRecovery_.update(input, nowMs);
+  if (action == CaptureRecoveryAction::None) return;
+  const char* reason = downstream ? "source_content_scene_unusable" : input.stalePipeline
+      ? "persistent_stale_or_missing_probes" : "persistent_unusable_capture";
+  logRecoveryLocked(reason, captureRecoveryActionName(action), static_cast<int>(action), nowMs);
+  switch (action) {
+    case CaptureRecoveryAction::Retry:
+      if (monitor) retryMonitorCaptureLocked();
+      else { retryGameCaptureLocked(); retryWindowCaptureLocked(); }
+      lastHookRetry_ = lastWindowRetry_ = std::chrono::steady_clock::now();
+      if (!monitor) ++hookRetryCount_;
+      ++wgcRetryCount_;
+      break;
+    case CaptureRecoveryAction::RecreateHook:
+      recreateGameCaptureLocked();
+      lastHookRetry_ = std::chrono::steady_clock::now();
+      ++hookRetryCount_;
+      break;
+    case CaptureRecoveryAction::RecreateWgc:
+      recreateWindowCaptureLocked();
+      lastWindowRetry_ = std::chrono::steady_clock::now();
+      ++wgcRetryCount_;
+      break;
+    case CaptureRecoveryAction::RebuildSources:
+      applyVideoSourceLocked();
+      break;
+    case CaptureRecoveryAction::RebindScene:
+      repairSceneLocked();
+      break;
+    case CaptureRecoveryAction::ResetVideo:
+      videoRecoveryRequested_ = true;
+      break;
+    default: break;
+  }
+}
+
 void SourceManager::watchdogLoop()
 {
   constexpr auto kRetryDelay = std::chrono::seconds(3);
@@ -837,14 +1038,20 @@ void SourceManager::watchdogLoop()
     // fires on this tick. Short-circuiting here used to rebuild twice.
     const bool notified = recoveryState.consumeRecovery();
     const uint64_t tickMs = duration_ms_now();
-    if (resumedAfterLongPause || notified)
+    if (resumedAfterLongPause || notified) {
       recoverySchedule.request(tickMs);
+      std::lock_guard<std::mutex> lock(sourceMutex_);
+      healthRecovery_.resetEvidence();
+      videoRecoveryRequested_ = false;
+    }
     if (recoverySchedule.consumeDue(tickMs)) {
-      std::fprintf(stderr, "capture: recovering after display/system wake or graphics reset; rebuilding video capture sources\n");
-      std::fflush(stderr);
       // Recreate only video sources. Audio capture remains continuous, while
       // fresh WGC sessions and a fresh hook source replace stale black textures.
-      applyVideoSource();
+      std::lock_guard<std::mutex> lock(sourceMutex_);
+      logRecoveryLocked("display_system_wake_or_graphics_reset", "rebuild_sources", 4, tickMs);
+      healthRecovery_.externalRecovery(tickMs);
+      videoRecoveryRequested_ = false;
+      applyVideoSourceLocked();
     }
     const std::string mode = config_.capture.mode;
     bool active = false;
@@ -856,7 +1063,10 @@ void SourceManager::watchdogLoop()
         } else {
           subject_ = Subject{};
         }
+        resetFrameProbeLocked();
         applySubjectLocked();
+        healthRecovery_.resetEvidence();
+        videoRecoveryRequested_ = false;
         emitSubjectChanged();
       }
 
@@ -865,40 +1075,49 @@ void SourceManager::watchdogLoop()
         const uint32_t monitorWidth = monitorSource_ ? obs_source_get_width(monitorSource_) : 0;
         const uint32_t monitorHeight = monitorSource_ ? obs_source_get_height(monitorSource_) : 0;
         const bool monitorReady = monitorWidth && monitorHeight;
+        const bool monitorHealthy = monitorReady && monitorObservation_.healthy(tickMs);
         active = monitorReady;
         activeBackend_ = ActiveBackend::None;
-        if (monitorReady) {
+        if (monitorHealthy) {
           captureHealthyAt_ = now;
           lastWindowRetry_ = now;
           windowNoFramesReported_ = false;
-          fillFrame(monitorItem_);
         } else {
-          if (now - lastWindowRetry_ >= kRetryDelay) {
+          if (!monitorReady && !recoveryState.displaySleeping() && !recoverySchedule.pending() &&
+              now - lastWindowRetry_ >= kRetryDelay) {
+            logRecoveryLocked("monitor_dimensions_unavailable", "retry_monitor", 0, tickMs);
             retryMonitorCaptureLocked();
             lastWindowRetry_ = now;
           }
-          if (now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
+          if (!monitorReady && !recoveryState.displaySleeping() &&
+              now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
             events_.emit("error",
                          {{"code", "CAPTURE_NO_FRAMES"},
                           {"message", "Desktop capture is not producing frames; recovery is still retrying"}});
             windowNoFramesReported_ = true;
           }
         }
+        if (monitorReady) fillFrame(monitorItem_);
         std::ostringstream signature;
         signature << "mode=" << mode << "|subject=monitor|source=" << (monitorSource_ != nullptr) << '|'
-                  << monitorWidth << 'x' << monitorHeight << "|ready=" << monitorReady;
+                  << monitorWidth << 'x' << monitorHeight << "|ready=" << monitorReady << '|' << monitorHealthy
+                  << '|' << captureFrameContentName(monitorObservation_.content) << '|'
+                  << captureFrameContentName(sceneObservation_.content) << '|' << sceneObservation_.fresh(tickMs);
         const uint64_t diagnosticNowMs = duration_ms_now();
         if (diagnosticSchedule_.shouldLog(signature.str(), diagnosticNowMs)) {
           std::ostringstream line;
-          line << "[capture-health][" << (monitorReady ? "info" : "warn") << "] ts_ms=" << diagnosticNowMs
+          line << "[capture-health][" << (monitorHealthy ? "info" : "warn") << "] ts_ms=" << diagnosticNowMs
                << " capture_mode=" << mode << " subject_kind=monitor selected_backend=monitor"
                << " monitor_source=" << (monitorSource_ ? "present" : "missing") << " monitor_size=" << monitorWidth
                << 'x' << monitorHeight << " monitor_size_ready=" << (monitorReady ? "true" : "false")
                << " backend_ready_active=" << (active ? "true" : "false")
-               << " frame_content_probe=unavailable source_dimensions_mean_frame_size_only=true";
+               << " backend_healthy=" << (monitorHealthy ? "true" : "false")
+               << " content_probe=64x36_interior source_dimensions_mean_frame_size_only=true"
+               << probeDiagnosticsLocked(diagnosticNowMs);
           std::fprintf(stderr, "%s\n", line.str().c_str());
           std::fflush(stderr);
         }
+        recoverCaptureLocked(!recoveryState.displaySleeping() && !recoverySchedule.pending(), true, tickMs);
       } else if (subject_.kind == Subject::Kind::Window && pidAlive(subject_.pid)) {
         refreshTargetWindowLocked();
         const bool minimized = subjectWindowMinimized(subject_);
@@ -923,8 +1142,18 @@ void SourceManager::watchdogLoop()
         const uint32_t gameHeight = gameSource_ ? obs_source_get_height(gameSource_) : 0;
         const bool windowReady = windowWidth && windowHeight;
         const bool usableWindowReady = windowReady && !minimized;
+        // Evaluate aging evidence even if the graphics callback stops. Only
+        // successful maps update the observations feeding this policy.
+        backendHealth_.sample(hookObservation_, windowObservation_, tickMs);
+        const bool windowHealthy = usableWindowReady && windowObservation_.healthy(tickMs);
         const bool hookRejected = backendHealth_.hookRejected();
-        const bool gameReady = gameWidth && gameHeight && !hookRejected;
+        const bool hookHealthy = gameWidth && gameHeight && !hookRejected && hookObservation_.healthy(tickMs);
+        const bool hookProbeStale = hookObservation_.hasPixels && !hookObservation_.fresh(tickMs) &&
+                                   tickMs - hookObservation_.observedMs >= 15000;
+        const bool gameReady = gameWidth && gameHeight && !hookRejected && !(hookProbeStale && windowHealthy);
+        const bool downstreamFailure = (hookHealthy || windowHealthy) && !sceneObservation_.healthy(tickMs);
+        const bool normalRecoveryAllowed = !minimized && !recoveryState.displaySleeping() &&
+            !recoverySchedule.pending() && !videoRecoveryRequested_ && !downstreamFailure;
         const auto now = std::chrono::steady_clock::now();
         // A minimized live game is an expected WGC outage, not a dead capture
         // subject. Keep the replay lifecycle active so its existing packets
@@ -938,8 +1167,10 @@ void SourceManager::watchdogLoop()
 
         if (usableWindowReady || gameReady) {
           active = true;
-          captureHealthyAt_ = now;
-          windowNoFramesReported_ = false;
+          if (hookHealthy || windowHealthy) {
+            captureHealthyAt_ = now;
+            windowNoFramesReported_ = false;
+          }
           if (gameReady)
             fillFrame(gameItem_);
           if (usableWindowReady)
@@ -952,6 +1183,9 @@ void SourceManager::watchdogLoop()
             desired = ActiveBackend::Wgc;
 
           if (desired != activeBackend_) {
+            if (activeBackend_ != ActiveBackend::None)
+              logRecoveryLocked(hookRejected ? backendHealth_.rejectionReason() : "backend_readiness_changed",
+                                desired == ActiveBackend::Wgc ? "select_wgc" : "select_hook", 0, tickMs);
             activeBackend_ = desired;
             // A black hook still has an opaque texture. Merely naming WGC
             // as the backend cannot expose it; change the actual layer order.
@@ -975,7 +1209,8 @@ void SourceManager::watchdogLoop()
           if (lastHookRetry_.time_since_epoch().count() == 0)
             lastHookRetry_ = now;
 
-          if (now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
+          if (!minimized && !recoveryState.displaySleeping() &&
+              now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
             std::string msg = "Capture for " + subject_.name +
                               " is not producing frames through either game capture or WGC; recovery "
                               "is still retrying";
@@ -986,10 +1221,11 @@ void SourceManager::watchdogLoop()
         // Keep the fallback ready even while the hook works. OBS compatibility
         // JSON flags select which capture method a warning applies to; they
         // are not a list of titles that prohibit WGC.
-        if (usableWindowReady) {
+        if (windowHealthy) {
           lastWindowRetry_ = now;
           wgcRetryCount_ = 0;
-        } else if (!minimized && now - lastWindowRetry_ >= kRetryDelay) {
+        } else if (!usableWindowReady && normalRecoveryAllowed && now - lastWindowRetry_ >= kRetryDelay) {
+          logRecoveryLocked("wgc_dimensions_unavailable", "retry_wgc", 0, tickMs);
           retryWindowCaptureLocked();
           lastWindowRetry_ = now;
           wgcRetryCount_++;
@@ -997,16 +1233,22 @@ void SourceManager::watchdogLoop()
         // Recover the hook independently of WGC. A fallback with dimensions
         // can still be black (notably for protected titles), and must not
         // prevent the preferred backend from ever getting another attempt.
-        if (gameReady) {
+        if (hookHealthy) {
           lastHookRetry_ = now;
           hookRetryCount_ = 0;
-        } else if (now - lastHookRetry_ >= std::chrono::milliseconds(
+        } else if (normalRecoveryAllowed && (!gameWidth || !gameHeight ||
+                       backendHealth_.hookRetryJustified(windowObservation_, tickMs)) &&
+                   now - lastHookRetry_ >= std::chrono::milliseconds(
                        hookRejected ? 15000 : captureHookRetryDelayMs(hookRetryCount_))) {
           if ((hookRejected && gameWidth && gameHeight) ||
-              (!gameWidth && !gameHeight && hookRetryCount_ > 0 && hookRetryCount_ % 5 == 0))
+              (!gameWidth && !gameHeight && hookRetryCount_ > 0 && hookRetryCount_ % 5 == 0)) {
+            logRecoveryLocked(hookRejected ? backendHealth_.rejectionReason() : "hook_dimensions_unavailable",
+                              "recreate_hook", 2, tickMs);
             recreateGameCaptureLocked();
-          else
+          } else {
+            logRecoveryLocked("hook_dimensions_unavailable", "retry_hook", 0, tickMs);
             retryGameCaptureLocked();
+          }
           lastHookRetry_ = now;
           if (hookRetryCount_ < 1000000)
             hookRetryCount_++;
@@ -1044,20 +1286,21 @@ void SourceManager::watchdogLoop()
         signature << subject_.exe << '|' << subject_.pid << '|' << targetWindow_ << '|'
                   << minimized << '|' << active << '|' << (gameSource_ != nullptr) << '|'
                   << (windowSource_ != nullptr) << '|'
-                  << gameWidth << 'x' << gameHeight << '|' << captureFrameContentName(lastHookContent_) << '|'
-                  << windowWidth << 'x' << windowHeight << '|' << captureFrameContentName(lastWindowContent_) << '|'
+                  << gameWidth << 'x' << gameHeight << '|' << captureFrameContentName(hookObservation_.content) << '|'
+                  << windowWidth << 'x' << windowHeight << '|' << captureFrameContentName(windowObservation_.content) << '|'
                   << wgcCrop.left << ',' << wgcCrop.top << ',' << wgcCrop.right << ',' << wgcCrop.bottom << '|'
                   << clientWidth << 'x' << clientHeight << '|' << hookRejected << '|'
                   << selectedBackend << '|' << hookRetryCount_ << ':' << lastHookAction_ << '|'
                   << wgcRetryCount_ << ':' << lastWindowAction_ << '|'
-                  << (lastContentProbeMs_ != 0);
+                  << hookHealthy << '|' << windowHealthy << '|' << hookProbeStale << '|'
+                  << captureFrameContentName(sceneObservation_.content) << '|' << sceneObservation_.fresh(tickMs);
         const uint64_t diagnosticNowMs = duration_ms_now();
         if (diagnosticSchedule_.shouldLog(signature.str(), diagnosticNowMs)) {
           const auto ageText = [diagnosticNowMs](uint64_t thenMs) {
             return thenMs ? std::to_string(diagnosticNowMs - thenMs) + "ms" : std::string("never");
           };
           const char* severity =
-              hookRejected || (!minimized && !gameReady && !usableWindowReady) ? "warn" : "info";
+              hookRejected || (!minimized && ((!hookHealthy && !windowHealthy) || downstreamFailure)) ? "warn" : "info";
           std::ostringstream line;
           line << "[capture-health][" << severity << "] ts_ms=" << diagnosticNowMs
                << " subject_exe=" << subject_.exe << " pid=" << subject_.pid << " hwnd=0x"
@@ -1065,12 +1308,17 @@ void SourceManager::watchdogLoop()
                << " backend_ready_active=" << (active ? "true" : "false")
                << " hook_source=" << (gameSource_ ? "present" : "missing") << " hook_size=" << gameWidth << 'x'
                << gameHeight << " hook_size_ready=" << (gameWidth && gameHeight ? "true" : "false")
-               << " hook_content=" << captureFrameContentName(lastHookContent_)
+               << " hook_content=" << captureFrameContentName(hookObservation_.content)
+               << " hook_healthy=" << (hookHealthy ? "true" : "false")
                << " wgc_source=" << (windowSource_ ? "present" : "missing") << " wgc_size=" << windowWidth << 'x'
                << windowHeight << " wgc_size_ready=" << (windowReady ? "true" : "false")
-               << " wgc_content=" << captureFrameContentName(lastWindowContent_)
-               << " content_probe=paired_64x36_interior probe_age_ms="
-               << (lastContentProbeMs_ ? std::to_string(diagnosticNowMs - lastContentProbeMs_) : "never")
+               << " wgc_content=" << captureFrameContentName(windowObservation_.content)
+               << " wgc_healthy=" << (windowHealthy ? "true" : "false")
+               << " content_probe=64x36_interior probe_age_ms="
+               << (hookObservation_.hasPixels && windowObservation_.hasPixels
+                       ? std::to_string(diagnosticNowMs - std::min(hookObservation_.observedMs, windowObservation_.observedMs))
+                       : "never")
+               << " probe_callback_age_ms=" << (lastProbeMs_ ? std::to_string(diagnosticNowMs - lastProbeMs_) : "never")
                << " source_dimensions_mean_frame_size_only=true"
                << " win32_client=" << (clientWidth && clientHeight ? std::to_string(clientWidth) + 'x' +
                                                                   std::to_string(clientHeight)
@@ -1079,15 +1327,24 @@ void SourceManager::watchdogLoop()
                << " wgc_visible=" << wgcVisibleWidth << 'x' << wgcVisibleHeight
                << " hook_rejected=" << (hookRejected ? "true" : "false")
                << " hook_reject_reason="
-               << (hookRejected ? "hook_black_while_wgc_content_for_3s" : "none")
+               << backendHealth_.rejectionReason()
                << " selected_backend=" << selectedBackend << " hook_retry_count=" << hookRetryCount_
                << " hook_last_action=" << lastHookAction_ << " hook_last_action_age_ms="
                << ageText(lastHookActionMs_) << " wgc_retry_count=" << wgcRetryCount_
                << " wgc_last_action=" << lastWindowAction_ << " wgc_last_action_age_ms="
-               << ageText(lastWindowActionMs_);
+               << ageText(lastWindowActionMs_) << probeDiagnosticsLocked(diagnosticNowMs);
           std::fprintf(stderr, "%s\n", line.str().c_str());
           std::fflush(stderr);
         }
+        bool validWindow = false;
+#ifdef _WIN32
+        DWORD targetPid = 0;
+        const HWND currentWindow = reinterpret_cast<HWND>(targetWindow_);
+        validWindow = currentWindow && IsWindow(currentWindow) && IsWindowVisible(currentWindow) &&
+                      GetWindowThreadProcessId(currentWindow, &targetPid) && targetPid == subject_.pid;
+#endif
+        recoverCaptureLocked(validWindow && !minimized && !recoveryState.displaySleeping() &&
+                             !recoverySchedule.pending(), false, tickMs);
       } else {
         std::ostringstream signature;
         signature << "mode=" << mode << "|subject=none|source=none|active=false";

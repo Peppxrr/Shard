@@ -2,6 +2,7 @@
 
 #include "encoders.h"
 #include "x265_encoder.h"
+#include "capture_adapter.h"
 
 #include <obs-module.h>
 #include <algorithm>
@@ -11,6 +12,10 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <d3d11.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
+#include <iostream>
 #endif
 
 namespace shard {
@@ -31,6 +36,64 @@ std::string utf8FromWide(const wchar_t* value)
   WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), size, nullptr, nullptr);
   result.pop_back();
   return result;
+}
+
+uint64_t adapterLuid(LUID luid)
+{
+  return (static_cast<uint64_t>(static_cast<uint32_t>(luid.HighPart)) << 32) | luid.LowPart;
+}
+
+uint32_t automaticCaptureAdapter()
+{
+  using Microsoft::WRL::ComPtr;
+  ComPtr<IDXGIFactory1> factory;
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+    std::cerr << "[capture-adapter] enumeration_failed selected_index=0 reason=dxgi_unavailable\n";
+    return 0;
+  }
+  std::vector<CaptureAdapter> adapters;
+  std::vector<DXGI_ADAPTER_DESC1> descriptions;
+  for (UINT index = 0;; ++index) {
+    ComPtr<IDXGIAdapter1> adapter;
+    if (FAILED(factory->EnumAdapters1(index, &adapter))) break;
+    DXGI_ADAPTER_DESC1 desc{};
+    if (FAILED(adapter->GetDesc1(&desc))) continue;
+    const bool software = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+    const bool supported = !software && SUCCEEDED(D3D11CreateDevice(
+        adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, nullptr, nullptr, nullptr));
+    adapters.push_back({index, adapterLuid(desc.AdapterLuid), desc.DedicatedVideoMemory, software, supported});
+    descriptions.push_back(desc);
+    std::cerr << "[capture-adapter] detected index=" << index << " name=\"" << utf8FromWide(desc.Description)
+              << "\" vendor_id=" << desc.VendorId << " device_id=" << desc.DeviceId
+              << " luid=" << adapterLuid(desc.AdapterLuid) << " dedicated_bytes=" << desc.DedicatedVideoMemory
+              << " software=" << software << " d3d11=" << supported << '\n';
+  }
+  uint64_t preferred = 0;
+  ComPtr<IDXGIFactory6> modernFactory;
+  if (SUCCEEDED(factory.As(&modernFactory))) {
+    for (UINT rank = 0;; ++rank) {
+      ComPtr<IDXGIAdapter1> adapter;
+      if (FAILED(modernFactory->EnumAdapterByGpuPreference(
+              rank, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)))) break;
+      DXGI_ADAPTER_DESC1 desc{};
+      if (FAILED(adapter->GetDesc1(&desc))) continue;
+      const auto id = adapterLuid(desc.AdapterLuid);
+      const auto usable = std::find_if(adapters.begin(), adapters.end(), [id](const auto& candidate) {
+        return candidate.luid == id && !candidate.software && candidate.supportsD3D11;
+      });
+      if (usable != adapters.end()) { preferred = id; break; }
+    }
+  }
+  const auto selected = selectCaptureAdapter(adapters, preferred);
+  for (size_t i = 0; i < adapters.size(); ++i) {
+    if (adapters[i].index != selected) continue;
+    const auto& desc = descriptions[i];
+    std::cerr << "[capture-adapter] selected_index=" << selected << " name=\"" << utf8FromWide(desc.Description)
+              << "\" vendor_id=" << desc.VendorId << " luid=" << adapters[i].luid
+              << " reason=" << (preferred ? "windows_high_performance" : "hardware_memory_fallback") << '\n';
+  }
+  return selected;
 }
 
 std::unordered_map<std::string, std::string> activeMonitorNames()
@@ -92,6 +155,7 @@ bool App::init()
 {
   ok_ = false;
   shutdownDone_ = false;
+  graphicsAdapterSelected_ = false;
 
   if (!startup())
     return false;
@@ -197,7 +261,15 @@ bool App::resetVideo(uint32_t captureWidth, uint32_t captureHeight)
 {
   struct obs_video_info ovi = {};
   ovi.graphics_module = "libobs-d3d11";
-  ovi.adapter = 0;
+#ifdef _WIN32
+  // obs_reset_video retains the existing graphics device. Keep the actual
+  // adapter stable during canvas/output resets rather than claiming a new GPU.
+  if (!graphicsAdapterSelected_) {
+    graphicsAdapter_ = automaticCaptureAdapter();
+    graphicsAdapterSelected_ = true;
+  }
+  ovi.adapter = graphicsAdapter_;
+#endif
   ovi.fps_den = 1;
 
   // Match the OBS canvas to the configured desktop monitor. This avoids a

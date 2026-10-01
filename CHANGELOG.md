@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.8
+
+- Improved capture recovery with independent pixel checks for game capture, window capture, and the final video output, plus conservative recovery for black, stale, and frozen frames.
+- Added automatic, vendor-neutral graphics adapter selection using Windows GPU preference, with clearer adapter diagnostics.
+- Preserved replay history and continuous recordings across compatible game-window size changes, and improved replay startup while a game capture is being acquired.
+- Improved Minecraft Java client detection while keeping launchers, servers, and other Java applications out of automatic game capture.
+- Redesigned the Capture, Games, and Settings layouts with clearer controls, responsive sections, and a recent-clips grid that adapts to the available space.
+- Added keyboard-accessible Settings search that opens the matching control, plus search and a scrollable list for custom themes.
+- Moved Medal imports into Settings → Storage, made Favorites a Library tab, and cleaned up clip metadata and filename controls.
+- Expanded capture-health and recovery diagnostics and documented theme support for the updated interface.
+
 ## 0.1.7
 
 - Redesigned the Library with source counts, Favorites filtering, clearer search and sort controls, larger clip previews, and simpler metadata.

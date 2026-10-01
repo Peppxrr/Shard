@@ -92,6 +92,9 @@ public:
   // Outputs/watchdog stopped by the caller. Keep live capture sessions intact
   // while replacing only the OBS video mix and fitting its scene transforms.
   bool resizeCanvas(CaptureSize size);
+  // Consumed on the RPC/main lifecycle thread; never reset outputs in a render
+  // callback or the watchdog (which the reset must join).
+  bool consumeVideoRecoveryRequest();
 
   // Current capture subject (RPC thread reads this for state.get).
   Subject subject() const
@@ -122,7 +125,13 @@ private:
   void createWindowCaptureLocked();
   void refreshTargetWindowLocked();
   void recreateGameCaptureLocked();
-  static void sampleCaptureFrames(void* data, uint32_t width, uint32_t height);
+  void recreateWindowCaptureLocked();
+  void applyVideoSourceLocked();
+  void logRecoveryLocked(const char* reason, const char* action, int level, uint64_t nowMs);
+  void repairSceneLocked();
+  void recoverCaptureLocked(bool eligible, bool monitor, uint64_t nowMs);
+  std::string probeDiagnosticsLocked(uint64_t nowMs) const;
+  static void sampleCaptureFrames(void* data);
   void resetFrameProbeLocked();
   void emitSubjectChanged();
   void removeVideoSourceItem();
@@ -142,6 +151,7 @@ private:
   obs_sceneitem_t* gameItem_ = nullptr;
   obs_source_t* windowSource_ = nullptr; // window_capture (WGC) - fallback, below hook
   obs_sceneitem_t* windowItem_ = nullptr;
+  CaptureSize windowClientSize_; // Validated client geometry before cosmetic caption inset.
 
   Subject subject_; // what is currently captured/shown
 
@@ -162,11 +172,18 @@ private:
   gs_texrender_t* probeRender_ = nullptr;
   gs_stagesurf_t* probeHook_ = nullptr;
   gs_stagesurf_t* probeWindow_ = nullptr;
-  bool probePending_ = false;
+  gs_stagesurf_t* probeScene_ = nullptr;
+  bool probeHookPending_ = false;
+  bool probeWindowPending_ = false;
+  bool probeScenePending_ = false;
   uint64_t lastProbeMs_ = 0;
-  CaptureFrameContent lastHookContent_ = CaptureFrameContent::Unknown;
-  CaptureFrameContent lastWindowContent_ = CaptureFrameContent::Unknown;
-  uint64_t lastContentProbeMs_ = 0;
+  CaptureFrameObservation hookObservation_;
+  CaptureFrameObservation windowObservation_;
+  CaptureFrameObservation monitorObservation_;
+  CaptureFrameObservation sceneObservation_;
+  CaptureHealthRecovery healthRecovery_;
+  bool videoRecoveryRequested_ = false;
+  uint64_t lastRecoveryMs_ = 0;
   CaptureDiagnosticSchedule diagnosticSchedule_;
   uint64_t lastHookActionMs_ = 0;
   uint64_t lastWindowActionMs_ = 0;

@@ -3,7 +3,8 @@
 // Automatic admission is positive-only. A process must be an explicit user
 // mapping, belong to a launcher product classified as a game, expose a
 // recognized game engine, or combine gaming-input APIs with a sustained render
-// surface. Generic desktop behavior (a large/fullscreen foreground window,
+// surface. Minecraft Java qualifies with a recognized client invocation and
+// a large GPU render surface. Generic desktop behavior (a large/fullscreen foreground window,
 // recent launch, or D3D/OpenGL/Vulkan use) can never create game identity alone.
 //
 // Launcher metadata identifies installed products; it never proves that every

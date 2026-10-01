@@ -34,7 +34,7 @@ export function VideoSettingsPanel({ video, encoders, monitor, onChange }: {
     });
   };
 
-  return <div className="stack video-settings">
+  return <div data-shard-slot="settings-section-layout" className="settings-sections settings-sections--lead video-settings">
     <Card title="Recording quality" sub="Choose a starting point for your clips.">
       <div className="quality-options" role="group" aria-label="Recording quality">
         {QUALITY.map((quality) => <button key={quality.id} type="button"

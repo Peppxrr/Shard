@@ -151,10 +151,11 @@ interface CardProps {
   className?: string;
   flat?: boolean;
   hover?: boolean;
+  span?: "full";
 }
-export function Card({ title, sub, icon, actions, children, foot, className, flat, hover }: CardProps) {
+export function Card({ title, sub, icon, actions, children, foot, className, flat, hover, span }: CardProps) {
   return (
-    <section data-shard-component="card" className={["card", flat && "card--flat", hover && "card--hover", className].filter(Boolean).join(" ")}>
+    <section data-shard-component="card" data-shard-span={span} className={["card", flat && "card--flat", hover && "card--hover", className].filter(Boolean).join(" ")}>
       {title && (
         <header data-shard-slot="card-header" className="card__head">
           <div>

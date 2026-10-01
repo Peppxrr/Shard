@@ -3,13 +3,14 @@ import type { ExportEncoderInfo, MonitorInfo, Settings } from "../../shared/cont
 import { Button, Card, Confirm, Icon, ShardSelect } from "./ui";
 import { ChoiceCards, NumberControl, SettingRow, SwitchRow } from "./SettingControls";
 import { UpdatesSettings } from "./UpdatesSettings";
+import { MedalImport } from "./MedalImport";
 
 type Props = { settings: Settings; onChange: (settings: Settings) => void };
 
 export function CaptureSettingsPanel({ settings, onChange, monitors }: Props & { monitors: MonitorInfo[] }) {
   const capture = (next: Partial<Settings["capture"]>) => onChange({ ...settings, capture: { ...settings.capture, ...next } });
   const replay = (next: Partial<Settings["replay"]>) => onChange({ ...settings, replay: { ...settings.replay, ...next } });
-  return <div className="stack"><Card title="Capture source" sub="Choose what appears in your clips.">
+  return <div data-shard-slot="settings-section-layout" className="settings-sections settings-sections--lead"><Card title="Capture source" sub="Choose what appears in your clips.">
     <ChoiceCards label="Capture mode" value={settings.capture.mode} onChange={mode => capture({ mode })} options={[
       { value: "auto", label: "Auto", description: "Follow games, then return to desktop.", icon: "auto" },
       { value: "screen", label: "Desktop", description: "Always capture your chosen display.", icon: "monitor" },
@@ -28,7 +29,7 @@ export function CaptureSettingsPanel({ settings, onChange, monitors }: Props & {
 
 export function ExportSettingsPanel({ settings, onChange, encoders }: Props & { encoders: ExportEncoderInfo[] }) {
   const patch = (next: Partial<Settings["export"]>) => onChange({ ...settings, export: { ...settings.export, ...next } });
-  return <div className="stack"><Card title="Sharing defaults" sub="Starting values for your next export. Adjust them in the editor anytime.">
+  return <div data-shard-slot="settings-section-layout" className="settings-sections"><Card title="Sharing defaults" sub="Starting values for your next export. Adjust them in the editor anytime.">
     <SettingRow title="File size limit" description="Exports must fit within this limit."><NumberControl label="Export size limit" value={settings.export.targetMb} min={1} max={100} unit="MB" onChange={targetMb => patch({ targetMb })} /></SettingRow>
     <SettingRow title="Resolution" description="Original keeps the clip’s dimensions. Size fitting may reduce them."><ShardSelect value={settings.export.resolution} onChange={resolution => patch({ resolution })} options={[{ value: "source", label: "Original" }, ...(["1080p", "720p", "480p", "360p"] as const).map(value => ({ value, label: value }))]} /></SettingRow>
   </Card><Card title="Export encoding" sub="Choose the encoder used to create shared clips.">
@@ -46,14 +47,16 @@ export function StorageSettingsPanel({ settings, onChange, defaultFolder }: Prop
     try { setError(""); const next = await window.shard.pickClipsFolder(folder); if (next !== null) patch({ clipsDir: next }); }
     catch { setError("Could not open the folder picker. Please try again."); }
   };
-  return <div className="stack"><Card title="Clip location" sub="Choose where new clips, recordings, and exports are saved.">
+  return <div data-shard-slot="settings-section-layout" className="settings-sections"><Card title="Clip location" sub="Choose where new clips, recordings, and exports are saved.">
     <div className="folder-choice"><span className="folder-choice__icon"><Icon name="folder" size={22} /></span><div className="folder-choice__copy"><strong>{folder ? "Custom folder" : "Default folder"}</strong><span title={folder || defaultFolder}>{folder || defaultFolder || "App data folder"}</span></div><Button size="sm" onClick={() => void browse()}>Change folder</Button>{folder && <Button size="sm" variant="ghost" onClick={() => patch({ clipsDir: "" })}>Reset</Button>}</div>
     <p className="field__hint">Changing this folder keeps existing clips in your library.</p>{error && <p role="alert" className="form-error">{error}</p>}
   </Card><Card title="Automatic cleanup" sub="Manage storage without removing your favorites.">
     <SettingRow title="Storage limit" description="Oldest unprotected clips are deleted when this limit is reached."><NumberControl label="Storage limit" value={settings.storage.limitGb} min={1} max={1000} unit="GB" onChange={limitGb => patch({ limitGb })} /></SettingRow>
     <SwitchRow title="Include edited clips" description="Allow cleanup to remove unprotected editor exports too." checked={settings.storage.deleteEdited} onChange={deleteEdited => patch({ deleteEdited })} />
     <p className="settings-note"><Icon name="star" size={14} />Favorites are always kept and do not count toward this limit.</p>
-  </Card></div>;
+  </Card><section data-shard-slot="storage-import" data-shard-span="full" aria-label="Import"><Card title="Import" sub="Import from Medal into your Shard library.">
+    <MedalImport />
+  </Card></section></div>;
 }
 
 export function AppSettingsPanel({ settings, onChange, version }: Props & { version: string }) {
@@ -66,7 +69,7 @@ export function AppSettingsPanel({ settings, onChange, version }: Props & { vers
     try { await window.shard.setSettings(next); onChange(next); await window.shard.restartApp(); }
     catch { setError("Could not restart. Save your changes and restart the app manually."); }
   };
-  return <div className="stack"><Card title="Clip notifications" sub="Choose how the app lets you know a clip was saved.">
+  return <div data-shard-slot="settings-section-layout" className="settings-sections"><Card span="full" title="Clip notifications" sub="Choose how the app lets you know a clip was saved.">
     <ChoiceCards label="Clip notification style" value={settings.app.notificationStyle} onChange={notificationStyle => patch({ notificationStyle })} options={[
       { value: "overlay", label: "Overlay", description: "A brief popup in the corner.", icon: "overlay" },
       { value: "windows", label: "Windows", description: "A notification when the app is hidden.", icon: "bell" },
@@ -79,7 +82,7 @@ export function AppSettingsPanel({ settings, onChange, version }: Props & { vers
     <SwitchRow title="Hardware acceleration" description="Use GPU acceleration for the app. Changing this requires a restart." checked={settings.app.hardwareAcceleration ?? true} onChange={setPending} />
     <SwitchRow title="Developer console" description="Show detailed logs in a separate window." checked={settings.app.developerConsole} onChange={developerConsole => patch({ developerConsole })} />
     {error && <p className="form-error" role="alert">{error}</p>}
-  </Card><div id="settings-updates"><UpdatesSettings version={version} /></div><div className="settings-credits"><p>Icons by Feather (MIT) and Lucide (ISC). Licenses included with the app.</p></div>
+  </Card><div id="settings-updates"><UpdatesSettings version={version} /></div><div data-shard-span="full" className="settings-credits"><p>Icons by Feather (MIT) and Lucide (ISC). Licenses included with the app.</p></div>
     <Confirm open={pending !== null} title="Save and restart?" message="Your settings will be saved before the app restarts to apply hardware acceleration." confirmLabel="Save and restart" onConfirm={() => void restart()} onCancel={() => setPending(null)} />
   </div>;
 }
