@@ -149,5 +149,5 @@ export class ThemeStore {
     this.watcher.on("error", error => console.warn("[themes] Live reload unavailable; use Reload themes.", error));
   }
   refresh(): void { this.revision++; }
-  close(): void { clearTimeout(this.timer); this.watcher?.close(); }
+  close(): void { clearTimeout(this.timer); this.watcher?.close(); this.watcher = undefined; }
 }

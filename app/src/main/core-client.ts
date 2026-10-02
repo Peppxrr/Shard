@@ -1,7 +1,8 @@
 // core-client.ts — spawns shardcore.exe from resources/core-bin, parses the
 // PORT line, and speaks WebSocket JSON-RPC with reconnect+backoff. Core crash
 // -> restart up to 5 times, then surface a fatal error state.
-import { ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
+import { spawn, bounded, ownedProcesses } from "./bundled-processes";
 import { existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import path from "node:path";
@@ -27,6 +28,12 @@ export class CoreClient extends EventEmitter {
   private restarts = 0;
   private shuttingDown = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private shutdownPromise: Promise<void> | null = null;
+  private starting: Promise<void> | null = null;
+  private lastPort?: number;
+  helperExitUnconfirmed = false;
+  supervised = false;
+  get hasProcess(): boolean { return this.proc !== null; }
   ready = false;
 
   get coreBinDir(): string {
@@ -39,13 +46,28 @@ export class CoreClient extends EventEmitter {
     return existsSync(packaged) ? packaged : dev;
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (this.starting) return this.starting;
+    if (this.proc) {
+      if (!this.shuttingDown) return Promise.resolve();
+      // A timed-out shutdown must not leave the surviving core permanently
+      // disconnected, or spawn another core alongside it.
+      this.shuttingDown = false;
+      this.shutdownPromise = null;
+      if (this.lastPort) this.connect(this.lastPort);
+      return Promise.resolve();
+    }
     this.shuttingDown = false;
-    await seedGamesJson();
-    this.spawnCore();
+    this.shutdownPromise = null;
+    this.supervised = false;
+    this.starting = seedGamesJson().then(() => { if (!this.shuttingDown) this.spawnCore(); })
+      .finally(() => { this.starting = null; });
+    return this.starting;
   }
 
   private spawnCore(): void {
+    this.reconnectTimer = null;
+    if (this.shuttingDown || this.proc) return;
     const bin = this.coreBinDir;
     const exe = path.join(bin, "shardcore.exe");
     const configDir = path.join(app.getPath("userData"), "core");
@@ -53,14 +75,19 @@ export class CoreClient extends EventEmitter {
     const args = ["--config-dir", configDir, "--core-bin", bin, "--games", games, "--port", "0"];
     this.emit("log", "core", `Spawning ${exe} with registry ${games}`);
 
-    this.proc = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"] });
+    this.supervised = false;
+    this.lastPort = undefined;
+    this.proc = spawn(exe, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    if (process.platform === "win32") ownedProcesses.awaitOnly(this.proc);
+    const proc = this.proc;
     const stdout = new CoreLineDecoder(line => {
+      if (line === "SUPERVISOR READY") this.supervised = true;
       this.emitCoreOutput(line, "stdout");
       // Keep the first stdout PORT line visible while still consuming it as
       // the WebSocket handshake value.
       if (line.startsWith("PORT ")) {
         const port = Number(line.slice(5).trim());
-        if (port > 0) this.connect(port);
+        if (port > 0 && !this.shuttingDown) this.connect(port);
       }
     });
     const stderr = new CoreLineDecoder(line => {
@@ -86,6 +113,8 @@ export class CoreClient extends EventEmitter {
     // This also covers spawn failures, where Node emits `error` and `close`
     // without an `exit` event.
     this.proc.on("close", (code, signal) => {
+      if (process.platform === "win32" && code === 125) this.helperExitUnconfirmed = true;
+      if (this.proc === proc) this.proc = null;
       stdout.finish();
       stderr.finish();
       this.ws?.close();
@@ -110,9 +139,13 @@ export class CoreClient extends EventEmitter {
   }
 
   private connect(port: number): void {
+    if (this.shuttingDown) return;
+    this.lastPort = port;
+    this.ws?.close();
     const ws = new WebSocket(`ws://127.0.0.1:${port}`);
     this.ws = ws;
     ws.addEventListener("open", () => {
+      if (this.shuttingDown || this.ws !== ws) { ws.close(); return; }
       this.restarts = 0;
       this.ready = true;
       this.emit("ready");
@@ -120,6 +153,7 @@ export class CoreClient extends EventEmitter {
       this.applySettings(getSettings());
     });
     ws.addEventListener("message", (ev) => {
+      if (this.ws !== ws) return;
       let msg: { id?: number; method?: string; params?: unknown; error?: { code: number; message: string }; result?: unknown };
       try {
         msg = JSON.parse(String(ev.data));
@@ -140,9 +174,10 @@ export class CoreClient extends EventEmitter {
       }
     });
     ws.addEventListener("close", () => {
-      this.ready = false;
+      if (this.ws === ws) this.ready = false;
     });
     ws.addEventListener("error", () => {
+      if (this.ws !== ws) return;
       // Reconnect loop handled by the core-exit path; a WS error without a
       // core exit means the core is up but the socket failed — retry.
       if (!this.shuttingDown && !this.reconnectTimer) {
@@ -154,7 +189,7 @@ export class CoreClient extends EventEmitter {
     });
   }
 
-  invoke(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  invoke(method: string, params: Record<string, unknown> = {}, timeoutMs = 20000): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         this.emit("log", "rpc", `RPC rejected (core not connected): ${method}`);
@@ -166,7 +201,7 @@ export class CoreClient extends EventEmitter {
         this.pending.delete(id);
         this.emit("log", "rpc", `RPC timeout: ${method}`);
         reject(new Error(`RPC timeout: ${method}`));
-      }, 20000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
     });
@@ -194,32 +229,56 @@ export class CoreClient extends EventEmitter {
     };
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(rpcTimeout = 20000): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.shuttingDown = true;
-    try {
-      await this.invoke("shutdown");
-    } catch {
-      /* core already gone */
-    }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this.shutdownPromise = this.stopCore(rpcTimeout).catch(error => {
+      this.shutdownPromise = null; // A failed wait can be retried against the same handle.
+      throw error;
+    });
+    return this.shutdownPromise;
+  }
+
+  private async stopCore(rpcTimeout: number): Promise<void> {
+    await this.starting;
     const proc = this.proc;
-    if (proc && proc.exitCode === null && proc.signalCode === null) {
-      await new Promise<void>((res, reject) => {
-        let hardTimeout: ReturnType<typeof setTimeout> | undefined;
-        const done = () => { clearTimeout(t); clearTimeout(hardTimeout); res(); };
-        const t = setTimeout(() => {
-          try { proc.kill("SIGKILL"); }
-          catch (error) { proc.removeListener("exit", done); reject(error); return; }
-          hardTimeout = setTimeout(() => {
-            proc.removeListener("exit", done);
-            reject(new Error("Capture core did not exit; refusing to replace its runtime files"));
-          }, 3000);
-        }, 3000);
-        proc.once("exit", done);
-      });
+    // Attach before the RPC: the core may exit before replying to shutdown.
+    let onClose: (() => void) | undefined;
+    const closed = proc ? new Promise<void>(resolve => {
+      onClose = resolve;
+      proc.once("close", onClose);
+    }) : Promise.resolve();
+    try {
+      if (proc) {
+        if (this.ready) await this.invoke("shutdown", {}, rpcTimeout).catch(() => {});
+        try { await bounded("Capture core graceful shutdown", closed, 3000); }
+        catch {
+          // The Windows supervisor terminates its Job Object, then waits for
+          // ALL native descendants before exiting. Do not kill the supervisor.
+          if (process.platform === "win32" && this.supervised) {
+            if (!proc.stdin || proc.stdin.destroyed) throw new Error("Capture supervisor control pipe is unavailable");
+            proc.stdin.on("error", () => {});
+            proc.stdin.write("terminate\n");
+          } else proc.kill("SIGKILL");
+          await bounded("Capture core and bundled helper exit", closed, 8000);
+        }
+        if (process.platform === "win32" && proc.exitCode === 125) {
+          this.helperExitUnconfirmed = true;
+          throw new Error("Capture supervisor could not confirm bundled helper exit; refusing installation");
+        }
+      }
+    } finally {
+      if (proc && onClose) proc.removeListener("close", onClose);
+      this.ready = false;
+      this.ws?.close();
+      this.ws = null;
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("Capture core shut down"));
+      }
+      this.pending.clear();
     }
-    this.ws?.close();
   }
 }
-

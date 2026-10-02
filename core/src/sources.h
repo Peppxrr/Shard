@@ -4,6 +4,7 @@
 #include "config.h"
 #include "capture_resilience.h"
 #include "capture_geometry.h"
+#include "capture_display.h"
 
 #include <obs.h>
 
@@ -104,6 +105,7 @@ public:
   }
 
 private:
+  friend struct SourceManagerCaptureTestAccess;
   void watchdogLoop();
   static bool pidAlive(uint32_t pid);
   // Requires sourceMutex_ held.
@@ -124,6 +126,8 @@ private:
   void createGameCaptureLocked();
   void createWindowCaptureLocked();
   void refreshTargetWindowLocked();
+  void refreshCaptureDisplayLocked(uint64_t nowMs);
+  std::string colorDiagnosticsLocked() const;
   void recreateGameCaptureLocked();
   void recreateWindowCaptureLocked();
   void applyVideoSourceLocked();
@@ -190,6 +194,9 @@ private:
   std::string lastHookAction_ = "none";
   std::string lastWindowAction_ = "none";
   uintptr_t targetWindow_ = 0;
+  CaptureDisplayState captureDisplay_;
+  uintptr_t captureDisplayWindow_ = 0;
+  uint64_t lastDisplayQueryMs_ = 0;
   std::function<void(bool)> captureActivityCb_;
 
   std::vector<obs_source_t*> audioSources_;

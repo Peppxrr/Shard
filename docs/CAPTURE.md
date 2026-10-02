@@ -20,6 +20,30 @@ On Windows, startup enumerates DXGI adapters and selects a D3D11-capable hardwar
 
 Desktop capture uses OBS `monitor_capture` with WGC selected and resolves the configured monitor to the device identifier expected by the modern monitor source.
 
+Shard currently records Rec.709 SDR. Both WGC `window_capture` and modern
+`monitor_capture` intentionally set OBS 32.2.1's boolean `force_sdr=true`, on HDR
+and SDR displays alike. The staged `libobs-winrt` selects an SDR-compatible BGRA8
+frame pool at capture initialization instead of an HDR FP16 surface. Creation,
+retargeting, retries, recreation and full video-source rebuilds preserve this
+setting; Game Capture settings and the signed hook payload are unchanged. This
+does not add HDR recording or HDR metadata.
+
+Capture-health/recovery snapshots include `target_monitor`, `target_monitor_hdr`,
+`target_monitor_advanced_color`, `wgc_force_sdr`, and
+`output_color_space=Rec709/SDR`. Window subjects use `MonitorFromWindow` on the
+captured HWND, not the primary/configured desktop monitor. OBS's `get_hooked`
+procedure reports metadata from its acquired window; Shard resolves this uniquely
+within the target PID (ambiguous matches are unknown), falling back to Shard's
+resolved target only before acquisition. `target_monitor_hwnd` identifies the
+window used for diagnostics. Active
+DisplayConfig advanced-color state and HDR mode (where supported), or the matching
+DXGI output's PQ color space on older Windows, supply display state. API failures
+are reported as `unknown`. Monitor moves are observed each watchdog tick; color
+state refreshes at most every five seconds on the same display. Changes participate
+in the existing bounded health-log schedule. Forced SDR keeps the effective WGC
+format fixed, so HDR toggles and moves between HDR/SDR monitors do not trigger
+Shard source recreation, audio interruption, recording splits or replay resets.
+
 Game capture keeps two backends alive:
 
 - `game_capture`, using the official signed OBS graphics-hook/injection payload, is the preferred backend when healthy;

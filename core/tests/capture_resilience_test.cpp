@@ -2,6 +2,7 @@
 #include "replay_timing.h"
 #include "capture_geometry.h"
 #include "capture_adapter.h"
+#include "capture_display.h"
 
 #include <cassert>
 #include <cstdio>
@@ -210,6 +211,13 @@ int main()
   }
   assert(health.hookRejected()); // Losing comparison movement cannot restore a frozen hook.
   assert(!health.hookRetryJustified(wgcObservation, 35000)); // Nor repeatedly destroy it on a static menu.
+  assert(health.hookRetryJustified(wgcObservation, 38000)); // Stale WGC cannot suppress recovery.
+  shard::CaptureFrameObservation unusableWgc;
+  unusableWgc.observe(CaptureFrameContent::Black, 1, 35000);
+  assert(health.hookRetryJustified(unusableWgc, 35000)); // Sized black fallback is unhealthy.
+  unusableWgc.observe(CaptureFrameContent::Unknown, 1, 35000);
+  assert(health.hookRetryJustified(unusableWgc, 35000));
+  assert(health.hookRetryJustified({}, 35000)); // Never-mapped fallback is unknown.
   for (uint64_t t = 35500; t <= 37500; t += 500) {
     hookObservation.observe(CaptureFrameContent::Content, t, t);
     wgcObservation.observe(CaptureFrameContent::Content, t, t);
@@ -435,6 +443,24 @@ int main()
   assert(captureHookRetryDelayMs(20) == 15000);
   assert(captureHookRetryDelayMs(1000000) == 15000); // Never exhaust retries.
 
+  // A primary SDR desktop and a secondary HDR window display must remain
+  // independent. Moving the same HWND changes the resolved display.
+  uintptr_t windowDisplay = 2;
+  int desktopQueries = 0;
+  const auto fromWindow = [&](uintptr_t hwnd) { assert(hwnd == 42); return windowDisplay; };
+  const auto fromDesktop = [&](int index) { assert(index == 0); ++desktopQueries; return uintptr_t{1}; };
+  const auto selectedHdr = [&](bool window, uintptr_t hwnd) {
+    return shard::selectCaptureMonitor(window, hwnd, 0, fromWindow, fromDesktop) == 2;
+  };
+  assert(selectedHdr(true, 42));
+  assert(desktopQueries == 0);
+  windowDisplay = 1;
+  assert(!selectedHdr(true, 42));
+  assert(desktopQueries == 0);
+  assert(shard::selectCaptureMonitor(true, 0, 0, fromWindow, fromDesktop) == 0);
+  assert(desktopQueries == 0); // Missing HWND never defaults to primary.
+  assert(!selectedHdr(false, 42));
+  assert(desktopQueries == 1);
   std::puts("capture resilience tests passed");
   return 0;
 }

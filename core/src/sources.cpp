@@ -7,6 +7,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <dwmapi.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
 // Callback-mode display and suspend/resume notifications. No message window
 // is required, so recovery remains active in this headless core process.
 #include <powersetting.h>
@@ -62,6 +64,100 @@ std::string encodeWindowPart(const std::string& s)
       out += c;
   }
   return out;
+}
+
+// Both modern OBS 32.2.1 capture sources expose this boolean and pass it
+// to libobs-winrt, which selects BGRA8 before allocating the WGC frame pool.
+// Shard outputs Rec.709 SDR, including when Windows displays HDR content.
+void setWgcSdrSettings(obs_data_t* settings)
+{
+  obs_data_set_bool(settings, "force_sdr", true);
+}
+
+HMONITOR monitorHandle(int index)
+{
+  struct Context { int index; int current = 0; HMONITOR monitor = nullptr; } context{index};
+  EnumDisplayMonitors(nullptr, nullptr,
+      [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
+        auto& state = *reinterpret_cast<Context*>(param);
+        if (state.current++ != state.index) return TRUE;
+        state.monitor = monitor;
+        return FALSE;
+      }, reinterpret_cast<LPARAM>(&context));
+  return context.monitor;
+}
+
+CaptureDisplayState queryCaptureDisplay(HMONITOR monitor)
+{
+  CaptureDisplayState result;
+  result.monitor = reinterpret_cast<uintptr_t>(monitor);
+  MONITORINFOEXW info = {};
+  info.cbSize = sizeof(info);
+  if (!monitor || !GetMonitorInfoW(monitor, &info)) return result;
+  result.name = utf8FromWide(info.szDevice);
+
+  // Map the selected GDI display to an active DisplayConfig target. Query
+  // failures remain unknown, rather than silently claiming SDR. Topology can
+  // change between sizing and querying; retry that race a bounded three times.
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    UINT32 pathCount = 0, modeCount = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) break;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    const LONG status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(),
+                                           &modeCount, modes.data(), nullptr);
+    if (status == ERROR_INSUFFICIENT_BUFFER) continue;
+    if (status != ERROR_SUCCESS) break;
+    for (UINT32 i = 0; i < pathCount; ++i) {
+      const auto& path = paths[i];
+      DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
+      source.header = {DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof(source),
+                       path.sourceInfo.adapterId, path.sourceInfo.id};
+      if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
+          wcscmp(source.viewGdiDeviceName, info.szDevice) != 0) continue;
+      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO color = {};
+      color.header = {DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, sizeof(color),
+                      path.targetInfo.adapterId, path.targetInfo.id};
+      if (DisplayConfigGetDeviceInfo(&color.header) == ERROR_SUCCESS)
+        result.advancedColor = color.advancedColorEnabled != 0;
+#if NTDDI_VERSION >= NTDDI_WIN11_GA
+      // On newer Windows, ACM/WCG and HDR are distinct advanced-color modes.
+      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 color2 = {};
+      color2.header = {DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2, sizeof(color2),
+                       path.targetInfo.adapterId, path.targetInfo.id};
+      if (DisplayConfigGetDeviceInfo(&color2.header) == ERROR_SUCCESS) {
+        result.advancedColor = color2.advancedColorActive != 0;
+        result.hdr = color2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+      }
+#endif
+      break;
+    }
+    break;
+  }
+  // Older Windows lacks the separate HDR state API. Use the OS-reported
+  // active DXGI output color space, not luminance, bit depth or probe pixels.
+  if (!result.hdr.has_value()) {
+    using Microsoft::WRL::ComPtr;
+    ComPtr<IDXGIFactory1> factory;
+    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+      for (UINT i = 0; !result.hdr.has_value(); ++i) {
+        ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(i, &adapter) != S_OK) break;
+        for (UINT j = 0; ; ++j) {
+          ComPtr<IDXGIOutput> output;
+          if (adapter->EnumOutputs(j, &output) != S_OK) break;
+          DXGI_OUTPUT_DESC desc = {};
+          if (FAILED(output->GetDesc(&desc)) || desc.Monitor != monitor) continue;
+          ComPtr<IDXGIOutput6> output6;
+          DXGI_OUTPUT_DESC1 desc1 = {};
+          if (SUCCEEDED(output.As(&output6)) && SUCCEEDED(output6->GetDesc1(&desc1)))
+            result.hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+          break;
+        }
+      }
+    }
+  }
+  return result;
 }
 
 // The WGC monitor capture ("monitor_capture" → duplicator-monitor-capture)
@@ -140,6 +236,42 @@ HWND findSubjectWindow(const SourceManager::Subject& subject)
       reinterpret_cast<LPARAM>(&candidate));
 
   return candidate.window;
+}
+
+// OBS exposes metadata read from its actual wc->window through get_hooked,
+// but no numeric HWND. Resolve that metadata uniquely within the target PID.
+// Ambiguous/missing matches stay unknown rather than reporting another window's
+// monitor. Before OBS acquires a target, use Shard's resolved target HWND.
+std::optional<uintptr_t> acquiredWgcWindow(obs_source_t* source, uint32_t pid)
+{
+  if (!source) return std::nullopt;
+  calldata_t data = {};
+  const bool acquired = proc_handler_call(obs_source_get_proc_handler(source), "get_hooked", &data) &&
+                        calldata_bool(&data, "hooked");
+  if (!acquired) { calldata_free(&data); return std::nullopt; }
+  struct Context {
+    uint32_t pid;
+    std::string title;
+    std::string cls;
+    HWND window = nullptr;
+    int matches = 0;
+  } context{pid, calldata_string(&data, "title"), calldata_string(&data, "class")};
+  calldata_free(&data);
+  EnumWindows([](HWND window, LPARAM param) -> BOOL {
+    auto& state = *reinterpret_cast<Context*>(param);
+    DWORD windowPid = 0;
+    GetWindowThreadProcessId(window, &windowPid);
+    if (windowPid != state.pid || !IsWindowVisible(window)) return TRUE;
+    wchar_t title[512] = {}, cls[256] = {};
+    GetWindowTextW(window, title, static_cast<int>(std::size(title)));
+    GetClassNameW(window, cls, static_cast<int>(std::size(cls)));
+    if (utf8FromWide(title) == state.title && utf8FromWide(cls) == state.cls) {
+      state.window = window;
+      ++state.matches;
+    }
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&context));
+  return context.matches == 1 ? reinterpret_cast<uintptr_t>(context.window) : uintptr_t{0};
 }
 #endif
 
@@ -271,6 +403,7 @@ void SourceManager::applyVideoSourceLocked()
     obs_data_set_int(s, "monitor", config_.capture.monitor);
     obs_data_set_int(s, "method", 2); // METHOD_WGC
     obs_data_set_bool(s, "capture_cursor", true);
+    setWgcSdrSettings(s);
     monitorSource_ = obs_source_create("monitor_capture", "monitor-capture", s, nullptr);
     obs_data_release(s);
   }
@@ -329,6 +462,7 @@ void SourceManager::createWindowCaptureLocked()
 {
   obs_data_t* s = obs_data_create();
   obs_data_set_int(s, "method", 2);
+  setWgcSdrSettings(s);
   obs_data_set_int(s, "priority", 2);
   obs_data_set_bool(s, "cursor", true);
   // Keep WGC's complete surface alive. The scene item is cropped to the
@@ -418,12 +552,62 @@ void SourceManager::refreshTargetWindowLocked()
 #endif
 }
 
+void SourceManager::refreshCaptureDisplayLocked(uint64_t nowMs)
+{
+#ifdef _WIN32
+  if (subject_.kind == Subject::Kind::None) {
+    captureDisplay_ = {};
+    captureDisplayWindow_ = 0;
+    lastDisplayQueryMs_ = 0;
+    return;
+  }
+  captureDisplayWindow_ = subject_.kind == Subject::Kind::Window
+      ? acquiredWgcWindow(windowSource_, subject_.pid).value_or(targetWindow_) : 0;
+  const uintptr_t monitor = selectCaptureMonitor(subject_.kind == Subject::Kind::Window,
+      captureDisplayWindow_, config_.capture.monitor,
+      [](uintptr_t hwnd) {
+        const HWND window = reinterpret_cast<HWND>(hwnd);
+        return IsWindow(window) ? reinterpret_cast<uintptr_t>(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)) : 0;
+      },
+      [](int index) { return reinterpret_cast<uintptr_t>(monitorHandle(index)); });
+  if (monitor == captureDisplay_.monitor && lastDisplayQueryMs_ && nowMs - lastDisplayQueryMs_ < 5000) return;
+  captureDisplay_ = queryCaptureDisplay(reinterpret_cast<HMONITOR>(monitor));
+  lastDisplayQueryMs_ = nowMs;
+  // Always-forced SDR means moving displays or toggling HDR doesn't change
+  // WGC's BGRA8 format. OBS follows the window; do not reset any source/output.
+#endif
+}
+
+std::string SourceManager::colorDiagnosticsLocked() const
+{
+  const auto state = [](std::optional<bool> value) { return value ? (*value ? "true" : "false") : "unknown"; };
+  obs_source_t* source = subject_.kind == Subject::Kind::Monitor ? monitorSource_ :
+      subject_.kind == Subject::Kind::Window ? windowSource_ : nullptr;
+  obs_data_t* settings = source ? obs_source_get_settings(source) : nullptr;
+  const bool forceSdr = settings && obs_data_get_bool(settings, "force_sdr");
+  if (settings) obs_data_release(settings);
+  std::ostringstream line;
+  line << " target_monitor_hwnd=0x" << std::hex << captureDisplayWindow_ << std::dec
+       << " target_monitor=" << captureDisplay_.name
+       << " target_monitor_hdr=" << state(captureDisplay_.hdr)
+       << " target_monitor_advanced_color=" << state(captureDisplay_.advancedColor)
+       << " wgc_force_sdr=" << (forceSdr ? "true" : "false")
+       << " output_color_space=Rec709/SDR";
+  return line.str();
+}
+
 void SourceManager::applySubjectLocked()
 {
   const bool showMonitor = subject_.kind == Subject::Kind::Monitor;
   const bool showGame = subject_.kind == Subject::Kind::Window;
-  if (showGame)
+  if (showGame) {
     setWindowTargetLocked(subject_);
+#ifdef _WIN32
+    targetWindow_ = reinterpret_cast<uintptr_t>(findSubjectWindow(subject_));
+#endif
+  }
+  lastDisplayQueryMs_ = 0;
+  refreshCaptureDisplayLocked(duration_ms_now());
   if (monitorItem_) {
     obs_sceneitem_set_visible(monitorItem_, showMonitor);
     fillFrame(monitorItem_);
@@ -541,8 +725,13 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
   const std::string desc = encodeWindowPart(s.title) + ":" + encodeWindowPart(s.cls) + ":" + encodeWindowPart(s.exe);
   obs_data_t* d = obs_data_create();
   obs_data_set_string(d, "window", desc.c_str());
-  if (windowSource_)
-    obs_source_update(windowSource_, d);
+  if (windowSource_) {
+    obs_data_t* windowSettings = obs_data_create();
+    obs_data_apply(windowSettings, d);
+    setWgcSdrSettings(windowSettings);
+    obs_source_update(windowSource_, windowSettings);
+    obs_data_release(windowSettings);
+  }
   if (gameSource_)
     obs_source_update(gameSource_, d);
   obs_data_release(d);
@@ -742,6 +931,7 @@ void SourceManager::retryMonitorCaptureLocked()
   obs_data_set_int(settings, "monitor", config_.capture.monitor);
   obs_data_set_int(settings, "method", 2);
   obs_data_set_bool(settings, "capture_cursor", true);
+  setWgcSdrSettings(settings);
   obs_source_update(monitorSource_, settings);
   obs_data_release(settings);
 }
@@ -754,6 +944,7 @@ void SourceManager::retryWindowCaptureLocked()
                            encodeWindowPart(subject_.exe);
   obs_data_t* d = obs_data_create();
   obs_data_set_string(d, "window", desc.c_str());
+  setWgcSdrSettings(d);
   obs_source_update(windowSource_, d);
   obs_data_release(d);
   lastWindowAction_ = "retry";
@@ -888,6 +1079,7 @@ std::string SourceManager::probeDiagnosticsLocked(uint64_t nowMs) const
 
 void SourceManager::logRecoveryLocked(const char* reason, const char* action, int level, uint64_t nowMs)
 {
+  refreshCaptureDisplayLocked(nowMs);
   std::ostringstream line;
   const char* backend = subject_.kind == Subject::Kind::Monitor ? "monitor" :
       activeBackend_ == ActiveBackend::Hook ? "hook" : activeBackend_ == ActiveBackend::Wgc ? "wgc" : "none";
@@ -909,6 +1101,7 @@ void SourceManager::logRecoveryLocked(const char* reason, const char* action, in
          << ' ' << name << "_probe_age_ms=" << (frame.observedMs ? std::to_string(nowMs - frame.observedMs) : "never")
          << ' ' << name << "_unchanged_age_ms=" << (frame.hasPixels ? std::to_string(frame.unchangedAge(nowMs)) : "never");
   };
+  line << colorDiagnosticsLocked();
   observation("hook", hookObservation_, gameSource_);
   observation("wgc", windowObservation_, windowSource_);
   observation("scene", sceneObservation_, obs_scene_get_source(app_.scene()));
@@ -1071,6 +1264,7 @@ void SourceManager::watchdogLoop()
       }
 
       if (subject_.kind == Subject::Kind::Monitor) {
+        refreshCaptureDisplayLocked(tickMs);
         const auto now = std::chrono::steady_clock::now();
         const uint32_t monitorWidth = monitorSource_ ? obs_source_get_width(monitorSource_) : 0;
         const uint32_t monitorHeight = monitorSource_ ? obs_source_get_height(monitorSource_) : 0;
@@ -1104,6 +1298,7 @@ void SourceManager::watchdogLoop()
                   << '|' << captureFrameContentName(monitorObservation_.content) << '|'
                   << captureFrameContentName(sceneObservation_.content) << '|' << sceneObservation_.fresh(tickMs);
         const uint64_t diagnosticNowMs = duration_ms_now();
+        signature << colorDiagnosticsLocked();
         if (diagnosticSchedule_.shouldLog(signature.str(), diagnosticNowMs)) {
           std::ostringstream line;
           line << "[capture-health][" << (monitorHealthy ? "info" : "warn") << "] ts_ms=" << diagnosticNowMs
@@ -1113,13 +1308,14 @@ void SourceManager::watchdogLoop()
                << " backend_ready_active=" << (active ? "true" : "false")
                << " backend_healthy=" << (monitorHealthy ? "true" : "false")
                << " content_probe=64x36_interior source_dimensions_mean_frame_size_only=true"
-               << probeDiagnosticsLocked(diagnosticNowMs);
+               << colorDiagnosticsLocked() << probeDiagnosticsLocked(diagnosticNowMs);
           std::fprintf(stderr, "%s\n", line.str().c_str());
           std::fflush(stderr);
         }
         recoverCaptureLocked(!recoveryState.displaySleeping() && !recoverySchedule.pending(), true, tickMs);
       } else if (subject_.kind == Subject::Kind::Window && pidAlive(subject_.pid)) {
         refreshTargetWindowLocked();
+        refreshCaptureDisplayLocked(tickMs);
         const bool minimized = subjectWindowMinimized(subject_);
         if (windowSuppressedForMinimize_ != minimized) {
           windowSuppressedForMinimize_ = minimized;
@@ -1295,6 +1491,7 @@ void SourceManager::watchdogLoop()
                   << hookHealthy << '|' << windowHealthy << '|' << hookProbeStale << '|'
                   << captureFrameContentName(sceneObservation_.content) << '|' << sceneObservation_.fresh(tickMs);
         const uint64_t diagnosticNowMs = duration_ms_now();
+        signature << colorDiagnosticsLocked();
         if (diagnosticSchedule_.shouldLog(signature.str(), diagnosticNowMs)) {
           const auto ageText = [diagnosticNowMs](uint64_t thenMs) {
             return thenMs ? std::to_string(diagnosticNowMs - thenMs) + "ms" : std::string("never");
@@ -1332,7 +1529,7 @@ void SourceManager::watchdogLoop()
                << " hook_last_action=" << lastHookAction_ << " hook_last_action_age_ms="
                << ageText(lastHookActionMs_) << " wgc_retry_count=" << wgcRetryCount_
                << " wgc_last_action=" << lastWindowAction_ << " wgc_last_action_age_ms="
-               << ageText(lastWindowActionMs_) << probeDiagnosticsLocked(diagnosticNowMs);
+               << ageText(lastWindowActionMs_) << colorDiagnosticsLocked() << probeDiagnosticsLocked(diagnosticNowMs);
           std::fprintf(stderr, "%s\n", line.str().c_str());
           std::fflush(stderr);
         }
@@ -1346,15 +1543,17 @@ void SourceManager::watchdogLoop()
         recoverCaptureLocked(validWindow && !minimized && !recoveryState.displaySleeping() &&
                              !recoverySchedule.pending(), false, tickMs);
       } else {
+        refreshCaptureDisplayLocked(tickMs);
         std::ostringstream signature;
         signature << "mode=" << mode << "|subject=none|source=none|active=false";
         const uint64_t diagnosticNowMs = duration_ms_now();
+        signature << colorDiagnosticsLocked();
         if (diagnosticSchedule_.shouldLog(signature.str(), diagnosticNowMs)) {
           std::ostringstream line;
           const char* severity = mode == "game" ? "info" : "warn";
           line << "[capture-health][" << severity << "] ts_ms=" << diagnosticNowMs
                << " capture_mode=" << mode << " subject_kind=none selected_backend=none"
-               << " backend_ready_active=false frame_content_probe=unavailable";
+               << " backend_ready_active=false frame_content_probe=unavailable" << colorDiagnosticsLocked();
           std::fprintf(stderr, "%s\n", line.str().c_str());
           std::fflush(stderr);
         }

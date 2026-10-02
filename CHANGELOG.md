@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.9
+
+- Made WGC window and desktop capture request SDR-compatible surfaces on HDR displays, matching Shard's SDR recordings and avoiding the HDR capture path that can produce black video.
+- Added target-monitor HDR and capture color-space details to bounded capture diagnostics, following captured windows between displays without unnecessary capture resets.
+- Kept hook recovery available when the WGC fallback becomes black, stale, or unknown, while preserving healthy static fallback behavior.
+- Improved update shutdown by waiting for the capture core and bundled media helpers to exit before the installer replaces runtime files. Failed or unconfirmed shutdown blocks installation with clearer diagnostics.
+- Paused background work during update handoff and restored runtime services if installation preparation or installer launch fails, including capture, library, storage, hotkeys, and theme watching.
+
 ## 0.1.8
 
 - Improved capture recovery with independent pixel checks for game capture, window capture, and the final video output, plus conservative recovery for black, stale, and frozen frames.

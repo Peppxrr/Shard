@@ -47,10 +47,15 @@ source manager with synthetic black/colored capture surfaces (no injection):
 ```powershell
 cmake --build build_x64 --config Debug --target shard_capture_backend_fixture --parallel
 $env:PATH = "$PWD\app\resources\core-bin-dev;$env:PATH"
+build_x64\Debug\shard_capture_backend_fixture.exe "$PWD/app/resources/core-bin-dev" --check-wgc-properties
 build_x64\Debug\shard_capture_backend_fixture.exe "$PWD/app/resources/core-bin-dev"
 ```
 
-It checks loading-screen tolerance, visible WGC takeover, recreation of a
+The property check loads the staged OBS module and verifies `force_sdr` is a
+boolean on both modern WGC sources. The synthetic fixture checks SDR settings
+through creation, retargeting, retry, recreation and full source rebuilds, with
+no SDR setting added to the Game Capture payload. It also checks
+loading-screen tolerance, visible WGC takeover, recreation of a
 black hook, frozen-content hook takeover against animated WGC, recovery after
 hook movement returns, independent probes when WGC dimensions disappear,
 and downstream scene rebinding without healthy hook recreation. Pure native

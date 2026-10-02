@@ -12,6 +12,7 @@
 #include "jsonrpc.h"
 #include "server.h"
 #include "sources.h"
+#include "process-supervisor.h"
 
 #include <obs.h>
 #include <util/platform.h>
@@ -351,5 +352,9 @@ int main(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+  if (!shard::isSupervisedChild(argc, argv))
+    return shard::superviseProcessTree();
+#endif
   return shard::main(argc, argv);
 }

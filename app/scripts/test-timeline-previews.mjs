@@ -3,7 +3,14 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
-import { TimelinePreviews } from "../src/main/timeline-previews.ts";
+import { registerHooks } from "node:module";
+// Production emits CommonJS; this source test resolves its relative TS dependency.
+registerHooks({ resolve(specifier, context, next) {
+  if (specifier === "./bundled-processes") specifier += ".ts";
+  return next(specifier, context);
+} });
+const { TimelinePreviews } = await import("../src/main/timeline-previews.ts");
+const { ownedProcesses } = await import("../src/main/bundled-processes.ts");
 
 const stagedFfmpeg = path.resolve("resources/core-bin/ffmpeg.exe");
 const vendorFfmpeg = path.resolve("../vendor/ffmpeg/bin/ffmpeg.exe");
@@ -71,8 +78,21 @@ try {
   assert.equal((await fs.readdir(cache)).length, 0, "deletion waits for active writers; cancelled jobs cannot recreate the cache");
   const unavailable = new TimelinePreviews(path.join(root, "unavailable"), path.join(root, "missing-ffmpeg.exe"));
   await assert.rejects(unavailable.generate(fixture, 8, 8));
-  unavailable.dispose();
+  await unavailable.dispose();
+  await unavailable.dispose();
   await assert.rejects(unavailable.generate(fixture, 8, 8), /stopped/);
+  const shutdownStarted = Promise.withResolvers();
+  const pendingShutdown = service.generate(fixture, 8, 24, () => {
+    if (ownedProcesses.size) shutdownStarted.resolve();
+  });
+  const rejectedShutdown = assert.rejects(pendingShutdown, /stopped/);
+  await shutdownStarted.promise;
+  await service.dispose();
+  await rejectedShutdown;
+  assert.equal(ownedProcesses.size, 0, "dispose waits for all tracked decoders to close");
+  await service.dispose();
+  service.resume();
+  assert.equal((await service.generate(fixture, 8, 8)).filter(Boolean).length, 8, "failed install recovery can resume previews");
   console.log("PASS: progressive positions, distinct samples, cache reuse, cancellation/resume, shared jobs, validation, active deletion, unavailable decoder, shutdown");
 
   if (process.argv[2]) {

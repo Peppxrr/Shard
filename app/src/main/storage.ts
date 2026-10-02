@@ -8,6 +8,8 @@ import { getSettings } from "./settings";
 
 export class StorageWatchdog extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
+  private stopped = false;
+  private checks = new Set<Promise<number>>();
   private locked = new Set<string>();
 
   constructor(private library: Library) {
@@ -15,16 +17,28 @@ export class StorageWatchdog extends EventEmitter {
   }
 
   start(): void {
+    if (this.timer) return;
+    this.stopped = false;
     this.timer = setInterval(() => this.check().catch(() => {}), 5 * 60 * 1000);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    await Promise.allSettled([...this.checks]);
   }
 
   // Returns the number of clips deleted.
-  async check(): Promise<number> {
+  check(): Promise<number> {
+    if (this.stopped) return Promise.resolve(0);
+    const check = this.runCheck();
+    this.checks.add(check);
+    void check.then(() => this.checks.delete(check), () => this.checks.delete(check));
+    return check;
+  }
+
+  private async runCheck(): Promise<number> {
     this.locked.clear(); // retry everything locked last cycle
     const settings = getSettings().storage;
     const limitBytes = settings.limitGb * 1024 * 1024 * 1024;
@@ -34,7 +48,7 @@ export class StorageWatchdog extends EventEmitter {
     let deleted = 0;
     const target = limitBytes * 0.9;
 
-    while (used > target) {
+    while (!this.stopped && used > target) {
       const oldest = this.library.oldestUnprotected(settings.deleteEdited);
       if (!oldest) break;
       if (this.locked.has(oldest.path)) break; // tried this cycle, still locked

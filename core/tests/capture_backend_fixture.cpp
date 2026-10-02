@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 
 namespace {
 std::atomic<bool> hookContent{false};
@@ -16,6 +17,13 @@ std::atomic<bool> windowSized{true};
 std::atomic<int> hookCreates{0};
 std::atomic<int> outputColor{0};
 struct Source { bool hook; };
+bool realCaptureProperties = false;
+std::atomic<int> invalidCaptureSettings{0};
+void checkSettings(obs_data_t* settings, bool hook)
+{
+  if (hook ? obs_data_has_user_value(settings, "force_sdr") : !obs_data_get_bool(settings, "force_sdr"))
+    ++invalidCaptureSettings;
+}
 void pause(DWORD milliseconds)
 {
   const auto deadline = GetTickCount64() + milliseconds;
@@ -48,8 +56,11 @@ void registerSource(const char* id, bool hook)
   info.type = OBS_SOURCE_TYPE_INPUT;
   info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW;
   info.get_name = [](void*) { return "Capture recovery fixture"; };
-  info.create = hook ? +[](obs_data_t*, obs_source_t*) -> void* { ++hookCreates; return new Source{true}; }
-                     : +[](obs_data_t*, obs_source_t*) -> void* { return new Source{false}; };
+  info.create = hook ? +[](obs_data_t* s, obs_source_t*) -> void* {
+                         checkSettings(s, true); ++hookCreates; return new Source{true}; }
+                     : +[](obs_data_t* s, obs_source_t*) -> void* {
+                         checkSettings(s, false); return new Source{false}; };
+  info.update = [](void* p, obs_data_t* s) { checkSettings(s, static_cast<Source*>(p)->hook); };
   info.destroy = [](void* p) { delete static_cast<Source*>(p); };
   info.get_width = [](void* p) -> uint32_t {
     return static_cast<Source*>(p)->hook || windowSized.load() ? 640 : 0;
@@ -81,11 +92,57 @@ void require(bool value, const char* description)
 // Test-only App bootstrap: use real libobs/D3D11 and the production source
 // manager, but register controlled sources instead of loading capture modules.
 namespace shard {
+// Exercise the real SourceManager paths without waiting minutes for outage
+// escalation. The synthetic sources also inspect every create/update payload.
+struct SourceManagerCaptureTestAccess {
+  static void requireSdr(obs_source_t* source) {
+    require(source != nullptr, "WGC source exists");
+    auto* settings = obs_source_get_settings(source);
+    require(obs_data_get_bool(settings, "force_sdr"), "WGC requests an SDR surface");
+    obs_data_release(settings);
+  }
+  static void windowLifecycle(SourceManager& sources) {
+    std::lock_guard<std::mutex> lock(sources.sourceMutex_);
+    requireSdr(sources.windowSource_);
+    // A retry must reassert the product constraint even if stored state drifts.
+    auto* settings = obs_source_get_settings(sources.windowSource_);
+    obs_data_set_bool(settings, "force_sdr", false);
+    obs_data_release(settings);
+    sources.retryWindowCaptureLocked();
+    requireSdr(sources.windowSource_);
+    sources.recreateWindowCaptureLocked();
+    requireSdr(sources.windowSource_);
+  }
+  static void windowMonitor(SourceManager& sources, HWND window) {
+    std::lock_guard<std::mutex> lock(sources.sourceMutex_);
+    sources.refreshCaptureDisplayLocked(duration_ms_now());
+    require(sources.captureDisplay_.monitor == reinterpret_cast<uintptr_t>(
+                MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)),
+            "display diagnostics select the live target HWND monitor");
+    require(sources.colorDiagnosticsLocked().find("wgc_force_sdr=true output_color_space=Rec709/SDR") != std::string::npos,
+            "display diagnostics report actual SDR settings");
+  }
+  static void monitorRetry(SourceManager& sources) {
+    std::lock_guard<std::mutex> lock(sources.sourceMutex_);
+    requireSdr(sources.monitorSource_);
+    auto* settings = obs_source_get_settings(sources.monitorSource_);
+    obs_data_set_bool(settings, "force_sdr", false);
+    obs_data_release(settings);
+    sources.retryMonitorCaptureLocked();
+    requireSdr(sources.monitorSource_);
+  }
+};
+
 App::App(Config& config, Events& events) : config_(config), events_(events) {}
 App::~App() { shutdown(); }
 bool App::init()
 {
-  if (!obs_startup("en-US", nullptr, nullptr)) return false;
+  if (realCaptureProperties && !AddDllDirectory(std::filesystem::u8path(config_.coreBinDir).c_str())) return false;
+  const auto moduleConfig = std::filesystem::temp_directory_path() /
+      ("shard-wgc-properties-" + std::to_string(GetCurrentProcessId()));
+  const std::string moduleConfigString = moduleConfig.string();
+  if (realCaptureProperties) std::filesystem::create_directories(moduleConfig);
+  if (!obs_startup("en-US", realCaptureProperties ? moduleConfigString.c_str() : nullptr, nullptr)) return false;
   obs_add_data_path((config_.coreBinDir + "/data/libobs/").c_str());
   obs_video_info info = {};
   const std::string graphicsModule = config_.coreBinDir + "/libobs-d3d11.dll";
@@ -97,9 +154,16 @@ bool App::init()
   info.colorspace = VIDEO_CS_709;
   info.range = VIDEO_RANGE_FULL;
   if (obs_reset_video(&info) != OBS_VIDEO_SUCCESS) return false;
-  registerSource("game_capture", true);
-  registerSource("window_capture", false);
-  registerSource("monitor_capture", false);
+  if (realCaptureProperties) {
+    obs_add_module_path((config_.coreBinDir + "/obs-plugins/64bit").c_str(),
+                        (config_.coreBinDir + "/data/obs-plugins/%module%").c_str());
+    obs_load_all_modules();
+    obs_post_load_modules();
+  } else {
+    registerSource("game_capture", true);
+    registerSource("window_capture", false);
+    registerSource("monitor_capture", false);
+  }
   scene_ = obs_scene_create("fixture");
   obs_set_output_source(0, obs_scene_get_source(scene_));
   return true;
@@ -125,13 +189,34 @@ bool App::resetVideo(uint32_t width, uint32_t height)
 
 int main(int argc, char** argv)
 {
-  if (argc != 2) return 2;
+  if (argc != 2 && argc != 3) return 2;
+  realCaptureProperties = argc == 3 && std::string(argv[2]) == "--check-wgc-properties";
   shard::Config config;
   config.coreBinDir = argv[1];
   config.capture.mode = "game";
   shard::Events events;
   shard::App app(config, events);
   require(app.init(), "initialize D3D11 fixture");
+  if (realCaptureProperties) {
+    // Validate the installed/staged win-capture module, not only vendored code.
+    for (const char* id : {"window_capture", "monitor_capture"}) {
+      auto* properties = obs_get_source_properties(id);
+      auto* property = properties ? obs_properties_get(properties, "force_sdr") : nullptr;
+      require(property && obs_property_get_type(property) == OBS_PROPERTY_BOOL,
+              "staged WGC source exposes boolean force_sdr");
+      obs_properties_destroy(properties);
+    }
+    shard::SourceManager sources(app, config, events);
+    sources.applyVideoSource();
+    auto* window = obs_get_source_by_name("game-window");
+    auto* monitor = obs_get_source_by_name("monitor-capture");
+    shard::SourceManagerCaptureTestAccess::requireSdr(window);
+    shard::SourceManagerCaptureTestAccess::requireSdr(monitor);
+    obs_source_release(window);
+    obs_source_release(monitor);
+    std::puts("PASS: staged OBS WGC SDR properties");
+    return 0;
+  }
   // A real non-minimized target is needed to exercise the production recovery
   // eligibility gate; the controlled textures still avoid any hook injection.
   WNDCLASSW wc{};
@@ -147,6 +232,28 @@ int main(int argc, char** argv)
     sources.applyVideoSource();
     sources.setGameSubject("cs2.exe", "Synthetic CS2", "Shard capture fixture",
                            "ShardCaptureRecoveryFixture", GetCurrentProcessId());
+    shard::SourceManagerCaptureTestAccess::windowLifecycle(sources);
+    // Retargeting and a complete video-source rebuild both reassert SDR.
+    sources.setGameSubject("cs2.exe", "Synthetic CS2", "Retarget fixture",
+                           "ShardCaptureRecoveryFixture", GetCurrentProcessId());
+    shard::SourceManagerCaptureTestAccess::windowLifecycle(sources);
+    sources.applyVideoSource();
+    shard::SourceManagerCaptureTestAccess::windowLifecycle(sources);
+    config.capture.mode = "screen";
+    sources.applyVideoSource();
+    shard::SourceManagerCaptureTestAccess::monitorRetry(sources);
+    sources.applyVideoSource();
+    shard::SourceManagerCaptureTestAccess::monitorRetry(sources);
+  }
+  config.capture.mode = "game";
+  hookCreates = 0;
+  require(invalidCaptureSettings == 0, "all WGC lifecycle payloads force SDR and hook payloads are unchanged");
+  {
+    shard::SourceManager sources(app, config, events);
+    sources.applyVideoSource();
+    sources.setGameSubject("cs2.exe", "Synthetic CS2", "Shard capture fixture",
+                           "ShardCaptureRecoveryFixture", GetCurrentProcessId());
+    shard::SourceManagerCaptureTestAccess::windowMonitor(sources, target);
     sources.startWatchdog();
     obs_add_raw_video_callback(nullptr, frame, nullptr);
     pause(4500);
@@ -187,6 +294,7 @@ int main(int argc, char** argv)
     obs_remove_raw_video_callback(frame, nullptr);
     sources.stopWatchdog();
   }
+  require(invalidCaptureSettings == 0, "watchdog recovery preserves SDR WGC settings");
   DestroyWindow(target);
   std::puts("PASS: capture backend GPU integration");
 }

@@ -1,6 +1,7 @@
 // export.ts — non-destructive editor export with explicit stream mapping,
 // real FFmpeg progress, cancellation, size correction, and output verification.
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
+import { spawn } from "./bundled-processes";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";

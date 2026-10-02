@@ -439,7 +439,7 @@ export class Library extends EventEmitter {
   }
 
   close(): void {
-    this.db.close();
+    if (this.db.open) this.db.close();
   }
 }
 

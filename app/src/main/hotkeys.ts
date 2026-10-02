@@ -154,6 +154,8 @@ export class HotkeyManager {
   resume(): void {
     if (!this.suspended) return;
     this.suspended = false;
+    if (!this.retryTimer && this.current)
+      this.retryTimer = setInterval(() => { if (this.current) this.apply(this.current); }, 15000);
     if (this.useHook) {
       // Hook already running; no need to clear registered map
       if (this.current) this.apply(this.current);
@@ -166,6 +168,7 @@ export class HotkeyManager {
   apply(settings: Settings): HotkeyStatus[] {
     this.current = settings;
     if (this.suspended) return [...this.statuses.values()];
+    this.ensureHook();
 
     if (this.useHook) {
       // Non-exclusive observer: always "ok" (no registration exclusivity), just validate parse.
@@ -214,6 +217,7 @@ export class HotkeyManager {
   }
 
   private trigger(id: string, action: string, durationSec?: number): void {
+    if (this.suspended) return;
     if (action === "save_clip") {
       // A duration of 0 is the UI's "no value" state (the field resets to 0
       // when blurred empty) — fall back to the 60 s default instead of
@@ -224,6 +228,7 @@ export class HotkeyManager {
       });
     } else if (action === "toggle_record") {
       this.core.invoke("state.get").then((st) => {
+        if (this.suspended) return;
         const recording = (st as { recording?: { active?: boolean } }).recording?.active;
         if (recording) this.core.invoke("recording.stop").catch((e) => this.onError?.(`Recording stop failed: ${(e as Error).message}`));
         else this.core.invoke("recording.start").catch((e) => this.onError?.(`Recording start failed: ${(e as Error).message}`));
@@ -234,7 +239,7 @@ export class HotkeyManager {
   }
 
   dispose(): void {
-    this.suspended = false;
+    this.suspended = true;
     if (this.useHook && uIOhook && this.hookStarted) {
       try { uIOhook.stop(); } catch {}
       this.hookStarted = false;

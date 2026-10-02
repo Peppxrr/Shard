@@ -11,7 +11,7 @@ export class UpdateController {
   private backend: UpdateBackend | null;
   private publish: (state: UpdateState) => void;
   private prepareInstall: () => Promise<string | null>;
-  private installFailed: () => void;
+  private installFailed: () => void | Promise<void>;
   private openExternal: (url: string) => Promise<void>;
   private dismissedVersion?: string;
   private scheduledVersion?: string;
@@ -21,11 +21,13 @@ export class UpdateController {
   private beforeInstall: () => Promise<void>;
   private log: (message: string) => void;
   private backgroundCheck = false;
+  private recovery: Promise<void> = Promise.resolve();
+  private installFailureHandled = false;
 
   constructor(options: {
     currentVersion: string; mode: UpdateState["mode"]; disabledMessage?: string;
     backend: UpdateBackend | null; publish: (state: UpdateState) => void;
-    prepareInstall: () => Promise<string | null>; installFailed: () => void;
+    prepareInstall: () => Promise<string | null>; installFailed: () => void | Promise<void>;
     openExternal: (url: string) => Promise<void>;
     dismissedVersion?: string; scheduledVersion?: string;
     saveChoice?: (choice: { dismissedVersion?: string; scheduledVersion?: string }) => void;
@@ -80,7 +82,12 @@ export class UpdateController {
     this.log(String(error));
     const retry = this.state.status === "installing" ? "install" :
       this.state.status === "downloading" ? "download" : this.state.retry ?? "check";
-    if (retry === "install") this.installFailed();
+    if (retry === "install" && !this.installFailureHandled) {
+      this.installFailureHandled = true;
+      // Revoke updater-ready synchronously; await restoration before retries.
+      try { this.recovery = Promise.resolve(this.installFailed()).catch(error => { this.log("Update recovery failed: " + String(error)); }); }
+      catch (error) { this.log("Update recovery failed: " + String(error)); }
+    }
     const code = (error as { code?: string })?.code;
     const message = retry === "install" ? "Could not start the installer. Try again or download Shard from the release page." :
       retry === "download" ? "Could not download or verify the update. Check your connection and free disk space, then try again." :
@@ -129,19 +136,25 @@ export class UpdateController {
     if (!this.backend || this.busy || this.state.mode !== "installed" ||
       !(this.state.status === "downloaded" || (this.state.status === "error" && this.state.retry === "install"))) return this.getState();
     this.busy = true;
+    const recovery = this.recovery;
+    this.installFailureHandled = false;
     this.set({ status: "installing", message: undefined, retry: undefined });
     try {
+      await recovery;
+      if (this.installFailureHandled) return this.getState();
       const reason = await this.prepareInstall();
+      if (this.installFailureHandled) return this.getState();
       if (reason) this.set({ status: "downloaded", message: reason });
       else {
+        this.log("Invoking quitAndInstall(true, true) after installer preferences and logs are saved");
         await this.beforeInstall();
+        if (this.installFailureHandled) return this.getState();
         this.scheduledVersion = undefined;
         this.saveChoices();
-        this.log("Starting silent installation; Shard will restart when complete");
         this.backend.quitAndInstall(true, true);
       }
-    } catch (error) { this.fail(error); }
-    finally { this.busy = false; }
+    } catch (error) { this.log(`Update installation preparation/handoff failed: ${String(error)}`); this.fail(error); }
+    finally { await this.recovery; this.busy = false; }
     return this.getState();
   }
 

@@ -13,7 +13,7 @@ const CHECK_INTERVAL = 12 * 60 * 60 * 1000;
 export function registerUpdater(options: {
   window: () => BrowserWindow | null;
   prepareInstall: () => Promise<string | null>;
-  installFailed: () => void;
+  installFailed: () => void | Promise<void>;
   log: (line: DevConsoleLine) => void;
 }) {
   const portable = !!(process.env.PORTABLE_EXECUTABLE_FILE || process.env.PORTABLE_EXECUTABLE_DIR);
@@ -53,7 +53,7 @@ export function registerUpdater(options: {
       }
     },
     prepareInstall: options.prepareInstall,
-    installFailed: () => { delete process.env.SHARD_UPDATE_ON_LAUNCH; options.installFailed(); },
+    installFailed: () => { delete process.env.SHARD_UPDATE_ON_LAUNCH; return options.installFailed(); },
     openExternal: url => shell.openExternal(url),
   });
   if (supported) autoUpdater.logger = {
@@ -136,7 +136,7 @@ export function registerUpdater(options: {
         await controller.install();
         return controller.getState().status === "installing";
       } catch (error) { logger.error("Startup update failed; continuing normal startup", error); return false; }
-      finally { startupInstall = false; splash?.destroy(); splash = null; }
+      finally { startupInstall = false; if (splash && !splash.isDestroyed()) splash.destroy(); splash = null; }
     },
     startChecks(): void {
       if (!supported || interval) return;
@@ -144,7 +144,8 @@ export function registerUpdater(options: {
       interval = setInterval(() => void controller.check(true), CHECK_INTERVAL);
       interval.unref();
     },
-    async stop(): Promise<void> { clearInterval(interval); await logger.flush(); },
+    log: logger.info,
+    async stop(): Promise<void> { clearInterval(interval); interval = undefined; await logger.flush(); },
   };
 }
 

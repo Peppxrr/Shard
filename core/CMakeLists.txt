@@ -140,6 +140,8 @@ if(WIN32)
 endif()
 
 if(WIN32)
+  # Opt-in process-tree teardown fixture (no OBS or GPU dependency).
+  add_executable(shard_process_supervisor_fixture EXCLUDE_FROM_ALL tests/process_supervisor_fixture.cpp)
   # Animated target for the real Game Capture minimized/freshness smoke test.
   add_executable(shard_gc_d3d11_fixture WIN32 EXCLUDE_FROM_ALL tests/gc_d3d11_fixture.cpp)
   target_compile_definitions(shard_gc_d3d11_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

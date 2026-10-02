@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn } from "./bundled-processes";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -94,10 +94,14 @@ export class TimelinePreviews {
       fs.rm(path.join(this.root, name), { recursive: true, force: true }).catch(() => {})));
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.stopped = true;
-    for (const job of this.jobs.values()) this.fail(job, new Error("Preview service stopped"));
+    const jobs = [...this.jobs.values()];
+    for (const job of jobs) this.fail(job, new Error("Preview service stopped"));
+    await Promise.allSettled(jobs.map(job => job.promise));
   }
+
+  resume(): void { this.stopped = false; }
 
   private fileKey(file: string): string { return hash(path.resolve(file)); }
 

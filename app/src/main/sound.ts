@@ -6,7 +6,7 @@
 // (via win.webContents.send), falls back to PowerShell SoundPlayer (fast) with
 // MediaPlayer only when volume !=1. Fire-and-forget, never throws.
 import { app, BrowserWindow } from "electron";
-import { spawn } from "node:child_process";
+import { spawn } from "./bundled-processes";
 import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";

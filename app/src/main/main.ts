@@ -1,6 +1,6 @@
 // main.ts — Electron main process: core lifecycle, settings, hotkeys, library,
 // storage watchdog, exports, tray, IPC.
-import { app, protocol, BrowserWindow, dialog, ipcMain, screen, shell, Notification, Tray, Menu, nativeImage } from "electron";
+import { app, autoUpdater as electronAutoUpdater, protocol, BrowserWindow, dialog, ipcMain, screen, shell, Notification, Tray, Menu, nativeImage } from "electron";
 import type { NativeImage } from "electron";
 import { join as joinPath } from "node:path";
 import { execFile } from "node:child_process";
@@ -15,12 +15,14 @@ import { Library, clipsDir, editorDir } from "./library";
 import { medalImportMetadata, scanMp4Tree } from "./library-import";
 import { StorageWatchdog } from "./storage";
 import { ExportManager } from "./export";
-import { ffprobe, listExportEncoders, remuxToMp4, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews } from "./ffmpeg";
+import { ffprobe, listExportEncoders, remuxToMp4, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews, stopEditorPreviews, resumeEditorPreviews } from "./ffmpeg";
 import { SaveOverlay } from "./overlay";
 import { getDefaultSoundPath, playClipSound, previewClipSound, setSoundWindow } from "./sound";
 import { DevConsole } from "./dev-console";
 import { copyPlaybackReport } from "./playback-diagnostics";
 import { registerUpdater } from "./updater";
+import { ShutdownLifecycle } from "./shutdown-lifecycle";
+import { bounded, ownedProcesses } from "./bundled-processes";
 import type { AudioSourceConfig, AudioTrackInfo, ClipRecord, DevConsoleLine, EditorExportProject, ExportProgress, Settings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
 
 const execFileAsync = promisify(execFile);
@@ -110,7 +112,8 @@ let exporter: ExportManager;
 let tray: Tray | null = null;
 let quitting = false;
 let applicationStarted = false;
-let coreStoppedForUpdate = false;
+let servicesStoppedForUpdate = false;
+let libraryClosedForUpdate = false;
 let updater: ReturnType<typeof registerUpdater> | undefined;
 let coreFatal: string | null = null;
 const overlay = new SaveOverlay();
@@ -153,10 +156,12 @@ async function main(): Promise<void> {
   }
 
   await app.whenReady();
+  if (!shutdown.acceptingWork) return;
   app.setAppUserModelId("com.shard.app");
 
   migrateLegacyUserData();
   await loadSettings();
+  if (!shutdown.acceptingWork) return;
   themes = new ThemeStore(path.join(app.getPath("userData"), "Themes"), app.getVersion(), () => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send("themes:changed");
   });
@@ -169,39 +174,25 @@ async function main(): Promise<void> {
       } });
     } catch { return new Response("Theme resource unavailable", { status: 404 }); }
   });
-  await themes.startWatching().catch(error => console.warn("[themes] Watch failed", error));
+  await trackJob(themes.startWatching()).catch(error => console.warn("[themes] Watch failed", error));
+  if (!shutdown.acceptingWork) { themes.close(); return; }
 
   updater = registerUpdater({
     window: () => win,
-    prepareInstall: async () => {
-      if (exporter?.busy) return "Wait for your export to finish before restarting.";
-      // A crashed/disconnected capture core must not prevent updating Shard.
-      if (core?.ready) {
-        const state = await core.invoke("state.get") as { recording?: { active?: boolean } };
-        if (state.recording?.active) return "Stop your recording before restarting to update.";
-      }
-      // quitAndInstall can close windows before before-quit is emitted.
-      quitting = true;
-      await core?.shutdown();
-      coreStoppedForUpdate = !!core;
-      return null;
-    },
-    installFailed: () => {
-      quitting = false;
-      if (coreStoppedForUpdate) {
-        coreStoppedForUpdate = false;
-        void core.start().catch(error => console.error("[updates] Core restart failed", error));
-      }
-    },
+    prepareInstall: () => shutdown.prepareUpdate(),
+    installFailed: () => shutdown.recoverUpdate(),
     log: line => devConsole.feed(line),
   });
   if (await updater.beforeLaunch()) return;
+  if (!shutdown.acceptingWork) return;
 
   const userData = app.getPath("userData");
   await seedGamesJson();
+  if (!shutdown.acceptingWork) return;
 
   library = new Library(userData);
-  await library.reconcile(clipsDir());
+  await trackJob(library.reconcile(clipsDir()));
+  if (!shutdown.acceptingWork) return;
   storage = new StorageWatchdog(library);
   storage.start();
 
@@ -248,6 +239,7 @@ async function main(): Promise<void> {
 
   updater.startChecks();
   await core.start();
+  if (!shutdown.acceptingWork) return;
   hotkeys.apply(getSettings());
 }
 
@@ -325,10 +317,17 @@ function createWindow(): void {
 // ------------------------------------------------------------------ IPC ----
 
 function registerIpc(): void {
-  ipcMain.handle("settings:get", () => getSettings());
-  ipcMain.handle("settings:set", (_e, s: Settings) => applySettings(s));
-  ipcMain.handle("storage:defaultFolder", () => app.getPath("userData"));
-  ipcMain.handle("storage:pickFolder", async (_e, currentPath: string) => {
+  const handle: typeof ipcMain.handle = (channel, listener) => ipcMain.handle(channel, (event, ...args) => {
+    if (!shutdown.acceptingWork) throw new Error("Shard is shutting down; try again after update recovery");
+    return trackJob(Promise.resolve().then(() => {
+      if (!shutdown.acceptingWork) throw new Error("Shard is shutting down");
+      return listener(event, ...args);
+    }));
+  });
+  handle("settings:get", () => getSettings());
+  handle("settings:set", (_e, s: Settings) => applySettings(s));
+  handle("storage:defaultFolder", () => app.getPath("userData"));
+  handle("storage:pickFolder", async (_e, currentPath: string) => {
     const current = String(currentPath ?? "").trim();
     const options: Electron.OpenDialogOptions = {
       title: "Choose clips folder",
@@ -342,22 +341,22 @@ function registerIpc(): void {
     return result.filePaths[0];
   });
 
-  ipcMain.handle("core:invoke", async (_e, method: string, params?: Record<string, unknown>) => {
+  handle("core:invoke", async (_e, method: string, params?: Record<string, unknown>) => {
     return core.invoke(method, params ?? {});
   });
 
-  ipcMain.handle("library:list", () => library.list());
-  ipcMain.handle("library:delete", async (_e, id: string) => {
+  handle("library:list", () => library.list());
+  handle("library:delete", async (_e, id: string) => {
     await library.delete(id);
     void storage.check();
     win?.webContents.send("library:changed");
   });
-  ipcMain.handle("library:rename", async (_e, id: string, name: string) => {
+  handle("library:rename", async (_e, id: string, name: string) => {
     if (typeof id !== "string" || typeof name !== "string") throw new Error("Invalid clip name");
     try { return await library.renameClip(id, name); }
     finally { editorProbeCache.delete(id); win?.webContents.send("library:changed"); }
   });
-  ipcMain.handle("library:importMedalFolder", async (_e, kind: LibraryImportKind): Promise<LibraryImportResult> => {
+  handle("library:importMedalFolder", async (_e, kind: LibraryImportKind): Promise<LibraryImportResult> => {
     if (kind !== "clips" && kind !== "edited") throw new Error("Unknown import type");
     if (libraryImportActive) throw new Error("A library import is already running");
     libraryImportActive = true;
@@ -370,6 +369,7 @@ function registerIpc(): void {
       };
       const picked = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
       if (picked.canceled || !picked.filePaths[0]) return { ...result, cancelled: true };
+      if (!shutdown.acceptingWork) return { ...result, cancelled: true };
       const folder = picked.filePaths[0];
       win?.webContents.send("library:import-progress", { completed: 0, total: 0, currentName: path.basename(folder) });
       const scan = await scanMp4Tree(folder);
@@ -377,6 +377,7 @@ function registerIpc(): void {
       result.errors = scan.errors;
       const destination = kind === "clips" ? clipsDir() : editorDir();
       for (let i = 0; i < scan.files.length; i++) {
+        if (!shutdown.acceptingWork) return { ...result, cancelled: true };
         const file = scan.files[i];
         win?.webContents.send("library:import-progress", { completed: i, total: scan.files.length, currentName: path.basename(file) });
         try {
@@ -391,20 +392,20 @@ function registerIpc(): void {
       return result;
     } finally { libraryImportActive = false; void storage.check(); }
   });
-  ipcMain.handle("library:protect", (_e, id: string, prot: boolean) => {
+  handle("library:protect", (_e, id: string, prot: boolean) => {
     library.setProtected(id, prot);
     win?.webContents.send("library:changed");
     void storage.check();
   });
-  ipcMain.handle("editor:probe", (_e, clipId: string) => probeClipTracks(clipId));
-  ipcMain.handle("editor:waveform", async (_e, clipId: string, streamIndex: number, points: number) => {
+  handle("editor:probe", (_e, clipId: string) => probeClipTracks(clipId));
+  handle("editor:waveform", async (_e, clipId: string, streamIndex: number, points: number) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
     const tracks = await probeClipTracks(clipId);
     if (!tracks.some((track) => track.streamIndex === streamIndex)) throw new Error("The requested audio stream does not exist");
     return generateWaveform(clip.path, streamIndex, clip.durationMs / 1000, points);
   });
-  ipcMain.handle("editor:timeline-frames", async (event, clipId: string, count: number, requestId: string) => {
+  handle("editor:timeline-frames", async (event, clipId: string, count: number, requestId: string) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
     if (typeof requestId !== "string" || requestId.length > 128) throw new Error("Invalid preview request");
@@ -427,7 +428,7 @@ function registerIpc(): void {
   ipcMain.on("editor:timeline-cancel", (event, requestId: string) => {
     timelineRequests.get(`${event.sender.id}:${requestId}`)?.abort();
   });
-  ipcMain.handle("editor:audio-preview", async (_e, clipId: string, streamIndex: number) => {
+  handle("editor:audio-preview", async (_e, clipId: string, streamIndex: number) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
     const tracks = await probeClipTracks(clipId);
@@ -443,52 +444,52 @@ function registerIpc(): void {
     win.webContents.startDrag({ file: filePath, icon: icon.isEmpty() ? nativeImage.createEmpty() : icon });
   });
 
-  ipcMain.handle("export:start", (_e, clipId: string, project: EditorExportProject) => doExport(clipId, project));
-  ipcMain.handle("export:cancel", () => exporter.cancel());
-  ipcMain.handle("export:listEncoders", () => listExportEncoders());
-  ipcMain.handle("app:version", () => app.getVersion());
-  ipcMain.handle("playback:copy-report", (event, sampleJson: string) => copyPlaybackReport(event.sender, sampleJson));
-  ipcMain.handle("app:restart", () => {
+  handle("export:start", (_e, clipId: string, project: EditorExportProject) => doExport(clipId, project));
+  handle("export:cancel", () => exporter.cancel());
+  handle("export:listEncoders", () => listExportEncoders());
+  handle("app:version", () => app.getVersion());
+  handle("playback:copy-report", (event, sampleJson: string) => copyPlaybackReport(event.sender, sampleJson));
+  handle("app:restart", () => {
     quitting = true;
     app.relaunch();
     app.exit(0);
   });
-  ipcMain.handle("window:minimize", (event) => {
+  handle("window:minimize", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();
   });
-  ipcMain.handle("window:toggleMaximize", (event) => {
+  handle("window:toggleMaximize", (event) => {
     const target = BrowserWindow.fromWebContents(event.sender);
     if (!target) return false;
     if (target.isMaximized()) target.unmaximize();
     else target.maximize();
     return target.isMaximized();
   });
-  ipcMain.handle("window:close", (event) => {
+  handle("window:close", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close();
   });
-  ipcMain.handle("window:isMaximized", (event) => {
+  handle("window:isMaximized", (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
   });
   // Monitor enumeration that does not depend on the core: the capture
   // settings stay usable while shardcore is still spawning (or unreachable).
   // Primary-first order matches the core's EnumDisplayMonitors result in the
   // common case, so saved indexes line up once the core takes over.
-  ipcMain.handle("monitors:list", () => {
+  handle("monitors:list", () => {
     const primaryId = screen.getPrimaryDisplay().id;
     return [...screen.getAllDisplays()]
       .sort((a, b) => Number(b.id === primaryId) - Number(a.id === primaryId))
       .map((d, i) => ({ index: i, name: d.label || `Display ${i + 1}`, width: d.size.width, height: d.size.height, primary: d.id === primaryId }));
   });
-  ipcMain.handle("hotkeys:suspend", () => hotkeys.suspend());
-  ipcMain.handle("hotkeys:resume", () => hotkeys.resume());
-  ipcMain.handle("devconsole:toggle", () => devConsole.toggle());
-  ipcMain.handle("processes:list", async () => listProcesses());
+  handle("hotkeys:suspend", () => hotkeys.suspend());
+  handle("hotkeys:resume", () => hotkeys.resume());
+  handle("devconsole:toggle", () => devConsole.toggle());
+  handle("processes:list", async () => listProcesses());
 
 
 
 
   // Clip sound: custom file picker + preview + default path
-  ipcMain.handle("clipSound:pick", async () => {
+  handle("clipSound:pick", async () => {
     const res = await dialog.showOpenDialog(win ?? undefined as unknown as Electron.BrowserWindow, {
       title: "Choose clip sound",
       properties: ["openFile"],
@@ -500,22 +501,22 @@ function registerIpc(): void {
     if (res.canceled || !res.filePaths[0]) return null;
     return res.filePaths[0];
   });
-  ipcMain.handle("clipSound:preview", async (_e, p: string, v: number) => {
+  handle("clipSound:preview", async (_e, p: string, v: number) => {
     await previewClipSound(String(p ?? ""), Number(v));
   });
-  ipcMain.handle("clipSound:getDefaultPath", async () => getDefaultSoundPath());
+  handle("clipSound:getDefaultPath", async () => getDefaultSoundPath());
 
-  ipcMain.handle("themes:listCustom", () => themes.list());
-  ipcMain.handle("themes:readTheme", (_e, id: string) => themes.read(String(id)));
-  ipcMain.handle("themes:readCustomCss", () => themes.customCss());
-  ipcMain.handle("themes:setValues", async (event, id: string, values) => {
+  handle("themes:listCustom", () => themes.list());
+  handle("themes:readTheme", (_e, id: string) => themes.read(String(id)));
+  handle("themes:readCustomCss", () => themes.customCss());
+  handle("themes:setValues", async (event, id: string, values) => {
     const saved = await themes.saveValues(String(id), values);
     for (const window of BrowserWindow.getAllWindows()) if (window.webContents.id !== event.sender.id) window.webContents.send("themes:changed");
     return saved;
   });
-  ipcMain.handle("themes:refresh", () => themes.refresh());
-  ipcMain.handle("themes:getDir", () => themes.dir);
-  ipcMain.handle("themes:openFolder", async () => {
+  handle("themes:refresh", () => themes.refresh());
+  handle("themes:getDir", () => themes.dir);
+  handle("themes:openFolder", async () => {
     const err = await shell.openPath(themes.dir);
     if (err) throw new Error(err);
   });
@@ -579,6 +580,7 @@ function applyAppSettings(s: Settings): void {
 
 async function applySettings(s: Settings): Promise<void> {
   await saveSettings(s);
+  if (!shutdown.acceptingWork) return;
   const statuses = hotkeys.apply(s);
   for (const st of statuses) {
     if (!st.ok) toast(`Hotkey ${st.accelerator} failed to register: ${st.error ?? "key in use"}`);
@@ -587,20 +589,21 @@ async function applySettings(s: Settings): Promise<void> {
   // Developer console follows the setting: open when enabled, close when off.
   if (s.app.developerConsole && !devConsole.open) devConsole.toggle();
   if (!s.app.developerConsole && devConsole.open) devConsole.close();
-  core.applySettings(s);
+  await core.applySettings(s);
   void storage.check();
 }
 
 // --------------------------------------------------------------- events ----
 
 function onCoreEvent(type: string, params: Record<string, unknown>): void {
+  if (servicesStoppedForUpdate) return;
   win?.webContents.send("core:event", type, params);
   devConsole.feed({ t: Date.now(), level: "event", text: `${type} ${JSON.stringify(params)}` });
 
   switch (type) {
     case "clip.saved": {
       const p = params as { path: string; requestedSec: number; actualSec: number };
-      void importClip(p.path);
+      void trackJob(importClip(p.path));
       const label = savedLabel(p.requestedSec);
       const style = getSettings().app.notificationStyle;
       if (style === "overlay") {
@@ -619,7 +622,7 @@ function onCoreEvent(type: string, params: Record<string, unknown>): void {
     }
     case "recording.state": {
       const p = params as { active: boolean; path: string };
-      if (!p.active && p.path) void finalizeRecording(p.path);
+      if (!p.active && p.path) void trackJob(finalizeRecording(p.path));
       const style = getSettings().app.notificationStyle;
       if (style === "overlay") overlay.showRecording(p.active);
       else if (style === "windows" && (!win || win.isMinimized() || !win.isFocused()))
@@ -725,7 +728,9 @@ function setupTray(): void {
 }
 
 async function toggleRecording(): Promise<void> {
+  if (!shutdown.acceptingWork) return;
   const st = (await core.invoke("state.get")) as { recording?: { active?: boolean } };
+  if (!shutdown.acceptingWork) return;
   if (st.recording?.active) await core.invoke("recording.stop");
   else await core.invoke("recording.start");
 }
@@ -734,31 +739,114 @@ async function quit(): Promise<void> {
   app.quit();
 }
 
-let shutdownStarted = false;
-let shutdownComplete = false;
-app.on("before-quit", (event) => {
-  quitting = true;
-  if (shutdownComplete) return;
-  event.preventDefault();
-  if (shutdownStarted) return;
-  shutdownStarted = true;
-  void (async () => {
+const jobs = new Set<Promise<unknown>>();
+function trackJob<T>(job: Promise<T>): Promise<T> {
+  jobs.add(job);
+  void job.then(() => jobs.delete(job), () => jobs.delete(job));
+  return job;
+}
+function updateLog(message: string): void {
+  updater?.log(message);
+}
+const shutdown = new ShutdownLifecycle({
+  guard: async () => {
+    // Gate IPC immediately, and suspend hotkeys so a state.get continuation
+    // cannot start a recording while the guard is awaiting its own state.get.
+    hotkeys?.suspend();
+    let reason: string | null = null;
     try {
-      await updater?.stop();
-      themes?.close();
-      hotkeys?.dispose();
-      storage?.stop();
-      exporter?.cancel();
-      editorTimelinePreviews().dispose();
-      overlay.destroy();
-      devConsole.close();
-      await core?.shutdown();
-      library?.close();
-    } finally {
-      shutdownComplete = true;
-      app.quit();
+      if (exporter?.busy) reason = "Wait for your export to finish before restarting.";
+      else if (core?.ready) {
+        const state = await core.invoke("state.get", {}, 3000) as { recording?: { active?: boolean } };
+        if (state.recording?.active) reason = "Stop your recording before restarting to update.";
+      }
+      if (!reason && core?.helperExitUnconfirmed)
+        throw new Error("A previous capture helper shutdown was not confirmed; restart Shard before installing");
+      if (!reason && core?.hasProcess && process.platform === "win32" && !core.supervised)
+        throw new Error("Capture supervisor is unavailable; cannot confirm bundled helper exit before installation");
+      if (!reason && core?.hasProcess && !core.ready)
+        throw new Error("Capture core is disconnected; cannot confirm recording state before installation");
+      return reason;
+    } catch (error) {
+      // If a connected core cannot answer, do not guess that recording is idle.
+      throw new Error(`Could not confirm recording state: ${String(error)}`);
+    } finally { if (reason) hotkeys?.resume(); }
+  },
+  cleanup: async update => {
+    quitting = true;
+    if (update) servicesStoppedForUpdate = true;
+    updateLog((update ? "Update" : "Normal") + " shutdown: stopping watchers and hotkeys");
+    themes?.close();
+    hotkeys?.dispose();
+    const storageStopped = storage?.stop();
+    exporter?.cancel();
+    for (const controller of timelineRequests.values()) controller.abort();
+    // Normal quit must still let the core finalize a recording/clip first.
+    // Update quit blocks all subsequent spawns before stopping the core.
+    if (update) ownedProcesses.pause();
+    updateLog("Shutdown: waiting for capture core and its native helpers");
+    const errors: unknown[] = [];
+    await core?.shutdown(update ? 3000 : 20000).catch(error => errors.push(error));
+    if (!update) await bounded("Final recording/import jobs", Promise.allSettled([...jobs]), 15000).catch(error => errors.push(error));
+    ownedProcesses.pause();
+    updateLog("Shutdown: cancelling bundled media children");
+    const previewsStopped = stopEditorPreviews();
+    const childrenStopped = ownedProcesses.stop();
+    const settled = await Promise.allSettled([childrenStopped, bounded("Timeline preview shutdown", previewsStopped),
+      bounded("Storage watchdog shutdown", Promise.resolve(storageStopped))]);
+    for (const result of settled) if (result.status === "rejected") errors.push(result.reason);
+    updateLog("Shutdown: draining active application jobs");
+    await bounded("Application background jobs", Promise.allSettled([...jobs]));
+    // No IPC or core event can create new jobs now; all DB users have settled.
+    library?.close();
+    if (update) libraryClosedForUpdate = !!library;
+    editorProbeCache.clear();
+    timelineRequests.clear();
+    setSoundWindow(null);
+    overlay.destroy();
+    devConsole.close();
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window !== win && !window.isDestroyed()) window.destroy();
     }
-  })().catch(error => console.error("[shutdown]", error));
+    updateLog("Shutdown: database and auxiliary windows closed");
+    await bounded("Updater log flush", Promise.resolve(updater?.stop()));
+    if (errors.length) throw new AggregateError(errors, "Shutdown could not confirm all subsystem exits");
+  },
+  recover: async () => {
+    // Resume even after partial cleanup (e.g. failed recording-state query).
+    ownedProcesses.resume();
+    resumeEditorPreviews();
+    quitting = false;
+    if (servicesStoppedForUpdate) {
+      if (libraryClosedForUpdate) {
+        library = new Library(app.getPath("userData"));
+        storage = new StorageWatchdog(library);
+        storage.on("deleted", ({ count, limitGb }) => toast("Deleted " + count + " old clips to stay under your " + limitGb + " GB limit"));
+        libraryClosedForUpdate = false;
+      }
+      await themes?.startWatching().catch(error => updateLog(`Theme watcher recovery failed: ${String(error)}`));
+      if (applicationStarted) {
+        storage?.start();
+        setSoundWindow(win);
+        if (!win || win.isDestroyed()) createWindow();
+        if (getSettings().app.developerConsole && !devConsole.open) devConsole.toggle();
+        await core?.start().catch(error => updateLog(`Capture core recovery failed: ${String(error)}`));
+      }
+      servicesStoppedForUpdate = false;
+    }
+    hotkeys?.resume();
+    if (applicationStarted) hotkeys?.apply(getSettings());
+    updater?.startChecks();
+  },
+  quit: () => app.quit(),
+  log: updateLog,
+});
+ownedProcesses.setLogger(updateLog);
+electronAutoUpdater.on("before-quit-for-update", () => shutdown.beforeUpdaterQuit());
+app.on("before-quit", event => {
+  quitting = true;
+  shutdown.beforeQuit(event);
+  if (shutdown.acceptingWork) quitting = false;
 });
 app.on("window-all-closed", () => {
   // With close-to-tray the window is only hidden, so this only fires when the

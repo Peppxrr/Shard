@@ -1,6 +1,6 @@
 // ffmpeg.ts — spawns the bundled ffmpeg/ffprobe; serves remux, thumbnails,
 // probing, and the export pipeline.
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "./bundled-processes";
 import path from "node:path";
 import { TimelinePreviews } from "./timeline-previews";
 import { app } from "electron";
@@ -165,7 +165,6 @@ export async function ffprobeAsync(file: string): Promise<ProbeResult> {
 
 function runAsync(exe: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const { spawn } = require("node:child_process") as typeof import("node:child_process");
     const child = spawn(exe, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -185,7 +184,6 @@ export async function makeThumbnailAsync(src: string, dir: string): Promise<stri
   const out = path.join(dir, `${base}.jpg`);
   const exe = path.join(ffmpegBin(), "ffmpeg.exe");
   return new Promise((resolve) => {
-    const { spawn } = require("node:child_process") as typeof import("node:child_process");
     const child = spawn(exe, ["-y", "-ss", "1", "-i", src, "-vframes", "1", "-vf", "scale=320:-2", "-q:v", "4", out], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
     child.on("error", () => resolve(null));
     child.on("close", (code) => {
@@ -196,7 +194,6 @@ export async function makeThumbnailAsync(src: string, dir: string): Promise<stri
 }
 
 function runSync(exe: string, args: string[]): string {
-  const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
   const r = spawnSync(exe, args, { encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
   if (r.error) throw r.error;
   if (r.status !== 0) throw new Error(`${path.basename(exe)} failed: ${r.stderr || r.stdout}`);
@@ -456,3 +453,6 @@ function audioTrackName(tags: { title?: string; name?: string; handler_name?: st
 }
 
 export { spawnSync };
+
+export async function stopEditorPreviews(): Promise<void> { await timelinePreviews?.dispose(); }
+export function resumeEditorPreviews(): void { timelinePreviews?.resume(); exportEncoderProbe = null; }

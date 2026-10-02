@@ -254,8 +254,10 @@ public:
   {
     // Once a proven freeze has promoted WGC, a static menu must not cause
     // repeated hook destruction. Retain fallback until comparison movement
-    // returns or the hook itself demonstrates recovery.
-    return rejected_ && (!frozenRejected_ || wgc.changing(nowMs));
+    // returns or the hook itself demonstrates recovery. Suppression requires
+    // positively healthy fallback pixels; black/stale/unknown WGC cannot
+    // quarantine a failed hook merely because its surface has dimensions.
+    return rejected_ && (!frozenRejected_ || !wgc.healthy(nowMs) || wgc.changing(nowMs));
   }
   const char* rejectionReason() const noexcept
   {

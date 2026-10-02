@@ -8,6 +8,8 @@ import vm from "node:vm";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { ShutdownLifecycle } from "../src/main/shutdown-lifecycle.ts";
+import { OwnedProcesses } from "../src/main/bundled-processes.ts";
 import { UpdateController } from "../src/main/update-controller.ts";
 import { UpdateCache, UpdatePreferencesFile, sha512 as fileSha512, versionAtLeast } from "../src/main/update-storage.ts";
 
@@ -45,7 +47,7 @@ try {
   const ipc = new EventEmitter(), bridges = {}, invokes = [];
   ipc.invoke = async (...args) => { invokes.push(args); return {}; };
   const preload = require("typescript").transpileModule(readFileSync(new URL("../src/main/preload.ts", import.meta.url), "utf8"), {
-    compilerOptions: { module: require("typescript").ModuleKind.CommonJS },
+    compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS },
   }).outputText;
   vm.runInNewContext(preload, { exports: {}, process: { platform: "win32" }, require: name => {
     assert.equal(name, "electron");
@@ -177,6 +179,169 @@ try {
   await failedChoice.controller.check(); await failedChoice.controller.download();
   assert.throws(() => failedChoice.controller.schedule(), /disk full/);
   assert.ok(!failedChoice.controller.getState().installOnNextLaunch);
+  // The same lifecycle is wired to Electron's before-quit and install prep.
+  const normalDone = deferred(); let normalCleanups = 0, normalQuits = 0, prevented = 0;
+  const normalLife = new ShutdownLifecycle({ guard: async () => null,
+    cleanup: async update => { assert.equal(update, false); normalCleanups++; await normalDone.promise; },
+    recover: async () => {}, quit: () => normalQuits++, log() {} });
+  const quitEvent = { preventDefault() { prevented++; } };
+  normalLife.beforeQuit(quitEvent); normalLife.beforeQuit(quitEvent);
+  assert.equal(normalCleanups, 1); assert.equal(prevented, 2); assert.equal(normalQuits, 0);
+  normalDone.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(normalQuits, 1); normalLife.beforeQuit(quitEvent); assert.equal(prevented, 2);
+
+  const owned = new OwnedProcesses(), media = new EventEmitter();
+  media.exitCode = null; media.signalCode = null; media.pid = 123; let signalled = 0;
+  media.kill = () => { signalled++; return true; };
+  owned.track(media, "resources/core-bin/ffmpeg.exe");
+  let updateCleanups = 0, recovered = 0;
+  const updateLife = new ShutdownLifecycle({ guard: async () => null,
+    cleanup: async update => { assert.equal(update, true); updateCleanups++; await owned.stop(); },
+    recover: async () => { recovered++; owned.resume(); }, quit() {}, log() {} });
+  let ready = false;
+  const prepA = updateLife.prepareUpdate(); const prepB = updateLife.prepareUpdate();
+  prepA.then(() => { ready = true; });
+  assert.equal(prepA, prepB); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(signalled, 1); assert.equal(ready, false); assert.equal(updateLife.acceptingWork, false);
+  assert.throws(() => owned.assertRunning(), /shut down/);
+  media.exitCode = 0; media.emit("exit", 0);
+  assert.equal(ready, false, "An exit request/event alone does not release inherited handles");
+  media.emit("close", 0); await prepA;
+  assert.equal(updateLife.updateReady, true); assert.equal(updateCleanups, 1); assert.equal(owned.size, 0);
+  await updateLife.prepareUpdate(); await owned.stop();
+  const handoffEvent = { preventDefault() { assert.fail("Updater quit must bypass normal asynchronous cleanup"); } };
+  updateLife.beforeUpdaterQuit(); updateLife.beforeQuit(handoffEvent); updateLife.beforeQuit(handoffEvent);
+  assert.equal(updateCleanups, 1);
+  await Promise.all([updateLife.recoverUpdate(), updateLife.recoverUpdate()]);
+  assert.equal(recovered, 1); assert.equal(updateLife.acceptingWork, true); owned.assertRunning();
+
+  // A timeout refuses handoff without losing the tracked handle; retry can
+  // complete once that exact process closes. Spawn failures close too.
+  const stubborn = new EventEmitter(); stubborn.pid = 456; stubborn.exitCode = null; stubborn.signalCode = null;
+  stubborn.kill = () => true; owned.track(stubborn, "resources/core-bin/ffprobe.exe");
+  await assert.rejects(owned.stop(10), /timed out/); assert.equal(owned.size, 1);
+  stubborn.emit("close", 1); await owned.stop(); assert.equal(owned.size, 0);
+  owned.resume();
+  const failedSpawn = new EventEmitter(); failedSpawn.exitCode = null; failedSpawn.signalCode = null;
+  failedSpawn.kill = () => assert.fail("Unstarted child cannot be killed");
+  owned.track(failedSpawn, "missing-ffmpeg.exe");
+  const failedSpawnStop = owned.stop(); failedSpawn.emit("close", -4058); await failedSpawnStop;
+
+  const protectedChild = new EventEmitter(); protectedChild.pid = 789;
+  protectedChild.exitCode = null; protectedChild.signalCode = null;
+  protectedChild.kill = () => assert.fail("Generic cancellation must never kill the core supervisor");
+  owned.resume(); owned.track(protectedChild, "resources/core-bin/shardcore.exe"); owned.awaitOnly(protectedChild);
+  let protectedStopped = false;
+  const protectedWait = owned.stop().then(() => { protectedStopped = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(protectedStopped, false);
+  protectedChild.emit("close", 0); await protectedWait;
+  assert.equal(owned.size, 0);
+  const guardLife = new ShutdownLifecycle({ guard: async () => "Stop recording first",
+    cleanup: async () => assert.fail("Busy recording must not be shut down"), recover: async () => {}, quit() {}, log() {} });
+  assert.match(await guardLife.prepareUpdate(), /recording/); assert.equal(guardLife.acceptingWork, true);
+  let partialRestored = 0;
+  const partialLife = new ShutdownLifecycle({ guard: async () => null,
+    cleanup: async () => { throw new Error("core timeout"); }, recover: async () => { partialRestored++; }, quit() {}, log() {} });
+  await assert.rejects(partialLife.prepareUpdate(), /core timeout/);
+  assert.equal(partialLife.updateReady, false); await partialLife.recoverUpdate();
+  assert.equal(partialRestored, 1); assert.equal(partialLife.acceptingWork, true);
+
+  // Recovery is awaited for both synchronous installer throws and emitted errors.
+  for (const emitted of [false, true]) {
+    const recoveryDone = deferred(); let restores = 0;
+    const recoverable = fixture("installed", new FakeUpdater(), {
+      prepareInstall: async () => updateLife.prepareUpdate(),
+      installFailed: async () => { restores++; const restored = updateLife.recoverUpdate(); await recoveryDone.promise; await restored; },
+    });
+    await recoverable.controller.check(); await recoverable.controller.download();
+    recoverable.backend.quitAndInstall = () => {
+      if (emitted) recoverable.backend.emit("error", new Error("spawn failed"));
+      else throw new Error("spawn failed");
+    };
+    let installSettled = false;
+    const attempt = recoverable.controller.install().then(() => { installSettled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(restores, 1); assert.equal(installSettled, false);
+    assert.equal(updateLife.updateReady, false, "Installer failure revokes quit bypass immediately");
+    recoveryDone.resolve(); await attempt;
+    assert.equal(updateLife.acceptingWork, true); assert.equal(recoverable.controller.getState().retry, "install");
+    let obsoleteQuitBlocked = false;
+    updateLife.beforeUpdaterQuit();
+    updateLife.beforeQuit({ preventDefault() { obsoleteQuitBlocked = true; } });
+    assert.equal(obsoleteQuitBlocked, true);
+    assert.equal(updateLife.acceptingWork, true, "Late updater quit after failure must leave restored services usable");
+    recoverable.backend.quitAndInstall = () => { assert.equal(updateLife.updateReady, true); };
+    await recoverable.controller.install(); assert.equal(recoverable.controller.getState().status, "installing");
+    await updateLife.recoverUpdate();
+  }
+  console.log("Shutdown tests passed: normal async quit, updater bypass, child-close barrier, repeated cleanup, bounded failure and recovery");
+
+  const interruptedPrep = deferred();
+  const interrupted = fixture("installed", new FakeUpdater(), { prepareInstall: () => interruptedPrep.promise });
+  await interrupted.controller.check(); await interrupted.controller.download();
+  const interruptedInstall = interrupted.controller.install();
+  interrupted.backend.emit("error", new Error("backend failed during preparation"));
+  interruptedPrep.resolve(null); await interruptedInstall;
+  assert.equal(interrupted.backend.installs, 0, "Failed preparation cannot continue into an installer handoff");
+  // Execute the actual main.ts cleanup/recovery callbacks with resource fakes.
+  // This checks integration ordering rather than another copy of the lifecycle.
+  const mainText = readFileSync(new URL("../src/main/main.ts", import.meta.url), "utf8");
+  const mainLifecycleText = mainText.slice(mainText.indexOf("const jobs = new Set"), mainText.indexOf('app.on("window-all-closed"'));
+  const appEvents = new EventEmitter(), nativeUpdaterEvents = new EventEmitter();
+  const rootExit = deferred(), foregroundDone = deferred(), resourceOwned = new OwnedProcesses();
+  const resourceCounts = { dbClosed: 0, dbOpened: 0, coreStarted: 0, storageStarted: 0, watchStarted: 0, auxClosed: 0, hotkeysResumed: 0 };
+  const applicationWindow = { isDestroyed: () => false };
+  const resourceChild = new EventEmitter();
+  resourceChild.pid = 777; resourceChild.exitCode = null; resourceChild.signalCode = null;
+  let resourceKilled = false; resourceChild.kill = () => { resourceKilled = true; return true; };
+  resourceOwned.track(resourceChild, "resources/core-bin/ffmpeg.exe");
+  class ResourceLibrary { constructor() { resourceCounts.dbOpened++; } close() { resourceCounts.dbClosed++; } }
+  class ResourceStorage extends EventEmitter { async stop() {} start() { resourceCounts.storageStarted++; } }
+  const resourceContext = { exports: {}, ShutdownLifecycle, bounded: (label, promise) => promise, ownedProcesses: resourceOwned,
+    jobs: undefined, win: applicationWindow, core: { ready: true, supervised: true, hasProcess: true,
+      invoke: async () => ({ recording: { active: false } }),
+      shutdown: async () => { await rootExit.promise; resourceContext.core.ready = false; resourceContext.core.hasProcess = false; },
+      start: async () => { resourceCounts.coreStarted++; resourceContext.core.ready = true; } },
+    hotkeys: { suspend() {}, dispose() {}, resume() { resourceCounts.hotkeysResumed++; }, apply() {} },
+    themes: { close() {}, startWatching: async () => { resourceCounts.watchStarted++; } },
+    exporter: { busy: false, cancel() {} }, library: new ResourceLibrary(), storage: new ResourceStorage(),
+    Library: ResourceLibrary, StorageWatchdog: ResourceStorage, quitting: false,
+    applicationStarted: true, servicesStoppedForUpdate: false, libraryClosedForUpdate: false,
+    timelineRequests: new Map(), editorProbeCache: new Map(), process: { platform: "win32" },
+    updater: { log() {}, stop: async () => {}, startChecks() {} },
+    stopEditorPreviews: async () => {}, resumeEditorPreviews() {}, setSoundWindow() {},
+    overlay: { destroy() {} }, devConsole: { open: false, close() {}, toggle() {} },
+    getSettings: () => ({ app: { developerConsole: false } }), toast() {}, createWindow() { assert.fail("Existing main window must survive preparation"); },
+    BrowserWindow: { getAllWindows: () => [applicationWindow, { isDestroyed: () => false, destroy() { resourceCounts.auxClosed++; } }] },
+    electronAutoUpdater: nativeUpdaterEvents, app: Object.assign(appEvents, { quit() {}, getPath: () => "test-data" }),
+  };
+  vm.runInNewContext(require("typescript").transpileModule(mainLifecycleText + "\nexports.shutdown = shutdown; exports.trackJob = trackJob;", {
+    compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS },
+  }).outputText, resourceContext);
+  resourceContext.exports.trackJob(foregroundDone.promise);
+  const integratedPrep = resourceContext.exports.shutdown.prepareUpdate();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resourceCounts.dbClosed, 0); assert.equal(resourceKilled, false);
+  rootExit.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resourceKilled, true); assert.equal(resourceCounts.dbClosed, 0);
+  resourceChild.exitCode = 0; resourceChild.emit("close", 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resourceCounts.dbClosed, 0, "Database must wait for foreground/background users after child exit");
+  foregroundDone.resolve(); await integratedPrep;
+  assert.equal(resourceCounts.dbClosed, 1); assert.equal(resourceCounts.auxClosed, 1);
+  await resourceContext.exports.shutdown.prepareUpdate(); assert.equal(resourceCounts.dbClosed, 1);
+  nativeUpdaterEvents.emit("before-quit-for-update");
+  appEvents.emit("before-quit", { preventDefault() { assert.fail("Integrated updater before-quit must be unblocked"); } });
+  await resourceContext.exports.shutdown.recoverUpdate();
+  assert.equal(resourceCounts.dbOpened, 2); assert.equal(resourceCounts.coreStarted, 1);
+  assert.equal(resourceCounts.storageStarted, 1); assert.equal(resourceCounts.watchStarted, 1);
+  assert.equal(resourceCounts.hotkeysResumed, 1); assert.equal(resourceContext.quitting, false);
+  let staleBlocked = false;
+  nativeUpdaterEvents.emit("before-quit-for-update");
+  appEvents.emit("before-quit", { preventDefault() { staleBlocked = true; } });
+  assert.equal(staleBlocked, true); assert.equal(resourceContext.quitting, false);
+  console.log("Main lifecycle integration passed: core/media/jobs drain, database ordering, quit handoff and service restoration");
+
   console.log("Updater state/lifecycle tests passed");
 
   const cacheDir = await mkdtemp(path.join(tmpdir(), "shard-cache-test-"));
@@ -220,7 +385,7 @@ try {
   const serviceDir = await mkdtemp(path.join(tmpdir(), "shard-startup-test-"));
   try {
     const source = require("typescript").transpileModule(readFileSync(new URL("../src/main/updater.ts", import.meta.url), "utf8"), {
-      compilerOptions: { module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
+      compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
     }).outputText;
     async function service(name, scheduledVersion, checkImpl) {
       const data = path.join(serviceDir, name), cache = path.join(data, "shard-updater");
@@ -306,19 +471,26 @@ try {
   })) {
     const exports = {};
     vm.runInNewContext(require("typescript").transpileModule(readFileSync(new URL(source, import.meta.url), "utf8"), {
-      compilerOptions: { module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
+      compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
     }).outputText, { exports, require, Buffer });
     coreDependencies[id] = exports;
   }
-  const coreExports = {}, coreTimers = [];
+  const coreExports = {}, coreTimers = [], processExports = {};
+  const fakeTimers = { setTimeout: fn => { const timer = { fn }; coreTimers.push(timer); return timer; }, clearTimeout: timer => { if (timer) timer.cleared = true; } };
+  vm.runInNewContext(require("typescript").transpileModule(readFileSync(new URL("../src/main/bundled-processes.ts", import.meta.url), "utf8"), {
+    compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS },
+  }).outputText, { exports: processExports, require, Promise, ...fakeTimers });
+  coreDependencies["./bundled-processes"] = processExports;
   vm.runInNewContext(require("typescript").transpileModule(readFileSync(new URL("../src/main/core-client.ts", import.meta.url), "utf8"), {
-    compilerOptions: { module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
+    compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS, esModuleInterop: true },
   }).outputText, { exports: coreExports, process, console,
     setTimeout: fn => { const timer = { fn }; coreTimers.push(timer); return timer; }, clearTimeout: timer => { if (timer) timer.cleared = true; },
     require: id => id === "electron" ? { app: {} } : id === "./settings" ? {} : coreDependencies[id] ?? require(id),
   });
   const client = new coreExports.CoreClient(), child = new EventEmitter();
   child.exitCode = null; child.signalCode = null; let killed = false, finished = false;
+  child.stdin = { destroyed: false, on() {}, write() { killed = true; } };
+  client.supervised = true; client.ready = true;
   child.kill = () => { killed = true; return true; };
   client.reconnectTimer = { cleared: false };
   client.proc = child; client.invoke = async () => {};
@@ -326,8 +498,11 @@ try {
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(finished, false);
   coreTimers[0].fn();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(killed, true); assert.equal(finished, false, "Signalling kill is not proof that core DLLs are released");
-  child.exitCode = 0; child.emit("exit", 0); await stopped;
+  child.exitCode = 0; child.emit("exit", 0);
+  assert.equal(finished, false, "Core exit is insufficient until inherited stdio closes after descendants exit");
+  child.emit("close", 0); await stopped;
   assert.equal(finished, true);
   assert.equal(client.reconnectTimer, null, "Installer failure can restart the core without a stale reconnect timer");
   assert.ok(coreTimers.every(timer => timer.cleared));
