@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, mkdir, writeFile, utimes } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, utimes, symlink, unlink, rmdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -278,6 +278,13 @@ const ffmpegDir = existsSync(path.join(stagedFfmpegDir, "ffmpeg.exe")) ? stagedF
 const ffmpeg = path.join(ffmpegDir, "ffmpeg.exe");
 const ffprobe = path.join(ffmpegDir, "ffprobe.exe");
 assert.ok(existsSync(ffmpeg) && existsSync(ffprobe), `FFmpeg test binaries not found in ${ffmpegDir}`);
+// ffmpeg.ts resolves <resourcesPath>/core-bin like the packaged app. A clean
+// release checkout has no staged core-bin yet, so expose the same binaries
+// the test selected through a temporary junction.
+const resourcesDir = await mkdtemp(path.join(os.tmpdir(), "shard-editor-resources-"));
+const resourcesCoreBin = path.join(resourcesDir, "core-bin");
+await symlink(ffmpegDir, resourcesCoreBin, "junction");
+process.resourcesPath = resourcesDir;
 const input = path.join(tempDir, "Source clip ü with spaces.mp4");
 const multiOutput = path.join(tempDir, "Edited multi Ω.mp4");
 const singleOutput = path.join(tempDir, "Edited single ü.mp4");
@@ -537,6 +544,9 @@ try {
 } finally {
   await rm(tempDir, { recursive: true, force: true });
   await rm(editorCacheDirectory, { recursive: true, force: true });
+  // Remove only the link, never the FFmpeg directory it points to.
+  await unlink(resourcesCoreBin);
+  await rmdir(resourcesDir);
 }
 
 function run(executable, args) {
