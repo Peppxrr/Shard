@@ -130,14 +130,15 @@ private:
   uint32_t observedForegroundPid_ = 0;
   int64_t foregroundSinceMs_ = 0;
 
-  // Active-game following: the game holding focus becomes primary after it
-  // keeps focus for the debounce window (capture follows the active game).
-  // 1.5s rejects transient 200ms flick, but 8s focus on B reliably captures B.
-  // This is the SINGLE authority for primary selection (updateCaptureSubject
-  // never mutates primary).
+  // Active-game following: a running game that keeps focus for the debounce
+  // window becomes primary (capture follows the active game). 5 s rejects
+  // brief alt-tabs between games; the swap itself keeps the replay buffer.
+  // The first detected game and the survivor of a closed primary take over
+  // immediately. This is the SINGLE authority for primary selection
+  // (updateCaptureSubject never mutates primary).
   std::string focusGameId_;
   int64_t focusSinceMs_ = 0;
-  const int64_t kFocusDebounceMs = 1500;
+  const int64_t kFocusDebounceMs = 5000;
 
   std::chrono::steady_clock::time_point lastDiscovery_{};
   mutable std::mutex productHintsMtx_;

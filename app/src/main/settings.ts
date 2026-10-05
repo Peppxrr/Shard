@@ -70,6 +70,11 @@ function normalizeSettings(next: Settings): Settings {
   // Backwards compat: hardwareAcceleration defaults to true when missing (older installs)
   if (typeof (next.app as unknown as Record<string, unknown>).hardwareAcceleration !== "boolean") (next.app as unknown as Record<string, unknown>).hardwareAcceleration = true;
   if ((next.export.resolution as string) === "auto") next.export.resolution = "source";
+  // Older versions used a zero limit to turn cleanup off.
+  if (!Number.isFinite(next.storage.limitGb) || next.storage.limitGb <= 0) {
+    next.storage.autoCleanup = false;
+    next.storage.limitGb = DEFAULT_SETTINGS.storage.limitGb;
+  }
   const exportSettings = next.export as unknown as Record<string, unknown>;
   if (exportSettings.codec === "h264")
     next.export.encoder = "libx264";
@@ -83,6 +88,14 @@ function normalizeSettings(next: Settings): Settings {
     if (hotkey.action !== "save_clip" || hotkey.durationUnit) return hotkey;
     const duration = hotkey.durationSec ?? 60;
     return { ...hotkey, durationUnit: duration >= 60 && duration % 60 === 0 ? "min" : "sec" };
+  });
+  // App audio rows saved before isolation existed keep recording the app in
+  // Desktop audio too; only rows created with the toggle (or changed by the
+  // user) remove it, so an upgrade never silently changes captured tracks.
+  next.audio.sources = next.audio.sources.map((source) => {
+    if (source.kind === "process") return { ...source, excludeFromDesktop: source.excludeFromDesktop === true };
+    const { excludeFromDesktop: _unused, ...device } = source;
+    return device;
   });
   return next;
 }

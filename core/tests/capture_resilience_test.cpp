@@ -44,6 +44,23 @@ int main()
                                        {1920, 1080}, {1920, 1080}, 30, 60, 1));
   assert(!shard::captureCanPreserveVideo({}, {1920, 1080},
                                        {1920, 1080}, {1920, 1080}, 60, 60, 1));
+  // A swap keeps the previous subject's canvas while the ring holds its
+  // history; the owner's own format changes and idle-ring adoption still fit.
+  shard::CaptureCanvasOwner canvas;
+  assert(!canvas.update("", false));                  // game-only idle startup
+  assert(canvas.update("game:A", true));              // first subject owns it
+  assert(canvas.update("game:A", true));              // in-game resolution change
+  assert(!canvas.update("game:B", true));             // focus swap A -> B
+  assert(!canvas.update("", true));                   // B closed, 15 s grace
+  assert(!canvas.update("game:B", true));             // B back within grace
+  assert(canvas.owner() == "game:A");
+  assert(!canvas.update("", false));                  // grace expired, ring idle
+  assert(canvas.update("game:B", true));              // next game owns fresh ring
+  assert(!canvas.update("monitor", true));            // auto mode: game -> desktop
+  assert(canvas.update("game:B", true));              // desktop -> same game
+  canvas.reset();                                     // full pipeline restart
+  assert(canvas.update("monitor", true));
+  assert(!canvas.update("game:A", true));             // auto mode: desktop -> game
   // WGC chrome/inset cleanup must not invent a 960x534 video format while
   // its validated client and hook both represent 16:9 content.
   const auto clientCrop = computeClientAreaCrop(962, 579, 0, 0, 1, 38, 960, 540);

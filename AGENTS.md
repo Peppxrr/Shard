@@ -82,4 +82,6 @@ Keep ordinary work local unless the user explicitly asks for git publication act
 
 Search narrowly before reading large files. Reuse findings instead of repeating repository-wide exploration. When a task is already localized, inspect the relevant code directly rather than producing a broad repository summary.
 
+Use a unique temporary directory for each test or UI preview and clean up its generated profiles, builds, and media after success, including ad hoc checks. Stop owned helper processes before cleanup. Retain only useful failure diagnostics or explicitly requested artifacts; keep original-file backups separate from disposable fixtures. Never broadly delete `tmp`: verify the exact owned path and preserve unrelated work.
+
 If an existing test or comment appears to encode behavior that conflicts with current source, investigate the disagreement instead of blindly preserving either side. Report the concrete files changed, the verification scope run, and any actual blocker.

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.10
+
+- Rebuilt the editor timeline around movable clips. Drag a clip to move it, drag its white edges to trim it, and leave gaps on purpose: empty time plays and exports as black video and silence.
+- Clip edges snap to other clips, the playhead, and the start of the timeline. Hold Shift while dragging to place freely.
+- Audio now stays collapsed into one waveform on the video track by default, giving the player more room. Separate audio tracks from the video track's right-click menu to trim, move, split, or delete audio on its own; collapsing again keeps those edits, and **Relink audio to video** makes audio follow the video again.
+- **S** splits every track at the playhead; **Shift+S** splits only the selected clip. Deleting a clip leaves its space empty until you move other clips into it.
+- Each audio track has its own color, waveforms are easier to tell apart, and only the selected clip is highlighted. Separated audio that plays where there is no video shows as an "Audio only" block.
+- Exports now show progress on the player itself, and a finished export opens a small dialog to open it in the Library, show it in its folder, or delete it.
+- Added per-application audio isolation: an App audio source can be kept off the Desktop audio track so it is recorded only on its own track.
+- Improved switching between running games: another game must keep focus for 5 seconds before capture follows it, replay history is kept across swaps, and returning to a game reuses its existing hook.
+- Reworked automatic storage cleanup. Favorites, recordings, very large videos, new arrivals from the last 24 hours, and the five newest clips are kept, and large one-off overages wait for confirmation through **Clean up now** instead of deleting automatically.
+- Waveforms and timeline previews load faster when reopening clips in the editor.
+
 ## 0.1.9
 
 - Made WGC window and desktop capture request SDR-compatible surfaces on HDR displays, matching Shard's SDR recordings and avoiding the HDR capture path that can produce black video.

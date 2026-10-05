@@ -14,6 +14,8 @@ import type {
   ExportProgress,
   ExportEncoderInfo,
   Settings,
+  StorageSettings,
+  StorageStatus,
   UpdateState,
   WaveformData,
 } from "../shared/contracts";
@@ -50,6 +52,13 @@ const api: ShardApi = {
   setSettings: (s: Settings) => ipcRenderer.invoke("settings:set", s) as Promise<void>,
   pickClipsFolder: (currentPath: string) => ipcRenderer.invoke("storage:pickFolder", currentPath) as Promise<string | null>,
   getDefaultClipsFolder: () => ipcRenderer.invoke("storage:defaultFolder") as Promise<string>,
+  getStorageStatus: (draft?: StorageSettings) => ipcRenderer.invoke("storage:status", draft) as Promise<StorageStatus>,
+  cleanUpStorage: (maxBytes: number) => ipcRenderer.invoke("storage:cleanUp", maxBytes) as Promise<number>,
+  onStorageStatus: (cb) => {
+    const listener = (_event: unknown, status: StorageStatus) => cb(status);
+    ipcRenderer.on("storage:status", listener);
+    return () => ipcRenderer.removeListener("storage:status", listener);
+  },
 
   listClips: () => ipcRenderer.invoke("library:list") as Promise<ClipRecord[]>,
   renameClip: (id: string, name: string) => ipcRenderer.invoke("library:rename", id, name) as Promise<ClipRecord>,
@@ -62,10 +71,11 @@ const api: ShardApi = {
   deleteClip: (id: string) => ipcRenderer.invoke("library:delete", id) as Promise<void>,
   setProtected: (id: string, prot: boolean) => ipcRenderer.invoke("library:protect", id, prot) as Promise<void>,
   probeTracks: (clipId: string) => ipcRenderer.invoke("editor:probe", clipId) as Promise<AudioTrackInfo[]>,
-  prepareAudioPreview: (clipId: string, streamIndex: number) =>
-    ipcRenderer.invoke("editor:audio-preview", clipId, streamIndex) as Promise<string>,
-  generateWaveform: (clipId: string, streamIndex: number, points: number) =>
-    ipcRenderer.invoke("editor:waveform", clipId, streamIndex, points) as Promise<WaveformData>,
+  prepareAudioPreview: (clipId: string, streamIndex: number, requestId?: string) =>
+    ipcRenderer.invoke("editor:audio-preview", clipId, streamIndex, requestId) as Promise<string>,
+  generateWaveform: (clipId: string, streamIndex: number, points: number, requestId?: string) =>
+    ipcRenderer.invoke("editor:waveform", clipId, streamIndex, points, requestId) as Promise<WaveformData>,
+  cancelEditorPreparation: (requestId: string) => ipcRenderer.send("editor:preparation-cancel", requestId),
   generateTimelineFrames: (clipId: string, count: number, requestId: string) =>
     ipcRenderer.invoke("editor:timeline-frames", clipId, count, requestId) as Promise<string[]>,
   onTimelineFrames: (cb) => {

@@ -47,6 +47,11 @@ export interface AudioSourceConfig {
   window?: string; // "::<exe>" descriptor for kind === "process"
   gain: number; // 0..2
   enabled: boolean;
+  // kind === "process" only. True: the app is captured on its own track and
+  // removed from every Desktop audio track (core: audio_isolation.h). Missing
+  // in settings written before this existed, which keeps the old duplicate
+  // capture; new App audio rows default to true.
+  excludeFromDesktop?: boolean;
 }
 
 export interface CaptureSettings {
@@ -92,11 +97,26 @@ export interface ExportSettings {
 }
 
 export interface StorageSettings {
+  // Remove the oldest ordinary clips when they exceed `limitGb`. Recordings,
+  // favorites, large videos, and (by default) edited exports are kept.
+  autoCleanup: boolean;
   limitGb: number;
-  // Base directory for clip storage. The app creates `clips/` and `editor/`
+  // Base directory for clip storage. The app creates `clips/`, `recordings/`, and `editor/`
   // inside it; empty = default (userData).
   clipsDir: string;
   deleteEdited: boolean;
+}
+
+// Electron library policy/status; not a core configuration or RPC setting.
+export interface StorageStatus {
+  totalBytes: number;
+  managedBytes: number;
+  keptBytes: number;
+  limitBytes: number;
+  // Oldest-first removals needed to get back under the target.
+  reclaimBytes: number;
+  reclaimCount: number;
+  reason: "disabled" | "within-target" | "cleaning" | "recent" | "minimum" | "needs-review" | "busy";
 }
 
 export interface AppSettings {
@@ -155,7 +175,7 @@ export const DEFAULT_SETTINGS: Settings = {
     verboseDetection: false,
   },
   audio: { sources: [] },
-  storage: { limitGb: 20, clipsDir: "", deleteEdited: false },
+  storage: { autoCleanup: true, limitGb: 20, clipsDir: "", deleteEdited: false },
   app: { notificationStyle: "overlay", startWithWindows: false, minimizeToTray: true, clipSound: true, clipSoundVolume: 0.8, clipSoundPath: "", developerConsole: false, hardwareAcceleration: true },
   export: { targetMb: 10, encoder: "auto", resolution: "source" },
   hotkeys: [
@@ -355,15 +375,26 @@ export interface WaveformData {
   peaks: number[];
 }
 
+/**
+ * One clip on the edited output timeline: source range [sourceStart,
+ * sourceEnd) placed at timelineStart. Clips on one track never overlap;
+ * timeline time not covered by a clip is black video / silent audio.
+ */
+export interface EditorTimelineClip {
+  timelineStart: number;
+  sourceStart: number;
+  sourceEnd: number;
+}
+
 export interface EditorExportProject {
-  segments: { start: number; end: number; id?: string }[];
+  videoClips: EditorTimelineClip[];
   audioTracks: {
     streamIndex: number;
     name: string;
     included: boolean;
     muted: boolean;
     volume: number;
-    excludedSegmentIds?: string[];
+    clips: EditorTimelineClip[];
   }[];
 }
 
@@ -436,6 +467,11 @@ export interface ShardApi {
   setSettings(s: Settings): Promise<void>;
   pickClipsFolder(currentPath: string): Promise<string | null>;
   getDefaultClipsFolder(): Promise<string>;
+  // `draft` previews unsaved cleanup settings against the current library.
+  getStorageStatus(draft?: StorageSettings): Promise<StorageStatus>;
+  // Confirms a paused cleanup. Refused if it would now remove more than `maxBytes`.
+  cleanUpStorage(maxBytes: number): Promise<number>;
+  onStorageStatus(cb: (status: StorageStatus) => void): () => void;
   // library
   listClips(): Promise<ClipRecord[]>;
   renameClip(id: string, name: string): Promise<ClipRecord>;
@@ -444,8 +480,9 @@ export interface ShardApi {
   deleteClip(id: string): Promise<void>;
   setProtected(id: string, prot: boolean): Promise<void>;
   probeTracks(clipId: string): Promise<AudioTrackInfo[]>;
-  prepareAudioPreview(clipId: string, streamIndex: number): Promise<string>;
-  generateWaveform(clipId: string, streamIndex: number, points: number): Promise<WaveformData>;
+  prepareAudioPreview(clipId: string, streamIndex: number, requestId?: string): Promise<string>;
+  generateWaveform(clipId: string, streamIndex: number, points: number, requestId?: string): Promise<WaveformData>;
+  cancelEditorPreparation(requestId: string): void;
   generateTimelineFrames(clipId: string, count: number, requestId: string): Promise<string[]>;
   onTimelineFrames(cb: (progress: { requestId: string; frames: string[] }) => void): () => void;
   cancelTimelineFrames(requestId: string): void;

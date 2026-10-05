@@ -49,9 +49,11 @@ Use `[data-shard-component="<value>"]` with these values:
 | `clip-rename` | `data-shard-state="idle|editing|saving"`; inline file rename form shared by viewer and editor |
 | `medal-import` | `data-shard-state="idle|importing|complete"`; folder selection and import results |
 | `developer-console` | `data-shard-state="loading|ready|error"`, `data-stream-state="live|paused"`, `data-action-state="idle|clearing|copying|exporting"`; diagnostic log viewer |
-| `timeline` | Editor timeline |
-| `timeline-segment` | `data-selected="true|false"` |
-| `audio-track` | `data-selected`, `data-muted`, `data-included`, each `"true"` or `"false"` |
+| `timeline` | Editor timeline; `data-audio="linked|separate|none"` (whether audio follows the video clips) and `data-audio-view="collapsed|expanded"` (absent without audio). Collapsed (the default) draws one mixed waveform inside each video clip, plus bands on empty video time where separated audio plays; expanding shows one row per separated audio track. Collapsing never moves or relinks clips. |
+| `timeline-segment` | A video clip on the timeline: `data-selected="true|false"`. Its `.timeline-segment__handle` edges trim it; dragging its body moves it. |
+| `audio-clip` | A clip on a separated audio row: `data-selected="true|false"`; inherits `--track-color` and uses the same edge handles as `timeline-segment` |
+| `audio-track` | Separated audio row: `data-selected`, `data-muted`, `data-included`, each `"true"` or `"false"`; sets `--track-color` to its `--waveform-N` palette entry |
+| `mixer-track` | Editor inspector audio stream: `data-muted`, `data-included`, each `"true"` or `"false"`; sets `--track-color` like `audio-track` |
 
 Some specialized buttons use a specific component value such as `capture-button` in place of `button`; `.btn` continues to match every shared button. Use native/ARIA state selectors for hover, focus, selection, and disabled controls rather than inferring those states from colors.
 
@@ -63,17 +65,19 @@ Dropdowns and context menus use native popovers in Chromium's top layer. Their D
 
 `[data-shard-slot="<value>"]` identifies a region inside a component:
 
-- Shell: `titlebar`, `content`, `statusbar`, `status-tools`, `console-launcher`.
+- Shell: `titlebar`, `content`, `statusbar`, `status-tools`, `console-launcher`, `window-controls` (minimize/maximize/close; a fixed overlay at the top right of the window, above pages, dialogs, and the editor, `--titlebar-h` tall).
 - Cards: `card-header`, `card-body`, `card-footer`.
 - Settings: `settings-navigation`, `settings-content`, `settings-search` (navigation search input), `settings-navigation-divider` (separator between search and categories), `settings-search-results` (scrollable matching destinations in a top-layer popup), `settings-section-layout` (responsive arrangement of independent panels), `storage-import` (Import section in Storage).
 - Appearance: `theme-search` (custom-theme filter), `custom-theme-list` (scrollable list showing up to five entries at a time).
 - Capture: `capture-primary` (compact status and clip controls), `capture-actions`, `capture-summary` (supporting hotkey, encoding, and storage panels), `capture-recent` (clip grid without an enclosing card).
+- Storage: `data-shard-component="storage-summary"` in Capture and Storage settings shows clip usage against the cleanup limit and bytes kept separately (`storage-usage`) above the meter. `data-shard-state="loading|within-target|disabled|cleaning|recent|minimum|needs-review|busy"` identifies cleanup state. `storage-notice` explains an over-limit state or previews unsaved cleanup settings; in `needs-review` it contains a danger **Clean up now** button that opens a confirmation dialog. `storage-cleanup-toggle` is the on/off switch in the Automatic cleanup card header. These use the existing meter, button, toggle, spacing, foreground, background, border, and radius tokens.
 - Library: `library-header`, `library-heading`, `library-header-actions`, `library-summary`, `library-navigation`, `library-source-filter`, `library-filter-count`, `toolbar`, `library-search`, `library-results`, `clip-grid`.
 - Clip cards: `clip-thumbnail`, `clip-image`, `clip-placeholder`, `clip-play`, `clip-source`, `clip-duration`, `clip-details`, `clip-heading`, `clip-title`, `clip-filename`, `clip-date`, `clip-size`, `clip-actions`, `clip-delete-confirmation`, `clip-error`.
 - Dialogs: `modal-panel`, `modal-header`, `modal-heading`, `modal-title`, `modal-subtitle`, `modal-body`, `modal-footer`.
 - Clip viewer: `viewer-media`, `viewer-details`, `viewer-heading`, `viewer-metadata`, `viewer-date`, `viewer-duration`, `viewer-size`, `viewer-resolution`, `viewer-framerate`, `viewer-actions`, `viewer-file`, `viewer-filename`, `viewer-error`.
-- Games, editor, and timeline: `toolbar`, `games-status` (compact detection status), `games-workspace` (game list beside supporting options on wide windows), `games-options` (secondary recording and detection settings), `editor-rename`.
-- Player: `player-stage`, `player-video`, `player-feedback`, `player-loading`, `player-status`, `player-controls`, `player-seek`, `player-transport`, `player-time`, `player-volume`, `player-speed`, `player-error`.
+- Games, editor, and timeline: `toolbar`, `games-status` (compact detection status), `games-workspace` (game list beside supporting options on wide windows), `games-options` (secondary recording and detection settings), `editor-rename`, `timeline-audio-mix` (the collapsed mixed-waveform band inside each video clip), `timeline-audio-only` (collapsed separated audio playing over empty video time: a dashed "Audio only" block holding its own `timeline-audio-mix` band), `timeline-snap-guide` (the line drawn where a dragged clip edge snapped).
+- Editor layout: the header (`toolbar`) is the titlebar while the editor is open; its export button becomes **Cancel export** while encoding. `editor-body` arranges `editor-stage` (the player) beside `editor-inspector`, with the timeline below a `timeline-resize` separator; `editor-body` exposes `data-timeline-size="auto|custom"` and `--editor-timeline-h` once the user resizes. Inspector panels: `editor-output` (output length, resolution, frame rate), `editor-selection`, `editor-mixer` (one `mixer-track` component per audio stream with `data-muted` and `data-included`), and `editor-shortcuts`. A finished export opens `editor-export`, a centred dialog with a close button in its top-right corner, **Open** (returns to the library and opens the export in the clip viewer), show-in-folder, and delete; failures show the error with the close button only.
+- Player: `player-stage`, `player-video`, `player-feedback`, `player-loading`, `player-status`, `player-controls`, `player-seek`, `player-transport`, `player-time`, `player-volume`, `player-speed`, `player-error`. In the editor stage the player uses a single-row transport, so `player-seek` sits inside `player-transport` between the time and volume. While the editor playhead is in empty timeline time, `player-video` has `data-blank="true"` and renders black. During an editor export the playhead, `player-seek`, and picture follow the encoder silently, and `player-status` shows the phase and percentage.
 - Renaming: `rename-form`, `rename-input`, `rename-actions`, `rename-error`.
 - Medal import: `import-description`, `import-options`, `import-progress`, `import-result`, `import-error`, `import-actions`.
 - Developer console: `console-shell`, `console-header`, `console-identity`, `console-heading`, `console-live-state`, `console-controls`, `console-filters`, `console-search`, `console-actions`, `console-workspace`, `console-overflow`, `console-feedback`, `console-results`, `console-list`, `console-empty`, `console-pagination`, `console-row`, `console-time`, `console-source`, `console-severity`, `console-message`, `console-footer`, `console-counts`, `console-paging`, `console-keyboard-help`.
@@ -104,13 +108,13 @@ Define tokens on `:root`. Values inherit unless explicitly overridden by a compo
 | Fonts | `--font-ui`, `--font-mono`; legacy aliases `--font`, `--mono` |
 | Font sizes | `--fs-10`, `--fs-11`, `--fs-12`, `--fs-13`, `--fs-14`, `--fs-15`, `--fs-17`, `--fs-20`, `--fs-26` |
 | Controls | `--control-height`, `--control-radius`, `--focus` |
-| Layout | `--page-width`, `--page-gutter`, `--page-padding-block`, `--settings-content-width` |
+| Layout | `--page-width`, `--page-gutter`, `--page-padding-block`, `--settings-content-width`, `--titlebar-h` (titlebar and editor header height); `--window-controls-w` is the reserved window-button width (read-only, `0px` without custom window controls) |
 | Elevation | `--shadow-1`, `--shadow-2`, `--shadow-3` |
 | Transitions | `--t`, `--t-fast` (duration plus timing function) |
 | Overlays | `--overlay-bg`, `--media-badge-bg`, `--media-badge-fg` |
 | Player | `--player-bg`, `--player-controls-bg`, `--player-overlay-bg`, `--player-overlay-fg` |
-| Timeline | `--timeline-bg`, `--timeline-label-bg`, `--timeline-ruler-bg`, `--timeline-track-bg`, `--timeline-cut`, `--timeline-selection`, `--timeline-handle`, `--timeline-playhead` |
-| Waveform | `--waveform`, `--waveform-muted` (canvas colors repaint on theme/option changes) |
+| Timeline | `--timeline-bg`, `--timeline-label-bg`, `--timeline-ruler-bg`, `--timeline-track-bg` (clip body base), `--timeline-cut` (empty track time, which exports as black video / silence), `--timeline-selection`, `--timeline-handle`, `--timeline-playhead`, `--timeline-snap` (snap guide) |
+| Waveform | `--waveform` (linked mix), `--waveform-1` … `--waveform-6` (per-track palette when audio is separated, cycling by audio stream), `--waveform-muted`; canvas colors repaint on theme/option changes |
 | Icons | `--icon-<name>`; see below |
 
 `--bg-0` is the deepest background and higher numbers are raised surfaces. `--fg` is primary text, with decreasing emphasis through `--fg-4`. `--accent-ink` is text on solid accent buttons. `--accent-grad` and `--accent-grad-soft` accept CSS background images. Token changes do not alter video pixels; the actual video canvas stays black outside the image. Fixed media-coordinate geometry and some internal decoration intentionally are not tokenized.

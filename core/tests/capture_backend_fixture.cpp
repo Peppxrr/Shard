@@ -233,7 +233,8 @@ int main(int argc, char** argv)
     sources.setGameSubject("cs2.exe", "Synthetic CS2", "Shard capture fixture",
                            "ShardCaptureRecoveryFixture", GetCurrentProcessId());
     shard::SourceManagerCaptureTestAccess::windowLifecycle(sources);
-    // Retargeting and a complete video-source rebuild both reassert SDR.
+    // A title-only change keeps the live target; a complete video-source
+    // rebuild retargets it. Both must leave SDR asserted.
     sources.setGameSubject("cs2.exe", "Synthetic CS2", "Retarget fixture",
                            "ShardCaptureRecoveryFixture", GetCurrentProcessId());
     shard::SourceManagerCaptureTestAccess::windowLifecycle(sources);

@@ -51,8 +51,10 @@ public:
   void setSink(Sink sink) { sink_ = std::move(sink); }
 
   // A detection fired for a process. Starts a session for the game if none is
-  // active; otherwise folds the process into the existing session.
-  void onDetected(const DetectionResult& r, const ProcessInfo& p, bool preferPrimary = true);
+  // active; otherwise folds the process into the existing session. A new
+  // session becomes primary only when there is no primary yet; swaps between
+  // running games go through the owner loop's focus debounce.
+  void onDetected(const DetectionResult& r, const ProcessInfo& p);
 
   // Process exit. Ends the session when its last pid dies; otherwise the
   // active pid moves to the newest survivor.

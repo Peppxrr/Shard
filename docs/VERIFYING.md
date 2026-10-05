@@ -13,10 +13,11 @@ Choose the smallest scope that exercises the changed behavior:
 | Documentation | None | Review the diff; no build |
 | UI, main process, preload, app-only settings | Default or `-- app` | TypeScript + production app build |
 | Editor, export, playback, thumbnails, library imports/renaming | `-- editor` | App build + editor, preview, and library tests |
+| Storage policy, automatic cleanup, library retention | `-- storage` | App build + library and storage policy/SQLite tests |
 | Theme loader, manifests, options, or styling API | `-- themes` | App build + theme tests |
 | Updater state, IPC, or UI | `-- updater` | App build + updater tests |
 | Developer console, log streams, session export | `-- diagnostics` | App build + diagnostics tests |
-| C++ logic/detection | `-- core` | Debug core build + detection/capture unit tests |
+| C++ logic/detection | `-- core` | Debug core build + detection/capture/audio-isolation unit tests |
 | Captured frames/audio, replay/mux/timestamps, core capture settings | `-- capture` | Core scope + one E2E with duration/video/audio checks |
 | Release, packaging/build pipeline, packaged-only regression | `-- release` | Release core, unit/JS tests, app packaging, artifact checks |
 
@@ -28,10 +29,12 @@ already installed. Release scope fetches pinned FFmpeg if its binaries are
 missing; otherwise it reuses them.
 
 Successful steps print one short result. Complete logs and a machine-readable
-`summary.json` are kept under ignored `tmp/verify/<run>/`. A failure stops the
-run and prints the last 20 log lines. Only open the full log if that is not
-enough to diagnose the failure. Missing tools or failed checks are failures,
-never silently skipped.
+`summary.json` are kept under ignored `tmp/verify/<run>/`; the ten newest
+successful and ten newest failed runs are retained, while active and older
+unmarked runs are left alone. A failure stops the run and prints the last 20
+log lines. Only open the full log if that is not enough to diagnose the
+failure. Capture E2E temp data is removed on success and kept on failure.
+Missing tools or failed checks are failures, never silently skipped.
 
 After a pass, stop. Rerun only what later edits affect. Do not build installers,
 run capture tests, inspect every screen, or audit unchanged dependencies for a
@@ -85,6 +88,16 @@ and bounded replay caps. It checks idle startup before the fixture launches,
 preserved ring history and the `replay_preserved=true` diagnostics across both
 replacements, fresh decodable clips at the fixed output size, and one continuous
 decodable recording file.
+
+To verify game swapping with real hooks, run `node scripts/game-swap-test.mjs`
+with `CF_COREBIN` and `CF_GC_FIXTURE` pointing at matching builds. It registers
+two copies of the D3D11 fixture with different aspect ratios, then checks that
+a newly launched game and a 2-second alt-tab do not take over, that held focus
+swaps after the 5-second debounce, that returning to an already-injected game
+reacquires hook frames through the existing hook, and that the replay ring
+keeps one decodable history across every swap. `CF_GC_SWAP_MODE=auto` starts on
+the desktop and also checks the return to desktop capture after both games
+close. The test steals focus for about a minute.
 
 The release workflow calls the same `release` scope. Do not also perform a full
 local release run when CI has verified the same changes. Hosted CI does not

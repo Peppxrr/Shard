@@ -5,17 +5,17 @@ import { spawn } from "./bundled-processes";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import type { ClipRecord, EditorExportProject, ExportProgress, ExportResult, ExportSettings } from "../shared/contracts";
+import type { ClipRecord, EditorExportProject, EditorTimelineClip, ExportProgress, ExportResult, ExportSettings } from "../shared/contracts";
 import { ffmpegBin, ffprobeAsync, listExportEncoders, probeAudioTracks } from "./ffmpeg";
 import { buildVideoEncoderArgs, pickExportResolution as pickResolution } from "./export-video";
 import { editorDir } from "./library";
 import {
   buildExportAudioOutputs,
   buildExportGraph,
-  validateExportSegments,
+  exportTimelineDuration,
   resolveExportAudioTracks,
+  validateTimelineClips,
   type ExportAudioTrack,
-  type ExportSegment,
 } from "./export-graph";
 
 const MAX_RUNS = 6;
@@ -45,10 +45,10 @@ export class ExportManager extends EventEmitter {
 
     try {
       await fs.access(clip.path);
-      const segments = validateExportSegments(project.segments, clip.durationMs / 1000);
-      const tracks = resolveExportAudioTracks(await probeAudioTracks(clip.path), project.audioTracks);
-      const totalDur = segments.reduce((sum, segment) => sum + segment.end - segment.start, 0);
-      if (totalDur <= 0) throw new Error("No retained timeline segments to export");
+      const sourceDuration = clip.durationMs / 1000;
+      const videoClips = validateTimelineClips(project.videoClips, sourceDuration, "Video");
+      const tracks = resolveExportAudioTracks(await probeAudioTracks(clip.path), project.audioTracks, sourceDuration);
+      const totalDur = exportTimelineDuration(videoClips, tracks);
 
       const outDir = editorDir();
       await fs.mkdir(outDir, { recursive: true });
@@ -79,7 +79,8 @@ export class ExportManager extends EventEmitter {
         input: clip.path,
         output: outFile,
         streams: tracks.map((track) => ({ streamIndex: track.streamIndex, name: track.name, muted: track.muted, volume: track.volume })),
-        segments,
+        videoClips,
+        audioClips: tracks.map((track) => ({ streamIndex: track.streamIndex, clips: track.clips })),
         totalDurationSec: totalDur,
         targetMb: settings.targetMb,
         encoder: settings.encoder,
@@ -91,7 +92,7 @@ export class ExportManager extends EventEmitter {
         try {
           await this.runSinglePass(
             clip,
-            segments,
+            videoClips,
             tracks,
             outFile,
             resolution.w,
@@ -186,7 +187,7 @@ export class ExportManager extends EventEmitter {
 
   private async runSinglePass(
     clip: ClipRecord,
-    segments: ExportSegment[],
+    videoClips: EditorTimelineClip[],
     tracks: ExportAudioTrack[],
     outFile: string,
     width: number,
@@ -197,7 +198,7 @@ export class ExportManager extends EventEmitter {
     totalDur: number,
     attempt: number,
   ): Promise<void> {
-    const graph = buildExportGraph(segments, tracks, width, height);
+    const graph = buildExportGraph(videoClips, tracks, width, height, fps);
     const videoArgs = buildVideoEncoderArgs(videoEncoder, bitrateKbps, fps, attempt === 1);
     const metadataArgs = graph.audioOutputs.flatMap((output, index) => [
       `-metadata:s:a:${index}`, `title=${output.name}`,

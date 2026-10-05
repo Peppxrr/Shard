@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "audio_isolation_capture.h"
 #include "encoders.h"
 #include "x265_encoder.h"
 #include "capture_adapter.h"
@@ -169,6 +170,7 @@ bool App::init()
   // context it falls back to BitBlt (black captures for GPU-rendered windows).
   obs_load_all_modules();
   registerX265Encoder();
+  registerProcessLoopbackSource();
 
   scene_ = obs_scene_create("main");
   if (!scene_) {

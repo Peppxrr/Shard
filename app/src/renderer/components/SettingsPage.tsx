@@ -12,6 +12,7 @@ import { FloatingMenu } from "./FloatingMenu";
 
 interface Props {
   settings: Settings;
+  savedSettings: Settings;
   onChange: (s: Settings) => void;
   onCommit: (s: Settings) => void;
   activeSection: SettingsSection;
@@ -53,7 +54,7 @@ const SETTINGS_DESCRIPTIONS: Record<NavId, string> = {
   app: "Control startup, notifications, and app behavior.",
 };
 
-export function SettingsPage({ settings, onChange, onCommit, activeSection, onSectionChange, updatesRequest, onUpdatesRequestHandled }: Props) {
+export function SettingsPage({ settings, savedSettings, onChange, onCommit, activeSection, onSectionChange, updatesRequest, onUpdatesRequestHandled }: Props) {
   const [devices, setDevices] = useState<AudioDeviceInfo[]>([]);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [videoEncoders, setVideoEncoders] = useState<VideoEncoderInfo[]>([]);
@@ -168,7 +169,7 @@ export function SettingsPage({ settings, onChange, onCommit, activeSection, onSe
       <aside data-shard-slot="settings-navigation" className="settings__nav">
         <h1 className="page__title settings__title">Settings</h1>
         <div data-shard-slot="settings-search" className="settings-search" ref={searchRef}>
-          <Icon name="search" size={18} />
+          <Icon name="search" size={15} />
           <input type="search" aria-label="Search Settings" placeholder="Search Settings" value={query}
             aria-controls={searching && searchOpen ? "settings-search-results" : undefined}
             onFocus={() => setSearchOpen(true)} onChange={event => { setQuery(event.target.value); setSearchOpen(true); }} onKeyDown={event => {
@@ -204,7 +205,7 @@ export function SettingsPage({ settings, onChange, onCommit, activeSection, onSe
         {NAV.map((s) => (
           <button key={s.id} type="button" className={active === s.id ? "nav__item settings__nav-item active" : "nav__item settings__nav-item"}
             aria-current={active === s.id ? "page" : undefined} onClick={() => { setQuery(""); setSearchOpen(false); setSearchTarget(null); onSectionChange(s.id); }}>
-            <span className="ico"><Icon name={s.icon} size={18} /></span> {s.label}
+            <span className="ico"><Icon name={s.icon} size={16} /></span> {s.label}
           </button>
         ))}
       </aside>
@@ -231,7 +232,7 @@ export function SettingsPage({ settings, onChange, onCommit, activeSection, onSe
 
         {active === "hotkeys" && <HotkeysSettings hotkeys={settings.hotkeys} onChange={hotkeys => patch({ hotkeys })} />}
 
-        {active === "storage" && (<StorageSettingsPanel settings={settings} onChange={onChange} defaultFolder={defaultClipsFolder} />)}
+        {active === "storage" && (<StorageSettingsPanel settings={settings} savedStorage={savedSettings.storage} onChange={onChange} defaultFolder={defaultClipsFolder} />)}
 
         {active === "app" && <AppSettingsPanel settings={settings} onChange={onChange} version={version} />}
       </div>

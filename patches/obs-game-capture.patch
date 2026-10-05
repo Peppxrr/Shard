@@ -543,7 +543,7 @@ index dc4f3c26b..c435aaff6 100644
 +	init_vulkan_registry(false);
  }
 diff --git a/plugins/win-capture/game-capture.c b/plugins/win-capture/game-capture.c
-index 3bf12ef3d..0a9d5bfed 100644
+index 3bf12ef3d..566b6f609 100644
 --- a/plugins/win-capture/game-capture.c
 +++ b/plugins/win-capture/game-capture.c
 @@ -6,7 +6,11 @@
@@ -590,16 +590,17 @@ index 3bf12ef3d..0a9d5bfed 100644
  };
  
  typedef DPI_AWARENESS_CONTEXT(WINAPI *PFN_SetThreadDpiAwarenessContext)(DPI_AWARENESS_CONTEXT);
-@@ -124,6 +132,8 @@ struct game_capture {
+@@ -124,6 +132,9 @@ struct game_capture {
  
  	struct cursor_data cursor_data;
  	HANDLE injector_process;
 +	ULONGLONG injector_started_at;
 +	DWORD injector_target_process_id;
++	ULONGLONG init_started_at;
  	uint32_t cx;
  	uint32_t cy;
  	uint32_t pitch;
-@@ -195,6 +205,12 @@ struct game_capture {
+@@ -195,6 +206,12 @@ struct game_capture {
  	PFN_GetWindowDpiAwarenessContext get_window_dpi_awareness_context;
  };
  
@@ -612,7 +613,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  struct graphics_offsets offsets32 = {0};
  struct graphics_offsets offsets64 = {0};
  
-@@ -388,6 +404,7 @@ static void game_capture_destroy(void *data)
+@@ -388,6 +405,7 @@ static void game_capture_destroy(void *data)
  {
  	struct game_capture *gc = data;
  	stop_capture(gc);
@@ -620,7 +621,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  
  	if (gc->audio_source)
  		destroy_audio_source(gc->source, &gc->audio_source);
-@@ -446,6 +463,7 @@ static inline void get_config(struct game_capture_config *cfg, obs_data_t *setti
+@@ -446,6 +464,7 @@ static inline void get_config(struct game_capture_config *cfg, obs_data_t *setti
  	cfg->hook_rate = (enum hook_rate)obs_data_get_int(settings, SETTING_HOOK_RATE);
  	cfg->is_10a2_2100pq = strcmp(obs_data_get_string(settings, SETTING_RGBA10A2_SPACE), "2100pq") == 0;
  	cfg->capture_audio = obs_data_get_bool(settings, SETTING_CAPTURE_AUDIO);
@@ -628,7 +629,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  }
  
  static inline int s_cmp(const char *str1, const char *str2)
-@@ -676,28 +694,43 @@ static inline bool is_64bit_windows(void)
+@@ -676,28 +695,43 @@ static inline bool is_64bit_windows(void)
  #endif
  }
  
@@ -682,7 +683,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  	gc->is_app = is_app(gc->target_process);
  	if (gc->is_app) {
  		gc->app_sid = get_app_sid(gc->target_process);
-@@ -737,6 +770,8 @@ static inline bool init_texture_mutexes(struct game_capture *gc)
+@@ -737,6 +771,8 @@ static inline bool init_texture_mutexes(struct game_capture *gc)
  		}
  		return false;
  	}
@@ -691,7 +692,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  
  	return true;
  }
-@@ -799,6 +834,7 @@ static inline bool init_hook_info(struct game_capture *gc)
+@@ -799,6 +835,7 @@ static inline bool init_hook_info(struct game_capture *gc)
  	gc->global_hook_info->UNUSED_use_scale = false;
  	gc->global_hook_info->allow_srgb_alias = true;
  	reset_frame_interval(gc);
@@ -699,7 +700,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  
  	obs_enter_graphics();
  	if (!gs_shared_texture_available()) {
-@@ -826,6 +862,7 @@ static inline bool init_pipe(struct game_capture *gc)
+@@ -826,6 +863,7 @@ static inline bool init_pipe(struct game_capture *gc)
  		warn("init_pipe: failed to start pipe");
  		return false;
  	}
@@ -707,7 +708,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  
  	return true;
  }
-@@ -837,78 +874,425 @@ static inline int inject_library(HANDLE process, const wchar_t *dll)
+@@ -837,78 +875,425 @@ static inline int inject_library(HANDLE process, const wchar_t *dll)
  				  0x12897dd89168789a, "GbfkDaezbp~X", 0x76aff7238788f7db);
  }
  
@@ -748,7 +749,7 @@ index 3bf12ef3d..0a9d5bfed 100644
 +	bool success = false;
 +
 +	if (!os_utf8_to_wcs_ptr(path, 0, &path_w))
- 		return false;
++		return false;
 +
 +	file = CreateFileW(path_w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 +	bfree(path_w);
@@ -780,8 +781,8 @@ index 3bf12ef3d..0a9d5bfed 100644
 +	const WORD expected = gc->process_is_64bit ? IMAGE_FILE_MACHINE_AMD64 : IMAGE_FILE_MACHINE_I386;
 +	if (!get_binary_machine(path, &machine)) {
 +		warn("[GC] FAIL stage=%sArchitecture path=\"%s\" error=%lu", label, path, GetLastError());
-+		return false;
-+	}
+ 		return false;
+ 	}
 +	if (machine != expected) {
 +		warn("[GC] FAIL stage=%sArchitecture expected=%s actual=%s path=\"%s\"", label, machine_name(expected),
 +		     machine_name(machine), path);
@@ -791,7 +792,9 @@ index 3bf12ef3d..0a9d5bfed 100644
 +	gc_diag("stage=%sArchitecture result=success arch=%s path=\"%s\"", label, machine_name(machine), path);
 +	return true;
 +}
-+
+ 
+-	path_ret = _wfullpath(hook_path_abs_w, hook_path_rel_w, MAX_PATH);
+-	bfree(hook_path_rel_w);
 +static bool get_final_path(const char *path, bool directory, wchar_t **final_path)
 +{
 +	wchar_t *path_w = NULL;
@@ -799,7 +802,9 @@ index 3bf12ef3d..0a9d5bfed 100644
 +	DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
 +	DWORD length;
 +	bool success = false;
-+
+ 
+-	if (path_ret == NULL) {
+-		warn("hook_direct: could not make absolute path");
 +	if (!os_utf8_to_wcs_ptr(path, 0, &path_w))
 +		return false;
 +	handle = CreateFileW(path_w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
@@ -1028,16 +1033,12 @@ index 3bf12ef3d..0a9d5bfed 100644
 +		warn("[GC] FAIL stage=%sSigner expected=\"%s\"/%s actual=\"%s\"/%s path=\"%s\"; refusing injection",
 +		     label, SHARD_OBS_HOOK_SIGNER, expected_signer, signer_name, actual_signer, path);
 +		goto cleanup;
- 	}
- 
--	path_ret = _wfullpath(hook_path_abs_w, hook_path_rel_w, MAX_PATH);
--	bfree(hook_path_rel_w);
++	}
++
 +	gc_diag("stage=%sPayloadVerification result=success obs=%s sha256=%s signer=\"%s\" thumbprint=%s",
 +		label, SHARD_OBS_HOOK_PAYLOAD_VERSION, actual_hash, signer_name, actual_signer);
 +	success = true;
- 
--	if (path_ret == NULL) {
--		warn("hook_direct: could not make absolute path");
++
 +cleanup:
 +	if (!success)
 +		gc->error_acquiring = true;
@@ -1085,11 +1086,11 @@ index 3bf12ef3d..0a9d5bfed 100644
 -	wchar_t *command_line_w = malloc(4096 * sizeof(wchar_t));
 -	wchar_t *inject_path_w;
 -	wchar_t *hook_dll_w;
-+	if (!gc->injector_target_process_id)
++	const bool helper_running = gc->injector_process && !object_signalled(gc->injector_process);
++	if (!gc->injector_target_process_id && !helper_running)
 +		return false;
 +
 +	const ULONGLONG elapsed = GetTickCount64() - gc->injector_started_at;
-+	const bool helper_running = gc->injector_process && !object_signalled(gc->injector_process);
 +	if (helper_running || elapsed < CAPTURE_INITIALIZATION_TIMEOUT_MS) {
 +		gc_diag("stage=HelperLaunch result=deferred previous_target_pid=%lu helper=%s elapsed_ms=%llu "
 +			"initialization_timeout_ms=%llu",
@@ -1162,7 +1163,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  	free(command_line_w);
  	bfree(inject_path_w);
  	bfree(hook_dll_w);
-@@ -921,23 +1305,49 @@ static inline bool inject_hook(struct game_capture *gc)
+@@ -921,23 +1306,49 @@ static inline bool inject_hook(struct game_capture *gc)
  {
  	bool matching_architecture;
  	bool success = false;
@@ -1220,7 +1221,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  
  #ifdef _WIN64
  	matching_architecture = gc->process_is_64bit;
-@@ -1047,6 +1457,8 @@ static bool init_hook(struct game_capture *gc)
+@@ -1047,6 +1458,8 @@ static bool init_hook(struct game_capture *gc)
  		if (!inject_hook(gc)) {
  			return false;
  		}
@@ -1229,7 +1230,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  	}
  	if (!init_texture_mutexes(gc)) {
  		return false;
-@@ -1057,8 +1469,13 @@ static bool init_hook(struct game_capture *gc)
+@@ -1057,13 +1470,19 @@ static bool init_hook(struct game_capture *gc)
  	if (!init_events(gc)) {
  		return false;
  	}
@@ -1244,7 +1245,13 @@ index 3bf12ef3d..0a9d5bfed 100644
  
  	gc->window = gc->next_window;
  	gc->next_window = NULL;
-@@ -1175,17 +1592,18 @@ static void try_hook(struct game_capture *gc)
+ 	gc->active = true;
+ 	gc->retrying = 0;
++	gc->init_started_at = GetTickCount64();
+ 	return true;
+ }
+ 
+@@ -1175,17 +1594,18 @@ static void try_hook(struct game_capture *gc)
  
  	if (gc->next_window) {
  		gc->thread_id = GetWindowThreadProcessId(gc->next_window, &gc->process_id);
@@ -1269,7 +1276,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  			gc->error_acquiring = true;
  			return;
  		}
-@@ -1688,6 +2106,7 @@ static void check_foreground_window(struct game_capture *gc, float seconds)
+@@ -1688,6 +2108,7 @@ static void check_foreground_window(struct game_capture *gc, float seconds)
  	}
  }
  
@@ -1277,7 +1284,7 @@ index 3bf12ef3d..0a9d5bfed 100644
  static void game_capture_tick(void *data, float seconds)
  {
  	struct game_capture *gc = data;
-@@ -1744,19 +2163,27 @@ static void game_capture_tick(void *data, float seconds)
+@@ -1744,19 +2165,30 @@ static void game_capture_tick(void *data, float seconds)
  
  		GetExitCodeProcess(gc->injector_process, &exit_code);
  		close_handle(&gc->injector_process);
@@ -1296,8 +1303,11 @@ index 3bf12ef3d..0a9d5bfed 100644
  		}
  	}
  
-+	if (gc->active && !gc->capturing && gc->injector_target_process_id && !gc->injector_process &&
-+	    GetTickCount64() - gc->injector_started_at >= CAPTURE_INITIALIZATION_TIMEOUT_MS) {
++	/* Only an attempt that launched the helper for this target can time out.
++	 * An existing hook (e.g. returning to a previously captured game) is not
++	 * judged by an older helper launch for this or another process. */
++	if (gc->active && !gc->capturing && gc->injector_target_process_id == gc->process_id &&
++	    !gc->injector_process && GetTickCount64() - gc->init_started_at >= CAPTURE_INITIALIZATION_TIMEOUT_MS) {
 +		warn("[GC] FAIL stage=CaptureInitialization reason=timeout target_pid=%lu timeout_ms=%llu; retrying",
 +		     (unsigned long)gc->injector_target_process_id,
 +		     (unsigned long long)CAPTURE_INITIALIZATION_TIMEOUT_MS);
@@ -1311,7 +1321,19 @@ index 3bf12ef3d..0a9d5bfed 100644
  		enum capture_result result = init_capture_data(gc);
  
  		if (result == CAPTURE_SUCCESS)
-@@ -1785,6 +2212,9 @@ static void game_capture_tick(void *data, float seconds)
+@@ -1764,6 +2196,11 @@ static void game_capture_tick(void *data, float seconds)
+ 		else
+ 			debug("init_capture_data failed");
+ 
++		/* The helper attempt is complete once its target captures. Keep the
++		 * process handle (if still running) so launches cannot overlap. */
++		if (gc->capturing)
++			gc->injector_target_process_id = 0;
++
+ 		// If capture was successful, send a hooked signal
+ 		if (gc->capturing) {
+ 			if (gc->config.mode == CAPTURE_MODE_ANY) {
+@@ -1785,6 +2222,9 @@ static void game_capture_tick(void *data, float seconds)
  			if (gc->audio_source) {
  				reconfigure_audio_source(gc->audio_source, gc->window);
  			}

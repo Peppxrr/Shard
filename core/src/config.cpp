@@ -9,7 +9,9 @@ namespace fs = std::filesystem;
 
 nlohmann::json AudioSourceConfig::toJson() const
 {
-  return {{"id", id}, {"name", name}, {"kind", kind}, {"window", window}, {"gain", gain}, {"enabled", enabled}};
+  return {{"id", id},         {"name", name},       {"kind", kind},
+          {"window", window}, {"gain", gain},       {"enabled", enabled},
+          {"excludeFromDesktop", excludeFromDesktop}};
 }
 
 AudioSourceConfig AudioSourceConfig::fromJson(const nlohmann::json& j)
@@ -21,6 +23,10 @@ AudioSourceConfig AudioSourceConfig::fromJson(const nlohmann::json& j)
   c.window = j.value("window", std::string());
   c.gain = j.value("gain", 1.0f);
   c.enabled = j.value("enabled", true);
+  // Only process rows can be isolated; anything else (including a malformed
+  // value) is normalized off so a stray flag cannot change routing.
+  const auto exclude = j.find("excludeFromDesktop");
+  c.excludeFromDesktop = c.kind == "process" && exclude != j.end() && exclude->is_boolean() && exclude->get<bool>();
   return c;
 }
 

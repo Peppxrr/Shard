@@ -16,15 +16,17 @@ $root = Split-Path $PSScriptRoot -Parent
 $coreExe = Join-Path $CoreBin "shardcore.exe"
 if (-not (Test-Path $coreExe)) { throw "shardcore.exe not found in $CoreBin" }
 
-$temp = Join-Path $env:TMP "cf-e2e-$(Get-Date -Format yyyyMMddHHmmss)"
+$temp = Join-Path $env:TMP "cf-e2e-$(Get-Date -Format yyyyMMddHHmmss)-$PID"
 New-Item -ItemType Directory -Force $temp | Out-Null
+$passed = $false
 
 Write-Host "==> Starting core (config-dir $temp)"
-$proc = Start-Process -FilePath $coreExe -ArgumentList "--config-dir", $temp, "--core-bin", $CoreBin, "--port", "0" `
-  -RedirectStandardOutput (Join-Path $temp "core.out") -RedirectStandardError (Join-Path $temp "core.err") `
-  -PassThru -NoNewWindow
+$proc = $null
 
 try {
+  $proc = Start-Process -FilePath $coreExe -ArgumentList "--config-dir", $temp, "--core-bin", $CoreBin, "--port", "0" `
+    -RedirectStandardOutput (Join-Path $temp "core.out") -RedirectStandardError (Join-Path $temp "core.err") `
+    -PassThru -WindowStyle Hidden
   $port = $null
   $deadline = (Get-Date).AddSeconds(30)
   while ((Get-Date) -lt $deadline) {
@@ -44,12 +46,24 @@ try {
   node (Join-Path $PSScriptRoot "e2e-client.mjs")
   if ($LASTEXITCODE -ne 0) { throw "e2e client failed ($LASTEXITCODE)" }
   Write-Host "==> E2E PASSED"
+  $passed = $true
 }
 finally {
-  if (-not $proc.HasExited) {
+  if ($proc -and -not $proc.HasExited) {
     $proc.Kill()
     $proc.WaitForExit()
   }
-  if (-not $KeepTemp) { Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue }
-  else { Write-Host "==> temp kept at $temp" }
+  if ($KeepTemp -or -not $passed) { Write-Host "==> temp kept at $temp" }
+  else {
+    try {
+      $tempRoot = (Resolve-Path -LiteralPath $env:TMP).Path
+      $tempItem = Get-Item -LiteralPath $temp -Force
+      if ($tempItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing to remove E2E reparse point: $temp" }
+      $resolvedTemp = (Resolve-Path -LiteralPath $temp).Path
+      if ([IO.Path]::GetDirectoryName($resolvedTemp) -eq $tempRoot -and
+          [IO.Path]::GetFileName($resolvedTemp) -like "cf-e2e-*") {
+        Remove-Item -LiteralPath $resolvedTemp -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    } catch { Write-Warning "Could not safely remove E2E temp directory: $temp" }
+  }
 }

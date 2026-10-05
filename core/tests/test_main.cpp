@@ -787,36 +787,25 @@ static void testSessionPrimarySwitchAndFocus()
 
   mgr.onDetected(detected("u:game-a", "Game A", 80), proc("a.exe", 900, 0, "", 1000));
   mgr.onDetected(detected("u:game-b", "Game B", 85), proc("b.exe", 901, 0, "", 2000));
-  CHECK_EQ(mgr.primary().gameId, std::string("u:game-b")); // most recent start
-
-  // The user focuses game A: the owner loop debounces and then switches.
-  CHECK(mgr.sessionForPid(900) != nullptr);
-  mgr.setPrimaryByGameId("u:game-a");
+  CHECK_EQ(mgr.count(), (size_t)2);
+  // A newly started game, even a focused one, waits for the owner loop's
+  // focus debounce instead of taking over capture on detection.
   CHECK_EQ(mgr.primary().gameId, std::string("u:game-a"));
+
+  // The user keeps game B focused: the owner loop debounces and then switches.
+  CHECK(mgr.sessionForPid(901) != nullptr);
+  mgr.setPrimaryByGameId("u:game-b");
+  CHECK_EQ(mgr.primary().gameId, std::string("u:game-b"));
   bool sawPrimary = false;
   for (const auto& st : states)
     if (st == "primary")
       sawPrimary = true;
   CHECK(sawPrimary);
 
-  // B exits -> A stays primary.
+  // B exits -> A takes over immediately.
   mgr.onProcessExited(901);
   CHECK_EQ(mgr.count(), (size_t)1);
   CHECK_EQ(mgr.primary().gameId, std::string("u:game-a"));
-}
-
-static void testBackgroundSessionAdmission()
-{
-  GameSessionManager mgr;
-  mgr.onDetected(detected("u:a", "Game A"), proc("a.exe", 910), false);
-  CHECK_EQ(mgr.primary().gameId, std::string("u:a"));
-  mgr.onDetected(detected("u:b", "Game B"), proc("b.exe", 911), false);
-  CHECK_EQ(mgr.count(), (size_t)2);
-  CHECK_EQ(mgr.primary().gameId, std::string("u:a"));
-  mgr.setPrimaryByGameId("u:b");
-  CHECK_EQ(mgr.primary().gameId, std::string("u:b"));
-  mgr.onProcessExited(911);
-  CHECK_EQ(mgr.primary().gameId, std::string("u:a"));
 }
 
 // ---------------------------------------------------------------- launchers
@@ -1351,7 +1340,6 @@ int main()
     testSessionMultiPidDedupe();
     std::printf("ok: session/multi-pid\n");
     testSessionPrimarySwitchAndFocus();
-    testBackgroundSessionAdmission();
     std::printf("ok: session/primary-focus\n");
     // Launchers
     testSteamDiscovery();

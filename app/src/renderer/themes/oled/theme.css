@@ -34,13 +34,13 @@
 }
 
 /* OLED: deepen app chrome, no washed gradients */
-.app {
+[data-shard-component="app"] {
   background: var(--bg-0);
 }
-.app__bar {
+[data-shard-slot="titlebar"] {
   background: linear-gradient(180deg, rgba(12, 12, 12, 0.96), var(--bg-1));
 }
-.capture__hero {
+[data-shard-slot="capture-primary"] {
   background:
     radial-gradient(120% 140% at 100% 0%, rgba(124, 131, 255, 0.08), transparent 55%),
     radial-gradient(90% 120% at 0% 100%, rgba(79, 156, 255, 0.05), transparent 60%),

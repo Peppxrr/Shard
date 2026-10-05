@@ -3,13 +3,15 @@
 // it natively; mkv never enters the library.
 import Database from "better-sqlite3";
 import { app } from "electron";
-import { constants as fsConstants, promises as fs, existsSync } from "node:fs";
+import { constants as fsConstants, promises as fs, watch, type FSWatcher } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import type { ClipRecord } from "../shared/contracts";
-import { ffprobe, ffprobeAsync, makeThumbnail, makeThumbnailAsync, remuxToMp4, editorTimelinePreviews } from "./ffmpeg";
+import type { ClipRecord, StorageSettings } from "../shared/contracts";
+import { ffprobe, ffprobeAsync, makeThumbnail, makeThumbnailAsync, removeEditorMedia } from "./ffmpeg";
+import type { WaveformStorage } from "./waveform-cache";
 import { getSettings } from "./settings";
+import { planStorageCleanup, type StorageClip } from "../shared/storage-policy";
 import {
   copyMp4ToUniquePath,
   sourceFingerprint,
@@ -46,6 +48,11 @@ export class Library extends EventEmitter {
   private db: Database.Database;
   private thumbsDir: string;
   private busyPaths = new Set<string>();
+  private storageDeleting = new Set<string>();
+  private watchers = new Map<string, FSWatcher>();
+  private watchTimer?: NodeJS.Timeout;
+  private refreshTimer?: NodeJS.Timeout;
+  private reconciliation?: Promise<void>;
 
   constructor(userData: string) {
     super();
@@ -70,7 +77,25 @@ export class Library extends EventEmitter {
     if (!columns.has("import_source_path")) this.db.exec("ALTER TABLE clips ADD COLUMN import_source_path TEXT");
     if (!columns.has("import_source_size")) this.db.exec("ALTER TABLE clips ADD COLUMN import_source_size INTEGER");
     if (!columns.has("import_source_mtime")) this.db.exec("ALTER TABLE clips ADD COLUMN import_source_mtime REAL");
+    if (!columns.has("imported_at")) {
+      this.db.transaction(() => {
+        this.db.exec("ALTER TABLE clips ADD COLUMN imported_at INTEGER NOT NULL DEFAULT 0");
+        // Commit column + backfill together so interrupted upgrades stay safe.
+        this.db.prepare("UPDATE clips SET imported_at = ?").run(Date.now());
+      })();
+    }
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS editor_waveforms (
+        clip_id TEXT NOT NULL, stream_index INTEGER NOT NULL,
+        cache_key TEXT NOT NULL, peaks BLOB NOT NULL,
+        PRIMARY KEY (clip_id, stream_index)
+      );
+      CREATE TRIGGER IF NOT EXISTS delete_editor_waveforms AFTER DELETE ON clips BEGIN
+        DELETE FROM editor_waveforms WHERE clip_id = OLD.id;
+      END;
+    `);
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_clips_import_source ON clips(import_source_path, import_source_size, import_source_mtime)");
+    this.on("added", () => { if (this.watchTimer) this.refreshWatchers(); });
   }
 
   tryLockPath(file: string): (() => void) | null {
@@ -97,60 +122,81 @@ export class Library extends EventEmitter {
     return row ? toClipRecord(row) : undefined;
   }
 
+  waveformStorage(clipId: string, streamIndex: number): WaveformStorage {
+    return {
+      get: (key) => {
+        const row = this.db.prepare("SELECT cache_key, peaks FROM editor_waveforms WHERE clip_id = ? AND stream_index = ?")
+          .get(clipId, streamIndex) as { cache_key: string; peaks: Buffer } | undefined;
+        if (row?.cache_key === key) return row.peaks;
+        if (row) this.db.prepare("DELETE FROM editor_waveforms WHERE clip_id = ? AND stream_index = ?").run(clipId, streamIndex);
+        return undefined;
+      },
+      put: (key, data) => {
+        // Atomic SQLite writes; an in-flight decode cannot resurrect a deleted clip.
+        this.db.prepare(`INSERT OR REPLACE INTO editor_waveforms (clip_id, stream_index, cache_key, peaks)
+          SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM clips WHERE id = ?)`)
+          .run(clipId, streamIndex, key, data, clipId);
+      },
+    };
+  }
+
   async delete(id: string): Promise<void> {
     const row = this.get(id);
     if (!row) return;
     const release = this.tryLockPath(row.path);
     if (!release) throw new Error("This clip is being used by another operation");
     try {
-      this.db.prepare("DELETE FROM clips WHERE id = ?").run(id);
-      await editorTimelinePreviews().remove(row.path).catch(() => {});
-      await fs.unlink(row.path).catch(() => {});
-      if (row.thumb) await fs.unlink(row.thumb).catch(() => {});
-    } finally {
-      release();
-    }
-  }
-
-  async deleteForStorage(id: string): Promise<void> {
-    const row = this.get(id);
-    if (!row) return;
-    const release = this.tryLockPath(row.path);
-    if (!release) throw new Error("This clip is being used by another operation");
-    try {
+      await removeEditorMedia(row.path);
       try {
         await fs.unlink(row.path);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
       }
-      this.db.prepare("DELETE FROM clips WHERE id = ?").run(id);
-      await editorTimelinePreviews().remove(row.path).catch(() => {});
-      if (row.thumb) await fs.unlink(row.thumb).catch(() => {});
+      await this.removeRecord(row);
     } finally {
       release();
     }
   }
 
+  async deleteForStorage(id: string, settings: StorageSettings, now: number, approved: boolean): Promise<boolean> {
+    const row = this.get(id);
+    if (!row) return false;
+    const release = this.tryLockPath(row.path);
+    if (!release) throw new Error("This clip is being used by another operation");
+    try {
+      // Re-plan immediately before each unlink. New arrivals, favorites, manual
+      // deletions, and concurrent imports may invalidate the original batch.
+      if (planStorageCleanup(this.storageSnapshot(), settings, now, approved).ids[0] !== id) return false;
+      this.storageDeleting.add(id);
+      await removeEditorMedia(row.path);
+      try { await fs.unlink(row.path); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      }
+      await this.removeRecord(row);
+      return true;
+    } finally { this.storageDeleting.delete(id); release(); }
+  }
+
+  private async removeRecord(row: ClipRecord): Promise<void> {
+    this.db.prepare("DELETE FROM clips WHERE id = ?").run(row.id);
+    await removeEditorMedia(row.path).catch(() => {});
+    if (row.thumb) await fs.unlink(row.thumb).catch(() => {});
+    this.emit("removed", row);
+  }
+
   setProtected(id: string, prot: boolean): void {
+    // Once unlink has been issued, do not report a successful favorite toggle
+    // for a video already being removed. Toggles before this point re-plan it.
+    if (prot && this.storageDeleting.has(id)) throw new Error("This clip is already being removed by cleanup");
     this.db.prepare("UPDATE clips SET protected = ? WHERE id = ?").run(prot ? 1 : 0, id);
   }
 
-  autoDeleteBytes(includeEdited: boolean): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(SUM(size_bytes),0) AS s FROM clips WHERE protected = 0 AND (? = 1 OR source != 'edited')")
-      .get(includeEdited ? 1 : 0) as { s: number };
-    return row.s;
-  }
-
-  oldestUnprotected(includeEdited: boolean): ClipRecord | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM clips
-         WHERE protected = 0 AND (? = 1 OR source != 'edited')
-         ORDER BY created_at ASC LIMIT 1`,
-      )
-      .get(includeEdited ? 1 : 0) as Record<string, unknown> | undefined;
-    return row ? toClipRecord(row) : undefined;
+  storageSnapshot(): StorageClip[] {
+    const rows = this.db.prepare("SELECT * FROM clips").all() as Record<string, unknown>[];
+    return rows.map(row => ({ ...toClipRecord(row), importedAt: Number(row.imported_at) }));
   }
 
   // Import an mp4 already in the library format. `game` tags the clip.
@@ -177,12 +223,13 @@ export class Library extends EventEmitter {
       this.db
         .prepare(
           `INSERT INTO clips (id, path, thumb, game, created_at, duration_ms, size_bytes, width, height, fps, protected, source,
-             import_source_path, import_source_size, import_source_mtime)
+             import_source_path, import_source_size, import_source_mtime, imported_at)
            VALUES (@id, @path, @thumb, @game, @createdAt, @durationMs, @sizeBytes, @width, @height, @fps, @protected, @source,
-             @importSourcePath, @importSourceSize, @importSourceMtime)`
+             @importSourcePath, @importSourceSize, @importSourceMtime, @importedAt)`
         )
         .run({
           ...rec,
+          importedAt: Date.now(),
           importSourcePath: metadata.fingerprint?.path ?? null,
           importSourceSize: metadata.fingerprint?.size ?? null,
           importSourceMtime: metadata.fingerprint?.mtimeMs ?? null,
@@ -192,7 +239,6 @@ export class Library extends EventEmitter {
       throw error;
     }
     this.emit("added", rec);
-    editorTimelinePreviews().warm(file, probe.durationSec);
     return rec;
   }
 
@@ -342,9 +388,10 @@ export class Library extends EventEmitter {
         }
         throw databaseError;
       }
-      await editorTimelinePreviews().remove(oldPath).catch(() => {});
+      await removeEditorMedia(oldPath).catch(() => {});
       const updated = this.get(id);
       if (!updated) throw new Error("The renamed clip could not be loaded");
+      if (this.watchTimer) this.refreshWatchers();
       return updated;
     } finally {
       lockNew?.();
@@ -373,13 +420,17 @@ export class Library extends EventEmitter {
       // A rename temporarily moves the file while keeping its row in SQLite.
       // It remains the surviving duplicate and must never be purged here.
       if (this.busyPaths.has(pathKey(record.path))) return record;
+      let missing = false;
       try {
         const stat = await fs.stat(record.path);
         if (stat.isFile()) return record;
-      } catch {}
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        missing = code === "ENOENT" || code === "ENOTDIR";
+      }
+      if (!missing) continue;
       if (this.busyPaths.has(pathKey(record.path))) return record;
-      this.db.prepare("DELETE FROM clips WHERE id = ?").run(record.id);
-      if (record.thumb) await fs.unlink(record.thumb).catch(() => {});
+      await this.removeRecord(record);
     }
     return undefined;
   }
@@ -404,41 +455,93 @@ export class Library extends EventEmitter {
     };
     this.db
       .prepare(
-        `INSERT INTO clips (id, path, thumb, game, created_at, duration_ms, size_bytes, width, height, fps, protected, source)
-         VALUES (@id, @path, @thumb, @game, @createdAt, @durationMs, @sizeBytes, @width, @height, @fps, @protected, @source)`
+        `INSERT INTO clips (id, path, thumb, game, created_at, duration_ms, size_bytes, width, height, fps, protected, source, imported_at)
+         VALUES (@id, @path, @thumb, @game, @createdAt, @durationMs, @sizeBytes, @width, @height, @fps, @protected, @source, @importedAt)`
       )
-      .run(rec);
+      .run({ ...rec, importedAt: Date.now() });
     this.emit("added", rec);
-    editorTimelinePreviews().warm(file, probe.durationSec);
     return rec;
   }
 
-  // Reconcile DB <-> disk: delete DB rows whose file vanished; delete files
-  // without a DB row (orphans in the clips dir).
-  async reconcile(clipsDir: string): Promise<void> {
-    const rows = this.list();
-    const keep = new Set<string>();
-    for (const r of rows) {
+  // Only remove records confirmed missing. Untracked videos may be a recording
+  // still being finalized, or files the user copied into storage.
+  reconcile(): Promise<void> {
+    if (this.reconciliation) return this.reconciliation;
+    const pending = this.reconcileMissing();
+    this.reconciliation = pending;
+    void pending.finally(() => { this.reconciliation = undefined; }).catch(() => {});
+    return pending;
+  }
+
+  private async reconcileMissing(): Promise<void> {
+    for (const row of this.list()) {
+      if (this.busyPaths.has(pathKey(row.path)) || !(await isMissing(row.path))) continue;
+      const release = this.tryLockPath(row.path);
+      if (!release) continue;
       try {
-        await fs.access(r.path);
-        keep.add(r.path);
-      } catch {
-        await this.delete(r.id);
-      }
-    }
-    try {
-      const entries = await fs.readdir(clipsDir);
-      for (const name of entries) {
-        if (!name.toLowerCase().endsWith(".mp4")) continue;
-        const full = path.join(clipsDir, name);
-        if (!keep.has(full)) await fs.unlink(full).catch(() => {});
-      }
-    } catch {
-      /* dir may not exist yet */
+        // A rename/import may have finished while the first stat was pending.
+        if (this.get(row.id)?.path === row.path && await isMissing(row.path)) await this.removeRecord(row);
+      } finally { release(); }
     }
   }
 
+  startWatching(): void {
+    if (this.watchTimer) return;
+    this.watchTimer = setInterval(() => this.scheduleRefresh(), 10000);
+    this.watchTimer.unref();
+    this.refreshWatchers();
+    this.scheduleRefresh();
+  }
+
+  private refreshWatchers(): void {
+    const directories = new Map(this.list().map(row => [pathKey(path.dirname(row.path)), path.dirname(row.path)]));
+    for (const [key, watcher] of this.watchers) {
+      if (directories.has(key)) continue;
+      watcher.close();
+      this.watchers.delete(key);
+    }
+    for (const [key, directory] of directories) {
+      if (this.watchers.has(key)) continue;
+      try {
+        const watcher = watch(directory, { persistent: false }, (event, file) => {
+          if (event === "rename" && (!file || String(file).toLowerCase().endsWith(".mp4"))) this.scheduleRefresh();
+        });
+        watcher.on("error", () => {
+          watcher.close();
+          this.watchers.delete(key);
+          this.scheduleRefresh();
+        });
+        this.watchers.set(key, watcher);
+      } catch { /* Polling retries unavailable directories and missed events. */ }
+    }
+  }
+
+  private scheduleRefresh(): void {
+    if (!this.watchTimer || this.refreshTimer) return;
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      void this.reconcile().then(() => {
+        if (this.watchTimer) this.refreshWatchers();
+      }).catch(error => console.warn("[library] Refresh failed", error));
+    }, 300);
+    this.refreshTimer.unref();
+  }
+
+  private closeWatchers(): void {
+    clearInterval(this.watchTimer);
+    clearTimeout(this.refreshTimer);
+    this.watchTimer = this.refreshTimer = undefined;
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
+  }
+
+  async stopWatching(): Promise<void> {
+    this.closeWatchers();
+    await this.reconciliation;
+  }
+
   close(): void {
+    this.closeWatchers();
     if (this.db.open) this.db.close();
   }
 }
@@ -464,6 +567,14 @@ export { getSettings };
 function pathKey(file: string): string {
   const resolved = path.resolve(file);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+async function isMissing(file: string): Promise<boolean> {
+  try { await fs.stat(file); return false; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
 }
 
 function errorMessage(error: unknown): string {

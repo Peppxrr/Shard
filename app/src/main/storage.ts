@@ -1,16 +1,15 @@
-// storage.ts — watchdog: after every clip save/import/export and every 5 min,
-// compare DB size against the limit; delete oldest unprotected clips until
-// under 0.9 * limit (hysteresis). Locked files are skipped and retried next
-// cycle. Exports never count toward the limit.
+// Automatic cleanup for ordinary clips. Small overages are cleared oldest-first
+// as they arrive; a large overage waits for the user's explicit confirmation.
 import { EventEmitter } from "node:events";
 import type { Library } from "./library";
 import { getSettings } from "./settings";
+import { planStorageCleanup } from "../shared/storage-policy";
+import type { StorageSettings, StorageStatus } from "../shared/contracts";
 
 export class StorageWatchdog extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
-  private checks = new Set<Promise<number>>();
-  private locked = new Set<string>();
+  private pending?: Promise<number>;
 
   constructor(private library: Library) {
     super();
@@ -19,53 +18,72 @@ export class StorageWatchdog extends EventEmitter {
   start(): void {
     if (this.timer) return;
     this.stopped = false;
-    this.timer = setInterval(() => this.check().catch(() => {}), 5 * 60 * 1000);
+    this.timer = setInterval(() => void this.check(), 5 * 60 * 1000);
+    void this.check();
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    await Promise.allSettled([...this.checks]);
+    await this.pending;
   }
 
-  // Returns the number of clips deleted.
+  // `settings` previews unsaved values; cleanup itself always uses saved ones.
+  status(settings: StorageSettings = getSettings().storage): StorageStatus {
+    return planStorageCleanup(this.library.storageSnapshot(), settings, Date.now()).status;
+  }
+
+  // Save/import/timer triggers share one pass, including its shutdown drain.
   check(): Promise<number> {
     if (this.stopped) return Promise.resolve(0);
-    const check = this.runCheck();
-    this.checks.add(check);
-    void check.then(() => this.checks.delete(check), () => this.checks.delete(check));
-    return check;
+    return this.pending ?? this.enqueue();
   }
 
-  private async runCheck(): Promise<number> {
-    this.locked.clear(); // retry everything locked last cycle
+  // User confirmation for a paused cleanup. `maxBytes` is the amount they saw;
+  // if the library has since grown the overage, nothing is removed.
+  cleanUpNow(maxBytes: number): Promise<number> {
+    if (this.stopped) return Promise.resolve(0);
+    return this.enqueue(maxBytes);
+  }
+
+  private enqueue(approvedBytes?: number): Promise<number> {
+    const pending = (this.pending ?? Promise.resolve(0))
+      .then(() => this.stopped ? 0 : this.runPass(approvedBytes))
+      .catch(error => {
+        console.warn("[storage] Cleanup paused", error);
+        return 0;
+      });
+    this.pending = pending;
+    void pending.finally(() => { if (this.pending === pending) this.pending = undefined; });
+    return pending;
+  }
+
+  private async runPass(approvedBytes?: number): Promise<number> {
     const settings = getSettings().storage;
-    const limitBytes = settings.limitGb * 1024 * 1024 * 1024;
-    if (limitBytes <= 0) return 0;
-
-    let used = this.library.autoDeleteBytes(settings.deleteEdited);
+    const approved = approvedBytes !== undefined;
+    const plan = planStorageCleanup(this.library.storageSnapshot(), settings, Date.now(), approved);
+    const ids = approved && plan.status.reclaimBytes > approvedBytes ? [] : plan.ids;
     let deleted = 0;
-    const target = limitBytes * 0.9;
-
-    while (!this.stopped && used > target) {
-      const oldest = this.library.oldestUnprotected(settings.deleteEdited);
-      if (!oldest) break;
-      if (this.locked.has(oldest.path)) break; // tried this cycle, still locked
-
+    let busy = false;
+    for (const id of ids) {
+      const current = getSettings().storage;
+      if (this.stopped || current.autoCleanup !== settings.autoCleanup || current.limitGb !== settings.limitGb
+        || current.deleteEdited !== settings.deleteEdited) break;
       try {
-        await this.library.deleteForStorage(oldest.id);
-        used = this.library.autoDeleteBytes(settings.deleteEdited);
+        // The library re-plans before each unlink; a changed plan ends the pass.
+        if (!await this.library.deleteForStorage(id, settings, Date.now(), approved)) break;
         deleted++;
       } catch {
-        // Locked (viewer/editor holds it): skip it this cycle, retry next.
-        this.locked.add(oldest.path);
+        // Stop rather than substituting newer files for a busy candidate.
+        busy = true;
         break;
       }
     }
-    if (deleted > 0) {
-      this.emit("deleted", { count: deleted, limitGb: getSettings().storage.limitGb });
-    }
+    if (deleted > 0) this.emit("deleted", { count: deleted });
+    const status = this.status();
+    if (busy && status.reason === "cleaning") status.reason = "busy";
+    this.emit("status", status);
     return deleted;
   }
 }

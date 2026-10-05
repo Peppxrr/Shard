@@ -9,12 +9,18 @@ interface VideoPreviewProps {
   sourcePath: string;
   posterPath?: string;
   playing: boolean;
+  /** Editor timeline gap: show black instead of the media frame. */
+  blank?: boolean;
+  /** Editor status shown over the picture (e.g. export progress). */
+  statusText?: string;
   muted: boolean;
   nativeMuted?: boolean;
   volume: number;
   resultTime: number;
   resultDuration: number;
   className?: string;
+  /** One-row transport with the seek bar inline (editor monitor). */
+  compact?: boolean;
   autoPlay?: boolean;
   loop?: boolean;
   onTogglePlayback: () => void;
@@ -34,12 +40,15 @@ export function VideoPreview({
   sourcePath,
   posterPath,
   playing,
+  blank = false,
+  statusText,
   muted,
   nativeMuted = false,
   volume,
   resultTime,
   resultDuration,
   className,
+  compact = false,
   autoPlay = false,
   loop = false,
   onTogglePlayback,
@@ -153,6 +162,22 @@ export function VideoPreview({
     }
   }, [playing, sourcePath, videoRef]);
 
+  const seekBar = (
+    <input
+      data-shard-slot="player-seek"
+      className="editor-player__seek"
+      type="range"
+      min={0}
+      max={safeDuration}
+      step={0.001}
+      value={Math.min(resultTime, safeDuration)}
+      aria-label="Playback position"
+      disabled={mediaState === "error" || resultDuration <= 0}
+      style={{ "--seek-progress": `${Math.min(100, (resultTime / safeDuration) * 100)}%` } as CSSProperties}
+      onChange={(event) => onSeekResult(Number(event.target.value))}
+    />
+  );
+
   const toggleFullscreen = async () => {
     const stage = playerRef.current;
     if (!stage) return;
@@ -162,7 +187,7 @@ export function VideoPreview({
 
   return (
     <section ref={playerRef} data-shard-component="player" data-shard-state={mediaState} data-playing={playing} data-fullscreen={fullscreen}
-      data-controls-visible={controlsVisible} className={["editor-player", className].filter(Boolean).join(" ")}
+      data-controls-visible={controlsVisible} className={["editor-player", compact && "editor-player--compact", className].filter(Boolean).join(" ")}
       aria-label="Video preview" onPointerMove={revealControls} onPointerDownCapture={revealControls}>
       <div data-shard-slot="player-stage" className="editor-player__stage" onClick={onTogglePlayback}
         onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }}>
@@ -170,6 +195,7 @@ export function VideoPreview({
           data-shard-slot="player-video"
           ref={videoRef}
           className="editor-player__video"
+          data-blank={blank}
           src={mediaFileUrl(sourcePath)}
           poster={posterPath ? mediaFileUrl(posterPath) : undefined}
           preload="auto"
@@ -205,7 +231,7 @@ export function VideoPreview({
           </span>
         )}
         {mediaState === "loading" && <span data-shard-slot="player-loading" className="editor-player__loading" role="status"><span className="spin" aria-hidden="true" />Loading preview…</span>}
-        {reportStatus && <span data-shard-slot="player-status" className="editor-player__report-status" role="status">{reportStatus}</span>}
+        {(statusText || reportStatus) && <span data-shard-slot="player-status" className="editor-player__report-status" role="status">{statusText || reportStatus}</span>}
       </div>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
@@ -218,19 +244,7 @@ export function VideoPreview({
       <div ref={controlsRef} data-shard-slot="player-controls" className="editor-player__controls"
         onClick={(event) => event.stopPropagation()}
         onFocusCapture={revealControls} onBlurCapture={revealControls}>
-        <input
-          data-shard-slot="player-seek"
-          className="editor-player__seek"
-          type="range"
-          min={0}
-          max={safeDuration}
-          step={0.001}
-          value={Math.min(resultTime, safeDuration)}
-          aria-label="Playback position"
-          disabled={mediaState === "error" || resultDuration <= 0}
-          style={{ "--seek-progress": `${Math.min(100, (resultTime / safeDuration) * 100)}%` } as CSSProperties}
-          onChange={(event) => onSeekResult(Number(event.target.value))}
-        />
+        {!compact && seekBar}
         <div data-shard-slot="player-transport" className="editor-player__controls-row">
           <IconButton label={playing ? "Pause (Space)" : "Play (Space)"} disabled={mediaState === "error"} onClick={onTogglePlayback}>
             <Icon name={playing ? "pause" : "play"} size={18} />
@@ -238,7 +252,7 @@ export function VideoPreview({
           <span data-shard-slot="player-time" className="editor-player__time num">
             {formatEditorTime(resultTime, true)} <span>/</span> {formatEditorTime(resultDuration)}
           </span>
-          <span className="spacer" />
+          {compact ? seekBar : <span className="spacer" />}
           <IconButton label={muted ? "Unmute" : "Mute"} active={muted} onClick={() => onMutedChange(!muted)}>
             <Icon name={muted || volume === 0 ? "volumeOff" : "volume"} size={18} />
           </IconButton>

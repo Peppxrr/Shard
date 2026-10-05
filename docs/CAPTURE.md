@@ -65,6 +65,10 @@ A game session may contain multiple related PIDs, including helpers. Session pro
 
 Focus-driven primary selection lives in `GameSystem::applyFocusPrimary`. `GameSystem::updateCaptureSubject` should only propagate the already-selected primary into `SourceManager`. Do not introduce a second competing primary-selection algorithm inside capture code.
 
+Swapping between running games requires the other game to keep focus for 5 seconds (`kFocusDebounceMs`), including a newly launched game that starts focused. The first detected game becomes primary immediately, and when the primary closes the newest remaining session takes over immediately; with no sessions left, auto mode returns to the desktop and game-only mode to no subject. `SourceManager` retains GameSystem's latest primary request across capture-mode changes, so leaving screen mode resumes a still-running game.
+
+Swaps retarget the existing hook/WGC sources in place; they never restart outputs. A title-only change on the subject's current HWND (FPS counters, level names) updates the subject without retargeting, because a new descriptor would restart both the hook and the WGC session. Returning to a game whose process already contains the graphics hook uses OBS's existing-hook restart; the patched initialization timeout applies only to an attempt that launched the helper for that same target, and a capturing target clears its helper-attempt tracking.
+
 Focusing a normal non-game window does not by itself end the game session or force the primary away from the running game. Sessions are tied to process/session lifetime rather than only to foreground focus.
 
 ## Recovery/watchdog
@@ -99,6 +103,30 @@ Replay and recording use encoded OBS outputs. Wire encoders directly to the glob
 
 Multi-source audio depends on separate OBS mixes and one audio encoder per used mix. The replay output must retain `OBS_OUTPUT_MULTI_TRACK`; otherwise only the first track survives.
 
+## Per-application audio isolation
+
+Mix 0 is the master; configured audio row `i` uses mix `min(i + 1, 5)`. An App audio row (`kind: "process"`) with `excludeFromDesktop: true` is an isolated app, and its audio must exist on exactly one row mix while mix 0 still contains it once. Rows without the flag, including every row saved before the flag existed, keep the original OBS `wasapi_process_output_capture` window-based capture, and the app is also heard in Desktop audio.
+
+Never build the Desktop track by subtracting an app capture from an endpoint capture. Independent streams differ in buffering, clocks, resampling and gain, so cancellation leaves artifacts. `PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` is also unsuitable: it excludes one tree from a system-wide capture that is not tied to an endpoint, so it also contains VoiceMeeter's own re-rendered mix and cannot exclude a second app.
+
+When at least one enabled isolated app exists, `audio_isolation_capture.*` owns the isolated rows and every enabled Desktop (`output`) row:
+
+- Shard registers `shard_process_loopback_capture`, a PID-addressed process-loopback source (`PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`, Windows 10 19041+, the same gate as OBS app capture). It needs no window, so tray-hidden apps and Chromium/Electron audio helper processes work.
+- An isolated row captures every process tree rooted at a process with the row's executable (all instances; restarts and PID changes are followed by executable and creation time).
+- A Desktop row enumerates shared-mode sessions on its endpoint (`IAudioSessionManager2`/`IAudioSessionControl2`) and captures the tree of each session owner unless the owner or an ancestor is an isolated executable. A session already inside another captured tree is not captured twice, and a process with sessions on several filtered endpoints goes to the first row.
+- OBS mixes the per-tree sources onto mix 0 and the row mix. One controller thread reconciles about once per second and immediately on `IAudioSessionNotification::OnSessionCreated`. Sources are added/removed in the scene only; encoders, the ring and recordings are not restarted by application or session churn.
+
+The routing decisions live in `audio_isolation.*` and are covered by `shard_audio_isolation_tests`.
+
+Known limits, reported on stderr with the `[audio-isolation]` prefix:
+
+- Process loopback has no single-process mode. A captured tree that also contains another track's root, such as a launcher with an audio session that started an isolated game, makes that subtree audible on both tracks. This is logged as `event=isolation_overlap state=degraded`.
+- Isolating an executable also isolates the processes it launches.
+- The Windows system-sounds session has no owning process tree and is absent from filtered Desktop audio (`event=system_sounds`).
+- Process loopback is not endpoint-specific. A Desktop process that renders to several endpoints contributes all of its audio. Audio another router (for example VoiceMeeter's engine) re-renders as its own process cannot be split by app.
+- An unavailable endpoint leaves its Desktop track silent until it returns (`event=endpoint_state`). Isolated apps keep recording.
+- If process loopback or session enumeration fails persistently (`event=capture_failed`, `session_enumeration_failed`), every Desktop row falls back to whole-endpoint `wasapi_output_capture` so no audio is lost. This is logged as `event=isolation_state state=degraded`, isolated apps are then duplicated in Desktop audio until the audio configuration changes, and the state is not silently hidden. On builds without process loopback, the rows keep their original routes and `state=unavailable` is logged.
+
 ## Replay ring
 
 The RAM ring retains encoded packets and purges on both time and byte caps while preserving decodable keyframe boundaries. It intentionally retains extra decode preroll beyond the user-visible history so an exact requested interval still has a preceding keyframe.
@@ -109,7 +137,9 @@ On restart, the save worker's run flag must be re-armed before the save thread s
 
 Game-only startup waits for a capture subject instead of briefly buffering empty video. Once a ring starts, initial source acquisition and later target/window transitions share the 15-second inactivity grace; a skipped readiness signal must not immediately discard newly buffered packets.
 
-Stable source geometry uses live scene transforms when its aspect ratio and effective encoded dimensions/FPS match the current video path. For example, a 2560x1440 game with custom 1920x1080 output can fill the existing 1920x1080 canvas without resetting OBS, clearing replay history, or splitting recording. Native output-size, aspect-ratio or FPS changes still require a video reset and a new recording segment. The 1.5-second source-size stability gate remains in place. `capture-geometry` logs distinguish preserved history from a necessary format boundary, while `replay-ring` logs a sustained inactivity stop. The displayed counter reflects retained encoded packets, not an independent timer.
+Stable source geometry uses live scene transforms when its aspect ratio and effective encoded dimensions/FPS match the current video path. For example, a 2560x1440 game with custom 1920x1080 output can fill the existing 1920x1080 canvas without resetting OBS, clearing replay history, or splitting recording. Native output-size, aspect-ratio or FPS changes of the subject that owns the canvas still require a video reset and a new recording segment. The 1.5-second source-size stability gate remains in place and restarts with each subject. `capture-geometry` logs distinguish preserved history from a necessary format boundary, while `replay-ring` logs a sustained inactivity stop. The displayed counter reflects retained encoded packets, not an independent timer.
+
+The canvas belongs to the subject it was fitted for (`CaptureCanvasOwner`). After a swap (game to game, desktop to game, game to desktop) the new subject is fitted inside the existing canvas, letterboxed if its aspect differs, and the ring keeps the previous subject's history (`replay_preserved=true reason=subject_switch`). A different subject takes over the canvas only after the ring has been idle — for example a game started after game-only mode's 15-second inactivity stop — or after a full video-pipeline restart. Auto mode therefore keeps the desktop canvas for games that appear while it is buffering.
 
 Clip snapshots keep a preceding video keyframe as decode-only negative-timestamp preroll, normalize packet timestamps in their stream timebases, and mux with an MP4 edit list so presentation still begins at the requested interval.
 

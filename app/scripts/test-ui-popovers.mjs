@@ -2,15 +2,18 @@
 // containing blocks or native top-layer dismissal/focus behavior.
 import { build } from "vite";
 import react from "@vitejs/plugin-react";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import electron from "electron";
 
 const app = fileURLToPath(new URL("../", import.meta.url));
-const fixture = path.resolve(app, "../tmp/popover-tests");
-await mkdir(fixture, { recursive: true });
+const tempRoot = path.resolve(app, "../tmp");
+await mkdir(tempRoot, { recursive: true });
+const fixture = await mkdtemp(path.join(tempRoot, "popover-tests-"));
+let passed = false;
+try {
 await writeFile(path.join(fixture, "index.html"), '<div id="root"></div><script type="module" src="/entry.tsx"></script>');
 await writeFile(path.join(fixture, "entry.tsx"), `
 import React from 'react';
@@ -45,3 +48,8 @@ const code = await new Promise((resolve, reject) => {
   child.once("exit", resolve);
 });
 process.exitCode = code ?? 1;
+passed = process.exitCode === 0;
+} finally {
+  if (passed) await rm(fixture, { recursive: true, force: true });
+  else console.error(`Popover fixture kept for diagnostics: ${fixture}`);
+}

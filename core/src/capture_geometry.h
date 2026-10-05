@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 
 namespace shard {
 
@@ -47,6 +48,28 @@ public:
 private:
   CaptureSize candidate_;
   uint64_t since_ = 0;
+};
+
+// Fitting the canvas to a new size resets OBS video, which restarts the
+// encoders and discards the replay ring. The canvas belongs to the capture
+// subject it was fitted for, so that subject's own format changes still fit
+// natively. Another subject (game swap, desktop <-> game) is scaled inside the
+// existing canvas while the ring retains history, and takes the canvas only
+// once the ring has been idle (nothing left to lose).
+class CaptureCanvasOwner {
+public:
+  // Call on every geometry tick; returns whether `subject` owns the canvas.
+  bool update(const std::string& subject, bool ringActive)
+  {
+    if (!ringActive) owner_.clear();
+    if (owner_.empty()) owner_ = subject;
+    return !subject.empty() && subject == owner_;
+  }
+  const std::string& owner() const { return owner_; }
+  // The canvas was refit; the next observed subject owns it.
+  void reset() { owner_.clear(); }
+private:
+  std::string owner_;
 };
 
 } // namespace shard

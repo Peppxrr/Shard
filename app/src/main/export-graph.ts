@@ -1,10 +1,11 @@
-import type { AudioTrackInfo, EditorExportProject } from "../shared/contracts";
+import type { AudioTrackInfo, EditorExportProject, EditorTimelineClip } from "../shared/contracts";
 
-export interface ExportSegment {
-  start: number;
-  end: number;
-  id?: string;
-}
+// Clip edges closer than this are float noise from the renderer, not overlap.
+const OVERLAP_TOLERANCE_SEC = 0.0005;
+// Gaps shorter than this are not worth a filler input.
+const MIN_GAP_SEC = 0.001;
+const MIN_CLIP_SEC = 0.01;
+const SOURCE_END_SLACK_SEC = 0.05;
 
 export interface ExportAudioTrack {
   streamIndex: number;
@@ -13,7 +14,7 @@ export interface ExportAudioTrack {
   included: boolean;
   muted: boolean;
   volume: number;
-  excludedSegmentIds?: string[];
+  clips: EditorTimelineClip[];
 }
 
 export interface ExportAudioOutput {
@@ -27,9 +28,12 @@ export interface ExportGraph {
   audioOutputs: ExportAudioOutput[];
 }
 
+type TimelinePiece = { kind: "gap"; duration: number } | { kind: "clip"; clip: EditorTimelineClip };
+
 export function resolveExportAudioTracks(
   available: readonly AudioTrackInfo[],
   requested: EditorExportProject["audioTracks"],
+  sourceDuration: number,
 ): ExportAudioTrack[] {
   if (!Array.isArray(requested)) throw new Error("The export audio selection is invalid");
 
@@ -54,18 +58,69 @@ export function resolveExportAudioTracks(
     if (seen.has(track.streamIndex)) throw new Error(`Audio stream ${track.streamIndex} was selected more than once`);
     seen.add(track.streamIndex);
 
+    const name = String(track.name || source.name || `Audio ${source.audioIndex + 1}`).slice(0, 128);
     return {
       streamIndex: source.streamIndex,
       audioIndex: source.audioIndex,
-      name: String(track.name || source.name || `Audio ${source.audioIndex + 1}`).slice(0, 128),
+      name,
       included: true,
       muted: Boolean(track.muted),
       volume: clamp(track.volume, 0, 2),
-      excludedSegmentIds: Array.isArray(track.excludedSegmentIds)
-        ? track.excludedSegmentIds.filter((id): id is string => typeof id === "string")
-        : [],
+      clips: validateTimelineClips(track.clips, sourceDuration, `Audio track "${name}"`),
     };
   });
+}
+
+// Returns the clips sorted by timeline position with source ends clamped to
+// the source duration. Overlap within float tolerance is trimmed off the
+// earlier clip; real overlap is rejected.
+export function validateTimelineClips(
+  clips: readonly EditorTimelineClip[],
+  sourceDuration: number,
+  label: string,
+): EditorTimelineClip[] {
+  if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) throw new Error("The source clip has an invalid duration");
+  if (!Array.isArray(clips)) throw new Error(`${label} clips are invalid`);
+
+  const normalized = clips.map((clip, index) => {
+    const timelineStart = Number(clip?.timelineStart);
+    const sourceStart = Number(clip?.sourceStart);
+    const sourceEnd = Number(clip?.sourceEnd);
+    if (!Number.isFinite(timelineStart) || !Number.isFinite(sourceStart) || !Number.isFinite(sourceEnd)) {
+      throw new Error(`${label} clip ${index + 1} has invalid timestamps`);
+    }
+    if (timelineStart < 0) throw new Error(`${label} clip ${index + 1} starts before the timeline`);
+    if (sourceStart < 0 || sourceEnd > sourceDuration + SOURCE_END_SLACK_SEC) {
+      throw new Error(`${label} clip ${index + 1} is outside the source clip`);
+    }
+    const end = Math.min(sourceEnd, sourceDuration);
+    if (end - sourceStart < MIN_CLIP_SEC) throw new Error(`${label} clip ${index + 1} is too short`);
+    return { timelineStart, sourceStart, sourceEnd: end };
+  }).sort((a, b) => a.timelineStart - b.timelineStart);
+
+  for (let index = 1; index < normalized.length; index++) {
+    const previous = normalized[index - 1];
+    const overlap = clipEnd(previous) - normalized[index].timelineStart;
+    if (overlap > OVERLAP_TOLERANCE_SEC) throw new Error(`${label} clips overlap on the timeline`);
+    if (overlap > 0) previous.sourceEnd -= overlap;
+  }
+  return normalized;
+}
+
+// Output length: the latest clip end across the video track and every
+// included audio track. Gaps before it render as black/silence.
+export function exportTimelineDuration(
+  videoClips: readonly EditorTimelineClip[],
+  audioTracks: readonly { included: boolean; clips: readonly EditorTimelineClip[] }[],
+): number {
+  let duration = 0;
+  for (const clip of videoClips) duration = Math.max(duration, clipEnd(clip));
+  for (const track of audioTracks) {
+    if (!track.included) continue;
+    for (const clip of track.clips) duration = Math.max(duration, clipEnd(clip));
+  }
+  if (!(duration > 0)) throw new Error("The edited timeline has no clips to export");
+  return duration;
 }
 
 // Exported MP4s are delivery files, not editing containers. Collapse every
@@ -76,50 +131,54 @@ export function buildExportAudioOutputs(tracks: readonly ExportAudioTrack[]): Ex
 }
 
 export function buildExportGraph(
-  segments: ExportSegment[],
-  tracks: ExportAudioTrack[],
+  videoClips: readonly EditorTimelineClip[],
+  tracks: readonly ExportAudioTrack[],
   width: number,
   height: number,
+  fps: number,
 ): ExportGraph {
-  if (!segments.length) throw new Error("The edited timeline has no retained segments");
   if (!Number.isInteger(width) || width < 2 || !Number.isInteger(height) || height < 2) {
     throw new Error("The export resolution is invalid");
   }
+  if (!Number.isFinite(fps) || fps <= 0) throw new Error("The export frame rate is invalid");
 
   const audioTracks = tracks.filter((track) => track.included);
+  const duration = exportTimelineDuration(videoClips, audioTracks);
   const audioOutputs = buildExportAudioOutputs(audioTracks);
   const filters: string[] = [];
-  const concatInputs: string[] = [];
-  segments.forEach((segment, segmentIndex) => {
-    const start = ffmpegNumber(segment.start);
-    const end = ffmpegNumber(segment.end);
-    const dur = ffmpegNumber(segment.end - segment.start);
-    filters.push(`[0:v:0]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${segmentIndex}]`);
-    concatInputs.push(`[v${segmentIndex}]`);
 
-    audioTracks.forEach((track, audioIndex) => {
-      const volume = track.muted ? 0 : clamp(track.volume, 0, 2);
-      const isExcluded = track.excludedSegmentIds?.includes(segment.id ?? String(segmentIndex)) ?? false;
-      if (isExcluded) {
-        // Generate silence of same duration for this track's segment (keeps overall duration aligned)
-        filters.push(`anullsrc=r=48000:cl=stereo:d=${dur},aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${ffmpegNumber(volume)}[a${audioIndex}_${segmentIndex}]`);
-      } else {
-        const sel = track.streamIndex;
-        filters.push(
-          `[0:${sel}]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS,volume=${ffmpegNumber(volume)}[a${audioIndex}_${segmentIndex}]`,
-        );
-      }
-      concatInputs.push(`[a${audioIndex}_${segmentIndex}]`);
-    });
+  // The dimensions already follow the source ratio. Scale each piece directly
+  // to the codec-aligned size; padding would bake rounding slivers into the file.
+  const size = `${width}x${height}`;
+  const videoPieces = timelinePieces(videoClips, duration);
+  videoPieces.forEach((piece, index) => {
+    filters.push(piece.kind === "gap"
+      ? `color=c=black:s=${size}:r=${ffmpegNumber(fps)}:d=${ffmpegNumber(piece.duration)},setsar=1[vp${index}]`
+      : `[0:v:0]trim=start=${ffmpegNumber(piece.clip.sourceStart)}:end=${ffmpegNumber(piece.clip.sourceEnd)},` +
+        `setpts=PTS-STARTPTS,scale=${width}:${height},setsar=1[vp${index}]`);
   });
+  filters.push(`${videoPieces.map((_, index) => `[vp${index}]`).join("")}concat=n=${videoPieces.length}:v=1:a=0[v]`);
 
-  const concatAudioOutputs = audioTracks.map((_, index) => `[act${index}]`).join("");
-  filters.push(
-    `${concatInputs.join("")}concat=n=${segments.length}:v=1:a=${audioTracks.length}[vc]${concatAudioOutputs}`,
-  );
-  audioTracks.forEach((_, index) => {
+  const audioFormat = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
+  audioTracks.forEach((track, audioIndex) => {
+    const pieces = timelinePieces(track.clips, duration);
+    pieces.forEach((piece, index) => {
+      const label = `[a${audioIndex}_${index}]`;
+      if (piece.kind === "gap") {
+        filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${ffmpegNumber(piece.duration)},${audioFormat}${label}`);
+        return;
+      }
+      const { sourceStart, sourceEnd } = piece.clip;
+      // Pad short source reads so later pieces keep their timeline position.
+      filters.push(
+        `[0:${track.streamIndex}]atrim=start=${ffmpegNumber(sourceStart)}:end=${ffmpegNumber(sourceEnd)},` +
+        `asetpts=PTS-STARTPTS,${audioFormat},apad=whole_dur=${ffmpegNumber(sourceEnd - sourceStart)}${label}`,
+      );
+    });
+    const volume = track.muted ? 0 : clamp(track.volume, 0, 2);
     filters.push(
-      `[act${index}]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[am${index}]`,
+      `${pieces.map((_, index) => `[a${audioIndex}_${index}]`).join("")}concat=n=${pieces.length}:v=0:a=1,` +
+      `volume=${ffmpegNumber(volume)}[am${audioIndex}]`,
     );
   });
   if (audioTracks.length === 1) {
@@ -131,11 +190,6 @@ export function buildExportGraph(
       "alimiter=limit=0.95[amix]",
     );
   }
-  filters.push(
-    // The dimensions already follow the source ratio. Scale directly to the
-    // codec-aligned size; padding would bake rounding slivers into the file.
-    `[vc]scale=${width}:${height},setsar=1[v]`,
-  );
 
   const maps = ["-map", "[v]"];
   if (audioOutputs.length) maps.push("-map", "[amix]");
@@ -144,26 +198,23 @@ export function buildExportGraph(
   return { filter: filters.join(";"), maps, audioOutputs };
 }
 
-export function validateExportSegments(segments: ExportSegment[], duration: number): ExportSegment[] {
-  if (!Number.isFinite(duration) || duration <= 0) throw new Error("The source clip has an invalid duration");
-  if (!Array.isArray(segments) || !segments.length) throw new Error("No retained timeline segments were provided");
+// Splits one track into consecutive clip and filler pieces covering 0..duration.
+function timelinePieces(clips: readonly EditorTimelineClip[], duration: number): TimelinePiece[] {
+  const pieces: TimelinePiece[] = [];
+  let cursor = 0;
+  for (const clip of clips) {
+    const gap = clip.timelineStart - cursor;
+    if (gap >= MIN_GAP_SEC) pieces.push({ kind: "gap", duration: gap });
+    pieces.push({ kind: "clip", clip });
+    cursor = clipEnd(clip);
+  }
+  const tail = duration - cursor;
+  if (tail >= MIN_GAP_SEC) pieces.push({ kind: "gap", duration: tail });
+  return pieces;
+}
 
-  let previousEnd = -1;
-  return segments.map((segment, index) => {
-    const start = Number(segment.start);
-    const end = Number(segment.end);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) {
-      throw new Error(`Timeline segment ${index + 1} has invalid timestamps`);
-    }
-    if (start < 0 || end > duration + 0.05 || end - start < 0.01) {
-      throw new Error(`Timeline segment ${index + 1} is outside the source clip`);
-    }
-    if (start < previousEnd - 0.000001) {
-      throw new Error("Timeline segments must be ordered and non-overlapping");
-    }
-    previousEnd = end;
-    return { start, end: Math.min(end, duration), id: segment.id };
-  });
+function clipEnd(clip: EditorTimelineClip): number {
+  return clip.timelineStart + clip.sourceEnd - clip.sourceStart;
 }
 
 function ffmpegNumber(value: number): string {

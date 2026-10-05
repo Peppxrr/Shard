@@ -1,9 +1,11 @@
 import { useState } from "react";
 import type { ExportEncoderInfo, MonitorInfo, Settings } from "../../shared/contracts";
-import { Button, Card, Confirm, Icon, ShardSelect } from "./ui";
+import { largeVideoBytes } from "../../shared/storage-policy";
+import { Button, Card, Confirm, Icon, ShardSelect, Toggle } from "./ui";
 import { ChoiceCards, NumberControl, SettingRow, SwitchRow } from "./SettingControls";
 import { UpdatesSettings } from "./UpdatesSettings";
 import { MedalImport } from "./MedalImport";
+import { StorageSummary } from "./StorageSummary";
 
 type Props = { settings: Settings; onChange: (settings: Settings) => void };
 
@@ -39,10 +41,12 @@ export function ExportSettingsPanel({ settings, onChange, encoders }: Props & { 
   </Card></div>;
 }
 
-export function StorageSettingsPanel({ settings, onChange, defaultFolder }: Props & { defaultFolder: string }) {
+export function StorageSettingsPanel({ settings, savedStorage, onChange, defaultFolder }: Props & { savedStorage: Settings["storage"]; defaultFolder: string }) {
   const [error, setError] = useState("");
   const patch = (next: Partial<Settings["storage"]>) => onChange({ ...settings, storage: { ...settings.storage, ...next } });
-  const folder = settings.storage.clipsDir.trim();
+  const storage = settings.storage;
+  const folder = storage.clipsDir.trim();
+  const unsaved = storage.autoCleanup !== savedStorage.autoCleanup || storage.limitGb !== savedStorage.limitGb || storage.deleteEdited !== savedStorage.deleteEdited;
   const browse = async () => {
     try { setError(""); const next = await window.shard.pickClipsFolder(folder); if (next !== null) patch({ clipsDir: next }); }
     catch { setError("Could not open the folder picker. Please try again."); }
@@ -50,10 +54,14 @@ export function StorageSettingsPanel({ settings, onChange, defaultFolder }: Prop
   return <div data-shard-slot="settings-section-layout" className="settings-sections"><Card title="Clip location" sub="Choose where new clips, recordings, and exports are saved.">
     <div className="folder-choice"><span className="folder-choice__icon"><Icon name="folder" size={22} /></span><div className="folder-choice__copy"><strong>{folder ? "Custom folder" : "Default folder"}</strong><span title={folder || defaultFolder}>{folder || defaultFolder || "App data folder"}</span></div><Button size="sm" onClick={() => void browse()}>Change folder</Button>{folder && <Button size="sm" variant="ghost" onClick={() => patch({ clipsDir: "" })}>Reset</Button>}</div>
     <p className="field__hint">Changing this folder keeps existing clips in your library.</p>{error && <p role="alert" className="form-error">{error}</p>}
-  </Card><Card title="Automatic cleanup" sub="Manage storage without removing your favorites.">
-    <SettingRow title="Storage limit" description="Oldest unprotected clips are deleted when this limit is reached."><NumberControl label="Storage limit" value={settings.storage.limitGb} min={1} max={1000} unit="GB" onChange={limitGb => patch({ limitGb })} /></SettingRow>
-    <SwitchRow title="Include edited clips" description="Allow cleanup to remove unprotected editor exports too." checked={settings.storage.deleteEdited} onChange={deleteEdited => patch({ deleteEdited })} />
-    <p className="settings-note"><Icon name="star" size={14} />Favorites are always kept and do not count toward this limit.</p>
+  </Card><Card title="Automatic cleanup" sub="Delete your oldest clips when they go over a size limit."
+    actions={<label data-shard-slot="storage-cleanup-toggle" className="card__switch"><span className="sr">Automatic cleanup</span><Toggle checked={storage.autoCleanup} onChange={autoCleanup => patch({ autoCleanup })} /></label>}>
+    <StorageSummary draft={unsaved ? storage : undefined} />
+    {storage.autoCleanup && <>
+      <SettingRow title="Keep clips under" description="The oldest clips are deleted first."><NumberControl label="Keep clips under" value={storage.limitGb} min={1} max={1000} unit="GB" onChange={limitGb => patch({ limitGb })} /></SettingRow>
+      <SwitchRow title="Include edited clips" description="Editor exports can be deleted too." checked={storage.deleteEdited} onChange={deleteEdited => patch({ deleteEdited })} />
+      <p className="settings-note"><Icon name="star" size={14} />Favorites, recordings, and videos over {Number((largeVideoBytes(storage) / 1024 ** 3).toFixed(1))} GB are never deleted. New clips are kept for at least a day.</p>
+    </>}
   </Card><section data-shard-slot="storage-import" data-shard-span="full" aria-label="Import"><Card title="Import" sub="Import from Medal into your Shard library.">
     <MedalImport />
   </Card></section></div>;

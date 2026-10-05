@@ -2,10 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { ClipRecord, CoreState, ExportProgress, Settings } from "../shared/contracts";
 import { DEFAULT_SETTINGS } from "../shared/contracts";
 import { CapturePage } from "./components/CapturePage";
-import { LibraryPage } from "./components/LibraryPage";
+import { fmtSize, LibraryPage } from "./components/LibraryPage";
 import { GamesPage } from "./components/GamesPage";
 import { getSavedSettingsSection, SettingsPage, type SettingsSection } from "./components/SettingsPage";
 import { Editor } from "./components/Editor";
+import { useStorageStatus } from "./components/StorageSummary";
 import { Button, Icon, Modal, Spinner, Toasts, type ToastItem } from "./components/ui";
 import { setTheme } from "./themeManager";
 
@@ -22,7 +23,9 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
 
 interface Subject { kind: "monitor" | "game" | "none"; name: string | null }
 
-function WindowControls({ floating = false }: { floating?: boolean }) {
+// One overlay above pages, dialogs, and the editor so the window can always be
+// minimized, maximized, or closed. Glyph sizes equalize the Feather outlines.
+function WindowControls() {
   const supported = window.shard.windowControlsSupported;
   const [maximized, setMaximized] = useState(false);
 
@@ -34,19 +37,19 @@ function WindowControls({ floating = false }: { floating?: boolean }) {
 
   if (!supported) return null;
   return (
-    <div className={`window-controls${floating ? " window-controls--floating" : ""}`}>
+    <div data-shard-slot="window-controls" className="window-controls">
       <button className="window-control" type="button" aria-label="Minimize Shard" title="Minimize"
         onClick={() => void window.shard.minimizeWindow()}>
-        <Icon name="minimize" size={13} />
+        <Icon name="minimize" size={16} />
       </button>
       <button className="window-control" type="button" aria-label={maximized ? "Restore Shard" : "Maximize Shard"}
         title={maximized ? "Restore" : "Maximize"}
         onClick={() => void window.shard.toggleMaximizeWindow().then(setMaximized)}>
-        <Icon name={maximized ? "restore" : "maximizeWindow"} size={13} />
+        <Icon name={maximized ? "restore" : "maximizeWindow"} size={maximized ? 12 : 13} />
       </button>
       <button className="window-control window-control--close" type="button" aria-label="Close Shard" title="Close"
         onClick={() => void window.shard.closeWindow()}>
-        <Icon name="x" size={14} />
+        <Icon name="x" size={19} />
       </button>
     </div>
   );
@@ -96,6 +99,9 @@ export function App() {
   const [clips, setClips] = useState<ClipRecord[]>([]);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [editingClip, setEditingClip] = useState<ClipRecord | null>(null);
+  // Path of a finished export to show in the library viewer once listed.
+  const [libraryOpenPath, setLibraryOpenPath] = useState<string | null>(null);
+  const clearLibraryOpenPath = useCallback(() => setLibraryOpenPath(null), []);
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
   const [booting, setBooting] = useState(true);
   const [saved, setSaved] = useState(false);
@@ -123,7 +129,6 @@ export function App() {
 
     unsubs.push(
       window.shard.onCoreEvent((type, params) => {
-        if (type === "clip.saved" || type === "recording.state") window.shard.listClips().then(setClips);
         if (type === "clip.saved") {
           // Play clip sound instantly in renderer (low latency, same tick as overlay)
           try {
@@ -273,12 +278,7 @@ export function App() {
     if (pendingTab) { navigateTab(pendingTab); setPendingTab(null); }
   };
 
-  if (booting) return <div className="boot app--frameless"><WindowControls floating /><Spinner size={22} /><span>Starting…</span></div>;
-
-  const usedBytes = clips.reduce(
-    (acc, clip) => acc + (clip.protected === 0 && (settings.storage.deleteEdited || clip.source !== "edited") ? clip.sizeBytes : 0),
-    0,
-  );
+  if (booting) return <div className="boot app--frameless"><WindowControls /><Spinner size={22} /><span>Starting…</span></div>;
 
   return (
     <div data-shard-component="app" className={`app${window.shard.windowControlsSupported ? " app--frameless" : ""}`}>
@@ -296,7 +296,6 @@ export function App() {
             {saved && !isDirty ? "Saved" : "Save changes"}
           </Button>
         )}
-        <WindowControls />
       </header>
 
       <main data-shard-slot="content" className="app__main" ref={mainRef}
@@ -316,13 +315,13 @@ export function App() {
             pendingScrollRestore.current?.key === currentScrollKey.current) pendingScrollRestore.current = null;
         }}>
         {tab === "capture" && <CapturePage settings={settings} clips={clips} />}
-        {tab === "library" && <LibraryPage clips={clips} onOpenEditor={setEditingClip} />}
+        {tab === "library" && <LibraryPage clips={clips} onOpenEditor={setEditingClip} openPath={libraryOpenPath} onOpenedPath={clearLibraryOpenPath} />}
         {tab === "games" && <GamesPage settings={settings} onChange={(next) => {
           setSettings(next);
           setSavedSettings(next);
           void window.shard.setSettings(next).catch(() => {});
         }} />}
-        {tab === "settings" && <SettingsPage settings={settings} onChange={setSettings} activeSection={settingsSection}
+        {tab === "settings" && <SettingsPage settings={settings} savedSettings={savedSettings} onChange={setSettings} activeSection={settingsSection}
           onSectionChange={requestSettingsSection} updatesRequest={updatesRequest}
           onUpdatesRequestHandled={handleUpdatesRequestHandled}
           onCommit={(next) => {
@@ -343,7 +342,7 @@ export function App() {
             icon={<Icon name="terminal" size={14} />} onClick={() => void window.shard.toggleDevConsole()}>
             Developer console
           </Button>}
-          <StorageMeter usedBytes={usedBytes} limitGb={settings.storage.limitGb} />
+          <StorageMeter />
         </div>
       </footer>
 
@@ -351,6 +350,11 @@ export function App() {
         <Editor
           clip={editingClip}
           onClose={() => setEditingClip(null)}
+          onOpenExport={(path) => {
+            setEditingClip(null);
+            setLibraryOpenPath(path);
+            requestTab("library");
+          }}
           onExport={() => setExportProgress({ clipId: editingClip.id, phase: "queued", percent: 0 })}
         />
       )}
@@ -379,6 +383,7 @@ export function App() {
         </Modal>
       )}
 
+      <WindowControls />
     </div>
   );
 }
@@ -421,15 +426,16 @@ function LiveStatus() {
   );
 }
 
-function StorageMeter({ usedBytes, limitGb }: { usedBytes: number; limitGb: number }) {
-  const limitBytes = limitGb * 1024 * 1024 * 1024;
-  const usedGb = usedBytes / 1024 / 1024 / 1024;
-  const pct = limitBytes > 0 ? Math.min(100, (usedBytes / limitBytes) * 100) : 0;
-  const cls = pct >= 100 ? "is-over" : pct >= 75 ? "is-warn" : "";
+function StorageMeter() {
+  const { status } = useStorageStatus();
+  if (!status) return null;
+  if (!status.limitBytes) return <span className="meter-sm meter-sm__label num" title="Automatic cleanup is off">{fmtSize(status.totalBytes)}</span>;
+  const pct = Math.min(100, status.managedBytes / status.limitBytes * 100);
+  const cls = status.reason === "needs-review" || pct >= 100 ? "is-over" : pct >= 75 ? "is-warn" : "";
   return (
-    <div className="meter-sm" title={`${usedGb.toFixed(2)} GB of ${limitGb} GB auto-managed`}>
+    <div className="meter-sm" title={`Clips: ${fmtSize(status.managedBytes)} of ${fmtSize(status.limitBytes)}. ${fmtSize(status.keptBytes)} kept separately (favorites, recordings, and large videos).`}>
       <div className="meter-sm__track"><div className={`meter-sm__fill ${cls}`} style={{ width: `${pct}%` }} /></div>
-      <span className="meter-sm__label num">{usedGb.toFixed(1)}/{limitGb} GB</span>
+      <span className="meter-sm__label num">{(status.managedBytes / 1024 ** 3).toFixed(1)}/{Number((status.limitBytes / 1024 ** 3).toFixed(1))} GB</span>
     </div>
   );
 }

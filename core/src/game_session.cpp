@@ -75,7 +75,7 @@ void GameSessionManager::setPrimaryByGameId(const std::string& gameId)
     emitSessionEvent("primary", ns);
 }
 
-void GameSessionManager::onDetected(const DetectionResult& r, const ProcessInfo& p, bool preferPrimary)
+void GameSessionManager::onDetected(const DetectionResult& r, const ProcessInfo& p)
 {
   bool started = false;
   GameSession ns;
@@ -111,11 +111,12 @@ void GameSessionManager::onDetected(const DetectionResult& r, const ProcessInfo&
     s.active = true;
     sessions_.push_back(std::move(s));
     const size_t idx = sessions_.size() - 1;
-    // A game discovered on another monitor must not steal capture from the
-    // current game. The first game still becomes primary without needing focus.
+    // A new game, focused or not, must not steal capture from the current
+    // game; the owner loop's focus debounce decides swaps. The first game
+    // still becomes primary without needing focus.
     const bool hasPrimary = std::any_of(sessions_.begin(), sessions_.end(),
                                       [](const GameSession& entry) { return entry.active && entry.primary; });
-    if (preferPrimary || !hasPrimary)
+    if (!hasPrimary)
       for (size_t i = 0; i < sessions_.size(); i++)
         sessions_[i].primary = (i == idx);
     ns = sessions_[idx];

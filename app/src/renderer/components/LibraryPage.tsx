@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ClipRecord } from "../../shared/contracts";
 import { Icon, IconButton, Button, EmptyState, Modal, ShardSelect } from "./ui";
 import { mediaFileUrl, StandaloneVideoPlayer } from "../editor/VideoPreview";
@@ -7,6 +7,9 @@ import { ClipRename } from "./ClipRename";
 interface Props {
   clips: ClipRecord[];
   onOpenEditor: (c: ClipRecord) => void;
+  /** File path to open in the viewer once the library lists it (e.g. a fresh export). */
+  openPath?: string | null;
+  onOpenedPath?: () => void;
 }
 
 type SortKey = "newest" | "oldest" | "duration" | "size" | "game" | "favorites";
@@ -29,13 +32,22 @@ const SORTS: { value: SortKey; label: string }[] = [
   { value: "game", label: "By game" },
 ];
 
-export function LibraryPage({ clips, onOpenEditor }: Props) {
+export function LibraryPage({ clips, onOpenEditor, openPath, onOpenedPath }: Props) {
   const [gameFilter, setGameFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>("newest");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = clips.find((clip) => clip.id === selectedId);
+  // A fresh export reaches the list via the folder watcher; open it as soon as it appears.
+  useEffect(() => {
+    if (!openPath) return;
+    const wanted = openPath.replace(/\\/g, "/").toLowerCase();
+    const match = clips.find((clip) => clip.path.replace(/\\/g, "/").toLowerCase() === wanted);
+    if (!match) return;
+    setSelectedId(match.id);
+    onOpenedPath?.();
+  }, [clips, onOpenedPath, openPath]);
   const totalSize = useMemo(() => clips.reduce((total, clip) => total + clip.sizeBytes, 0), [clips]);
   const counts = useMemo(() => ({
     all: clips.length,
@@ -182,7 +194,7 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
           window.shard.startDrag(clip.path, clip.thumb || undefined);
         }}
       >
-        {clip.thumb ? <img data-shard-slot="clip-image" className="clip__img" src={mediaFileUrl(clip.thumb)} alt="" /> : <span data-shard-slot="clip-placeholder" className="clip__nothumb"><Icon name="film" size={26} /></span>}
+        {clip.thumb ? <img data-shard-slot="clip-image" className="clip__img" src={mediaFileUrl(clip.thumb)} alt="" draggable={false} /> : <span data-shard-slot="clip-placeholder" className="clip__nothumb"><Icon name="film" size={26} /></span>}
         <span data-shard-slot="clip-play" className="clip__play" aria-hidden="true"><Icon name="play" size={24} /></span>
         <span data-shard-slot="clip-source" className="clip__source">{SOURCE_NAMES[clip.source]}</span>
         <span data-shard-slot="clip-duration" className="badge badge--dur num">{fmtDuration(clip.durationMs)}</span>
@@ -233,14 +245,16 @@ export function Viewer({ clip: originalClip, onClose, onEdit }: { clip: ClipReco
     setExportError(null);
     try {
       const tracks = await window.shard.probeTracks(clip.id);
+      const wholeClip = [{ timelineStart: 0, sourceStart: 0, sourceEnd: clip.durationMs / 1000 }];
       void window.shard.startExport(clip.id, {
-        segments: [{ start: 0, end: clip.durationMs / 1000 }],
+        videoClips: wholeClip,
         audioTracks: tracks.map((track) => ({
           streamIndex: track.streamIndex,
           name: track.name,
           included: true,
           muted: false,
           volume: 1,
+          clips: wholeClip,
         })),
       }).catch((error: unknown) => console.error("[editor] quick export failed", error));
       onClose();

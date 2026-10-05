@@ -56,6 +56,8 @@ private:
   mutable std::recursive_mutex dispatchMutex_;
   CaptureSizeStability captureSizeStability_;
   CaptureSize preservedCaptureSize_; // Bounds state-change diagnostics only.
+  CaptureCanvasOwner canvasOwner_;
+  std::string lastSubjectKey_;
 };
 
 } // namespace shard

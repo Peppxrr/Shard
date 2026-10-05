@@ -3,9 +3,11 @@
 import { spawn, spawnSync } from "./bundled-processes";
 import path from "node:path";
 import { TimelinePreviews } from "./timeline-previews";
+import { runEditorPreparation } from "./editor-preparation";
+import { decodeWaveform, encodeWaveform, type WaveformStorage } from "./waveform-cache";
 import { app } from "electron";
 import { existsSync, mkdirSync, statSync, promises as fs } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AudioTrackInfo, ExportEncoderInfo, WaveformData } from "../shared/contracts";
 
 export function ffmpegBin(): string {
@@ -269,75 +271,99 @@ export async function probeAudioTracks(file: string): Promise<AudioTrackInfo[]> 
   });
 }
 
-const audioPreviewCache = new Map<string, Promise<string>>();
+type EditorJob = { source: string; controller: AbortController; promise: Promise<unknown>; users: number };
+const editorJobs = new Map<string, EditorJob>();
+let editorPreviewsStopped = false;
+const editorJobsBySource = new Map<string, Set<Promise<unknown>>>();
+const removingEditorSources = new Set<string>();
+let legacyAudioMigration: Promise<void> | undefined;
 const MAX_AUDIO_PREVIEW_FILES = 32;
 const AUDIO_PREVIEW_PRUNE_TO = 24;
 
 // Extract a single source stream to a small seekable file so the renderer can
 // mix individual tracks during preview. Paths are derived and never supplied
 // by the renderer.
-export function prepareAudioPreview(file: string, streamIndex: number): Promise<string> {
+export function prepareAudioPreview(file: string, streamIndex: number, signal?: AbortSignal): Promise<string> {
+  const source = editorSourceKey(file);
+  if (removingEditorSources.has(source)) return Promise.reject(new Error("Editor media is being removed"));
   if (!Number.isInteger(streamIndex) || streamIndex < 0) return Promise.reject(new Error("Invalid audio stream"));
-  const modified = statSync(file).mtimeMs;
-  const key = createHash("sha256").update(`${file}\u0000${modified}\u0000${streamIndex}`).digest("hex").slice(0, 24);
-  const cached = audioPreviewCache.get(key);
-  if (cached) return cached;
-  const pending = extractAudioPreview(file, streamIndex, key);
-  audioPreviewCache.set(key, pending);
-  void pending.then(
-    () => audioPreviewCache.delete(key),
-    () => audioPreviewCache.delete(key),
-  );
-  return pending;
+  const stat = statSync(file);
+  const contentKey = createHash("sha256").update(`${source}\u0000${stat.mtimeMs}\u0000${stat.size}\u0000${streamIndex}:audio-v2`).digest("hex").slice(0, 24);
+  const sourceHash = editorSourceHash(source);
+  const key = `${sourceHash}-${contentKey}`;
+  return sharedEditorJob(`audio:${key}`, source, signal, async (controller) => {
+    await migrateLegacyAudioPreviews();
+    return extractAudioPreview(file, streamIndex, key, controller);
+  });
 }
 
-async function extractAudioPreview(file: string, streamIndex: number, key: string): Promise<string> {
-  const directory = path.join(app.getPath("temp"), "shard-editor-audio");
+async function extractAudioPreview(file: string, streamIndex: number, key: string, signal: AbortSignal): Promise<string> {
+  const directory = audioPreviewDirectory();
   const output = path.join(directory, `${key}.m4a`);
   await fs.mkdir(directory, { recursive: true });
   await pruneAudioPreviewDirectory(directory, key);
+  signal.throwIfAborted();
   try {
     const stat = await fs.stat(output);
     if (stat.size > 0) {
       const now = new Date();
       await fs.utimes(output, now, now);
+      signal.throwIfAborted();
       return output;
     }
   } catch {
     // Cache miss.
   }
 
-  const executable = path.join(ffmpegBin(), "ffmpeg.exe");
-  const child = spawn(executable, [
-    "-y", "-v", "error",
-    "-i", file,
-    "-map", `0:${streamIndex}`,
-    "-vn",
-    "-af", "aresample=async=1:first_pts=0",
-    "-c:a", "aac",
-    "-b:a", "192k",
-    "-movflags", "+faststart",
-    output,
-  ], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
-  const { promise, resolve, reject } = Promise.withResolvers<string>();
-  let stderr = "";
-  child.stderr.on("data", (chunk: Buffer) => {
-    stderr = `${stderr}${chunk.toString("utf8")}`.slice(-32768);
+  return runEditorPreparation("audio", signal, async () => {
+    const temporary = `${output}.${randomUUID()}.tmp.m4a`;
+    try {
+      const executable = path.join(ffmpegBin(), "ffmpeg.exe");
+      const child = spawn(executable, [
+        "-y", "-v", "error", "-threads", "1", "-filter_threads", "1",
+        "-i", file, "-map", `0:${streamIndex}`, "-vn",
+        "-af", "aresample=async=1:first_pts=0",
+        "-c:a", "aac", "-b:a", "192k", "-threads", "1",
+        "-movflags", "+faststart", temporary,
+      ], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+      const { promise, resolve, reject } = Promise.withResolvers<void>();
+      let stderr = "";
+      let spawnError: Error | undefined;
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr = `${stderr}${chunk.toString("utf8")}`.slice(-32768);
+      });
+      const abort = () => { child.kill(); };
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      child.once("error", (error) => { spawnError = error; });
+      child.once("close", (code) => {
+        signal.removeEventListener("abort", abort);
+        if (code === 0 && !signal.aborted && !spawnError) resolve();
+        else reject(spawnError ?? new Error(`Audio preview failed (ffmpeg ${code}): ${stderr.trim() || "no diagnostic output"}`));
+      });
+      await promise;
+      signal.throwIfAborted();
+      if (!(await fs.stat(temporary)).size) throw new Error("Empty audio preview");
+      await fs.rename(temporary, output);
+      return output;
+    } finally { await fs.unlink(temporary).catch(() => {}); }
   });
-  child.once("error", reject);
-  child.once("close", (code) => {
-    if (code === 0) {
-      resolve(output);
-      return;
-    }
-    void fs.unlink(output).catch(() => {});
-    reject(new Error(`Audio preview failed (ffmpeg ${code}): ${stderr.trim() || "no diagnostic output"}`));
-  });
-  return promise;
+}
+function audioPreviewDirectory(): string { return path.join(app.getPath("temp"), "shard-editor-audio"); }
+function editorSourceHash(source: string): string { return createHash("sha256").update(source).digest("hex").slice(0, 32); }
+function migrateLegacyAudioPreviews(): Promise<void> {
+  return legacyAudioMigration ??= (async () => {
+    const directory = audioPreviewDirectory();
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+    await Promise.all(entries
+      .filter((entry) => entry.isFile() && (/^[a-f0-9]{24}\.m4a$/i.test(entry.name) || entry.name.endsWith(".tmp.m4a")))
+      .map((entry) => fs.unlink(path.join(directory, entry.name)).catch(() => {})));
+  })();
 }
 async function pruneAudioPreviewDirectory(directory: string, keepKey: string): Promise<void> {
   const entries = (await fs.readdir(directory, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".m4a") && entry.name !== `${keepKey}.m4a`);
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".m4a") && !entry.name.endsWith(".tmp.m4a")
+      && entry.name !== `${keepKey}.m4a` && !editorJobs.has(`audio:${entry.name.slice(0, -4)}`));
   if (entries.length < MAX_AUDIO_PREVIEW_FILES) return;
   const stats = await Promise.all(entries.map(async (entry) => {
     const candidatePath = path.join(directory, entry.name);
@@ -369,22 +395,42 @@ export function generateWaveform(
   streamIndex: number,
   duration: number,
   requestedPoints: number,
+  storage?: WaveformStorage,
+  signal?: AbortSignal,
 ): Promise<WaveformData> {
+  const source = editorSourceKey(file);
+  if (removingEditorSources.has(source)) return Promise.reject(new Error("Editor media is being removed"));
   if (!Number.isInteger(streamIndex) || streamIndex < 0) return Promise.reject(new Error("Invalid audio stream"));
   if (!Number.isFinite(duration) || duration <= 0) return Promise.reject(new Error("Invalid clip duration"));
+  if (!Number.isFinite(requestedPoints)) return Promise.reject(new Error("Invalid waveform points"));
   const points = Math.max(128, Math.min(8000, Math.round(requestedPoints)));
-  const modified = statSync(file).mtimeMs;
-  const cacheKey = `${file}\u0000${modified}\u0000${streamIndex}\u0000${points}`;
+  const stat = statSync(file);
+  const cacheKey = `${source}\u0000${stat.mtimeMs}:${stat.size}:${streamIndex}:${points}:${duration}:WF01`;
+  signal?.throwIfAborted();
+  if (editorPreviewsStopped) return Promise.reject(new Error("Editor preparation stopped"));
   const cached = waveformCache.get(cacheKey);
   if (cached) {
     waveformCache.delete(cacheKey);
     waveformCache.set(cacheKey, cached);
+    // Populate the library store even when a prior caller only used memory.
+    storage?.put(cacheKey, encodeWaveform(cached));
     return Promise.resolve(cached);
   }
+  const persisted = storage?.get(cacheKey);
+  const restored = persisted && decodeWaveform(persisted);
+  if (restored && restored.duration === duration && restored.peaks.length === points) {
+    rememberWaveform(cacheKey, restored);
+    return Promise.resolve(restored);
+  }
+  return sharedEditorJob(`waveform:${cacheKey}`, source, signal, (controller) =>
+    runEditorPreparation("waveform", controller, () => extractWaveform(file, streamIndex, duration, points, cacheKey, controller)))
+    .then((result) => { storage?.put(cacheKey, encodeWaveform(result)); return result; });
+}
 
+function extractWaveform(file: string, streamIndex: number, duration: number, points: number, cacheKey: string, signal: AbortSignal): Promise<WaveformData> {
   const exe = path.join(ffmpegBin(), "ffmpeg.exe");
   const child = spawn(exe, [
-    "-v", "error",
+    "-v", "error", "-threads", "1", "-filter_threads", "1",
     "-i", file,
     "-map", `0:${streamIndex}`,
     "-vn",
@@ -400,6 +446,7 @@ export function generateWaveform(
   let sampleIndex = 0;
   let pending: Buffer = Buffer.alloc(0);
   let stderr = "";
+  let spawnError: Error | undefined;
 
   child.stdout.on("data", (chunk: Buffer) => {
     const data = pending.length ? Buffer.concat([pending, chunk]) : chunk;
@@ -410,29 +457,117 @@ export function generateWaveform(
       if (Number.isFinite(value) && value > peaks[bin]) peaks[bin] = value;
       sampleIndex++;
     }
-    pending = completeBytes === data.length ? Buffer.alloc(0) : data.subarray(completeBytes);
+    // Copy only the <=3 leftover bytes, without retaining a decoded PCM chunk.
+    pending = completeBytes === data.length ? Buffer.alloc(0) : Buffer.from(data.subarray(completeBytes));
   });
   child.stderr.on("data", (chunk: Buffer) => {
     stderr = `${stderr}${chunk.toString("utf8")}`.slice(-32768);
   });
 
   const { promise, resolve, reject } = Promise.withResolvers<WaveformData>();
-  child.once("error", reject);
+  const abort = () => { child.kill(); };
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  child.once("error", (error) => { spawnError = error; });
   child.once("close", (code) => {
-    if (code !== 0) {
-      reject(new Error(`Waveform generation failed (ffmpeg ${code}): ${stderr.trim() || "no diagnostic output"}`));
+    signal.removeEventListener("abort", abort);
+    if (code !== 0 || signal.aborted || spawnError) {
+      reject(spawnError ?? new Error(`Waveform generation failed (ffmpeg ${code}): ${stderr.trim() || "no diagnostic output"}`));
       return;
     }
     const result = { duration, peaks: Array.from(peaks, (value) => Math.min(1, Number(value.toFixed(4)))) };
-    waveformCache.set(cacheKey, result);
-    while (waveformCache.size > MAX_WAVEFORM_CACHE_ENTRIES) {
-      const oldest = waveformCache.keys().next().value as string | undefined;
-      if (!oldest) break;
-      waveformCache.delete(oldest);
-    }
+    rememberWaveform(cacheKey, result);
     resolve(result);
   });
   return promise;
+}
+
+function rememberWaveform(key: string, waveform: WaveformData): void {
+  waveformCache.set(key, waveform);
+  while (waveformCache.size > MAX_WAVEFORM_CACHE_ENTRIES) waveformCache.delete(waveformCache.keys().next().value!);
+}
+
+// One decoder per source/stream/version, with independent caller cancellation.
+// An immediate reopen waits for an abandoned decoder to close before replacing it.
+async function sharedEditorJob<T>(key: string, source: string, signal: AbortSignal | undefined,
+  task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  signal?.throwIfAborted();
+  if (editorPreviewsStopped || removingEditorSources.has(source)) throw new Error("Editor preparation stopped");
+  let job = editorJobs.get(key);
+  if (job?.controller.signal.aborted) {
+    await job.promise.catch(() => {});
+    return sharedEditorJob(key, source, signal, task);
+  }
+  if (!job) {
+    const controller = new AbortController();
+    const promise = Promise.resolve().then(() => task(controller.signal));
+    job = { source, controller, promise, users: 0 };
+    editorJobs.set(key, job);
+    trackEditorJob(source, promise);
+    void promise.finally(() => { if (editorJobs.get(key)?.promise === promise) editorJobs.delete(key); }).catch(() => {});
+  }
+  const current = job;
+  current.users++;
+  return new Promise<T>((resolve, reject) => {
+    let attached = true;
+    const detach = () => {
+      if (!attached) return false;
+      attached = false;
+      signal?.removeEventListener("abort", abort);
+      current.users--;
+      return true;
+    };
+    const abort = () => {
+      if (!detach()) return;
+      reject(new Error("Editor preparation cancelled"));
+      if (!current.users) current.controller.abort();
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    void current.promise.then((value) => { if (detach()) resolve(value as T); }, (error) => { if (detach()) reject(error); });
+  });
+}
+
+function editorSourceKey(file: string): string {
+  const resolved = path.resolve(file);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function trackEditorJob(source: string, promise: Promise<unknown>): void {
+  let jobs = editorJobsBySource.get(source);
+  if (!jobs) editorJobsBySource.set(source, jobs = new Set());
+  jobs.add(promise);
+  void promise.finally(() => {
+    jobs!.delete(promise);
+    if (!jobs!.size) editorJobsBySource.delete(source);
+  }).catch(() => {});
+}
+
+// Remove every editor cache associated with this source. The source is blocked
+// while in-flight decoders drain so they cannot recreate files after cleanup.
+export async function removeEditorMedia(file: string): Promise<void> {
+  const source = editorSourceKey(file);
+  removingEditorSources.add(source);
+  try {
+    for (const job of editorJobs.values()) if (job.source === source) job.controller.abort();
+    await editorTimelinePreviews().remove(file);
+    while (editorJobsBySource.get(source)?.size) {
+      await Promise.allSettled([...editorJobsBySource.get(source)!]);
+    }
+
+    for (const key of waveformCache.keys()) {
+      if (editorSourceKey(key.split("\u0000", 1)[0]) === source) waveformCache.delete(key);
+    }
+    await migrateLegacyAudioPreviews();
+    const directory = audioPreviewDirectory();
+    const prefix = `${editorSourceHash(source)}-`;
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+    await Promise.all(entries
+      .filter((entry) => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".m4a"))
+      .map((entry) => fs.unlink(path.join(directory, entry.name)).catch(() => {})));
+  } finally {
+    removingEditorSources.delete(source);
+  }
 }
 
 let timelinePreviews: TimelinePreviews | undefined;
@@ -454,5 +589,10 @@ function audioTrackName(tags: { title?: string; name?: string; handler_name?: st
 
 export { spawnSync };
 
-export async function stopEditorPreviews(): Promise<void> { await timelinePreviews?.dispose(); }
-export function resumeEditorPreviews(): void { timelinePreviews?.resume(); exportEncoderProbe = null; }
+export async function stopEditorPreviews(): Promise<void> {
+  editorPreviewsStopped = true;
+  const jobs = [...editorJobs.values()];
+  for (const job of jobs) job.controller.abort();
+  await Promise.allSettled([timelinePreviews?.dispose(), ...jobs.map((job) => job.promise)]);
+}
+export function resumeEditorPreviews(): void { editorPreviewsStopped = false; timelinePreviews?.resume(); exportEncoderProbe = null; }

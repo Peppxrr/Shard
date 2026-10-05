@@ -48,6 +48,8 @@ Important areas in `core/src/`:
 - `main.cpp` — CLI, process/DPI setup, core construction and ordered shutdown.
 - `app.*` — OBS startup, graphics/audio initialization, module loading, scene ownership, pipeline restarts.
 - `sources.*` — monitor/window/Game Capture sources, capture subject retargeting, source transforms/crops, watchdog/recovery, audio sources.
+- `audio_isolation.*` — pure per-app audio isolation routing (which rows are isolated/filtered, process-tree/session partition).
+- `audio_isolation_capture.*` — Windows process-loopback OBS source and the controller that keeps isolated App rows and filtered Desktop rows in sync with processes and endpoint sessions.
 - `capture_geometry.h`, `capture_resilience.h` — isolated geometry/recovery decision logic used by native capture code/tests.
 - `encoders.*` — runtime video/audio encoder selection and settings.
 - `replay_ring.*` — encoded RAM ring and clip snapshot/save path.

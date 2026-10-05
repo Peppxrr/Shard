@@ -106,6 +106,8 @@ add_executable(shardcore
   src/main.cpp
   src/app.cpp
   src/config.cpp
+  src/audio_isolation.cpp
+  src/audio_isolation_capture.cpp
   src/sources.cpp
   src/encoders.cpp
   src/x265_encoder.cpp
@@ -136,7 +138,7 @@ target_compile_definitions(shardcore PRIVATE SHARD_VERSION="${PROJECT_VERSION}")
 
 if(WIN32)
   target_compile_definitions(shardcore PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_link_libraries(shardcore PRIVATE d3d11.lib dxgi.lib dwmapi.lib PowrProf.lib uuid.lib ole32.lib wbemuuid.lib)
+  target_link_libraries(shardcore PRIVATE d3d11.lib dxgi.lib dwmapi.lib PowrProf.lib uuid.lib ole32.lib wbemuuid.lib mmdevapi.lib)
 endif()
 
 if(WIN32)
@@ -151,11 +153,11 @@ if(WIN32)
   target_link_libraries(shard_gc_d3d12_fixture PRIVATE d3d12.lib dxgi.lib)
   # Opt-in GPU test of black-frame detection, actual scene fallback and retry.
   add_executable(shard_capture_backend_fixture EXCLUDE_FROM_ALL
-    tests/capture_backend_fixture.cpp src/sources.cpp)
+    tests/capture_backend_fixture.cpp src/sources.cpp src/audio_isolation.cpp src/audio_isolation_capture.cpp)
   target_include_directories(shard_capture_backend_fixture PRIVATE src)
   target_compile_definitions(shard_capture_backend_fixture PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(shard_capture_backend_fixture PRIVATE OBS::libobs nlohmann_json::nlohmann_json
-    d3d11.lib dxgi.lib dwmapi.lib PowrProf.lib uuid.lib ole32.lib)
+    d3d11.lib dxgi.lib dwmapi.lib PowrProf.lib uuid.lib ole32.lib mmdevapi.lib)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -180,3 +182,11 @@ endif()
 # Pure capture recovery/crop invariants; no OBS or game-detection dependency.
 add_executable(shard_capture_resilience_tests tests/capture_resilience_test.cpp)
 target_include_directories(shard_capture_resilience_tests PRIVATE src)
+
+# Audio isolation routing/config invariants; no OBS, WASAPI or hardware.
+add_executable(shard_audio_isolation_tests tests/audio_isolation_test.cpp src/audio_isolation.cpp src/config.cpp)
+target_include_directories(shard_audio_isolation_tests PRIVATE src)
+target_link_libraries(shard_audio_isolation_tests PRIVATE nlohmann_json::nlohmann_json)
+if(WIN32)
+  target_compile_definitions(shard_audio_isolation_tests PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()

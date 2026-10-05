@@ -318,6 +318,7 @@ SourceManager::~SourceManager()
 {
   stopWatchdog();
   removeVideoSourceItem();
+  audioIsolation_.stop();
   for (size_t i = 0; i < audioSources_.size(); i++) {
     if (audioItems_[i]) {
       obs_sceneitem_remove(audioItems_[i]);
@@ -367,6 +368,7 @@ void SourceManager::releaseAll()
 {
   std::lock_guard<std::mutex> lock(sourceMutex_);
   removeVideoSourceItem();
+  audioIsolation_.stop();
 
   for (size_t i = 0; i < audioSources_.size(); i++) {
     if (audioItems_[i]) {
@@ -443,12 +445,14 @@ void SourceManager::applyVideoSourceLocked()
   windowSuppressedForMinimize_ = false;
   activeBackend_ = ActiveBackend::None;
 
-  // Re-evaluate the subject for the current mode.
+  // Re-evaluate the subject for the current mode. GameSystem's primary game
+  // survives screen-mode periods, so returning to auto/game resumes it.
   const std::string mode = config_.capture.mode;
   if (mode == "screen") {
     subject_ = Subject{Subject::Kind::Monitor, "", "", "", "Desktop", 0};
-  } else if (subject_.kind == Subject::Kind::Window && pidAlive(subject_.pid)) {
-    // keep an existing game subject
+  } else if (requestedGame_.kind == Subject::Kind::Window && pidAlive(requestedGame_.pid)) {
+    if (subject_.pid != requestedGame_.pid) targetWindow_ = 0;
+    subject_ = requestedGame_;
   } else if (mode == "auto") {
     subject_ = Subject{Subject::Kind::Monitor, "", "", "", "Desktop", 0};
   } else {
@@ -479,11 +483,16 @@ bool SourceManager::pidAlive(uint32_t pid)
   if (pid == 0)
     return false;
 #ifdef _WIN32
+  // A handle can outlive the process (OBS holds one to a hooked target), so
+  // check the exit state. Protected processes may refuse even limited query
+  // access while running; only a missing PID is treated as exited.
   HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (!h)
-    return false;
+    return GetLastError() == ERROR_ACCESS_DENIED;
+  DWORD exitCode = 0;
+  const bool alive = GetExitCodeProcess(h, &exitCode) && exitCode == STILL_ACTIVE;
   CloseHandle(h);
-  return true;
+  return alive;
 #else
   return false;
 #endif
@@ -992,15 +1001,27 @@ void SourceManager::setGameSubject(const std::string& exe, const std::string& na
                                    const std::string& cls, uint32_t pid)
 {
   std::lock_guard<std::mutex> lock(sourceMutex_);
+  Subject cand{Subject::Kind::Window, exe, title, cls, name.empty() ? exe : name, pid};
+  requestedGame_ = cand;
   if (config_.capture.mode == "screen")
     return; // monitor capture always wins in screen mode
-
-  Subject cand{Subject::Kind::Window, exe, title, cls, name.empty() ? exe : name, pid};
   if (subject_ == cand)
     return;
 
   const bool visibleIdentityChanged =
       subject_.kind != Subject::Kind::Window || subject_.pid != cand.pid || subject_.name != cand.name;
+#ifdef _WIN32
+  // Games rewrite their titles (FPS counters, level names). The same HWND
+  // needs no retarget: a new descriptor would restart the hook and the WGC
+  // session. OBS only uses the title to choose among this exe's windows.
+  if (subject_.kind == Subject::Kind::Window && subject_.pid == cand.pid && subject_.exe == cand.exe &&
+      targetWindow_ && reinterpret_cast<uintptr_t>(findSubjectWindow(cand)) == targetWindow_) {
+    subject_ = std::move(cand);
+    if (visibleIdentityChanged)
+      emitSubjectChanged();
+    return;
+  }
+#endif
   if (subject_.pid != cand.pid) targetWindow_ = 0;
   healthRecovery_.resetEvidence();
   videoRecoveryRequested_ = false;
@@ -1013,6 +1034,7 @@ void SourceManager::setGameSubject(const std::string& exe, const std::string& na
 void SourceManager::clearGameSubject()
 {
   std::lock_guard<std::mutex> lock(sourceMutex_);
+  requestedGame_ = {};
   if (subject_.kind != Subject::Kind::Window)
     return;
   healthRecovery_.resetEvidence();
@@ -1251,6 +1273,7 @@ void SourceManager::watchdogLoop()
     {
       std::lock_guard<std::mutex> lock(sourceMutex_);
       if (subject_.kind == Subject::Kind::Window && !pidAlive(subject_.pid)) {
+        if (requestedGame_.pid == subject_.pid) requestedGame_ = {};
         if (mode == "auto") {
           subject_ = Subject{Subject::Kind::Monitor, "", "", "", "Desktop", 0};
         } else {
@@ -1589,6 +1612,7 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
 {
   std::lock_guard<std::mutex> lock(sourceMutex_);
 
+  audioIsolation_.stop();
   for (size_t i = 0; i < audioSources_.size(); i++) {
     if (audioItems_[i]) {
       obs_sceneitem_remove(audioItems_[i]);
@@ -1602,14 +1626,34 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
       !sources.empty() && std::none_of(sources.begin(), sources.end(),
                                       [](const AudioSourceConfig& source) { return source.enabled; });
 
+  const AudioRoutePlan routes = routeAudioSources(sources, processLoopbackSupported());
+  if (routes.isolationUnavailable) {
+    std::fprintf(stderr, "[audio-isolation][warn] event=isolation_state state=unavailable "
+                         "reason=process_loopback_unsupported fallback=duplicate_capture "
+                         "effect=\"isolated apps are also recorded in Desktop audio\"\n");
+    std::fflush(stderr);
+  }
+  std::vector<IsolationRow> isolationRows;
 
   for (size_t configuredIndex = 0; configuredIndex < sources.size(); configuredIndex++) {
     const auto& c = sources[configuredIndex];
-    if (!c.enabled)
+    const AudioRowRoute route = routes.routes[configuredIndex];
+    if (route == AudioRowRoute::Disabled)
       continue;
+    if (route == AudioRowRoute::IsolatedApp || route == AudioRowRoute::FilteredDesktop) {
+      IsolationRow row;
+      row.kind = route == AudioRowRoute::IsolatedApp ? IsolationRow::Kind::App : IsolationRow::Kind::Desktop;
+      row.configuredIndex = configuredIndex;
+      row.name = c.name;
+      row.exe = route == AudioRowRoute::IsolatedApp ? isolationExeFromWindow(c.window) : std::string();
+      row.deviceId = route == AudioRowRoute::FilteredDesktop ? c.id : std::string();
+      row.gain = c.gain;
+      isolationRows.push_back(std::move(row));
+      continue;
+    }
 
     obs_source_t* src = nullptr;
-    if (c.kind == "process") {
+    if (route == AudioRowRoute::AppWindow) {
       obs_data_t* s = obs_data_create();
       obs_data_set_string(s, "window", c.window.empty() ? "::" : c.window.c_str());
       obs_data_set_bool(s, "use_device_timing", false);
@@ -1637,19 +1681,20 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
     // recorder outputs allocate tracks from the configured row count, so an
     // enabled toggle can remove/re-add this source without restarting either
     // output or discarding buffered packets.
-    int track = static_cast<int>(configuredIndex) + 1;
-    if (track > 5)
-      track = 5;
-    obs_source_set_audio_mixers(src, (1u << 0) | (1u << (unsigned)track));
+    obs_source_set_audio_mixers(src, audioMixersForRow(configuredIndex));
     obs_sceneitem_t* item = obs_scene_add(app_.scene(), src);
     audioSources_.push_back(src);
     audioItems_.push_back(item); // item may be null; harmless
   }
 
+  const bool isolationOwnsRows = !isolationRows.empty();
+  if (isolationOwnsRows)
+    audioIsolation_.start(app_.scene(), std::move(isolationRows), routes.isolatedExes);
+
   // An empty configuration gets the safe default output. A non-empty list
   // with every row disabled is intentional silence and must not silently
   // re-enable the default device behind the UI toggle.
-  if (audioSources_.empty() && !allConfiguredSourcesDisabled) {
+  if (audioSources_.empty() && !isolationOwnsRows && !allConfiguredSourcesDisabled) {
     obs_data_t* s = obs_data_create();
     obs_data_set_string(s, "device_id", "default");
     obs_data_set_bool(s, "use_device_timing", false);

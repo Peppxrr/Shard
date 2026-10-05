@@ -11,6 +11,10 @@ namespace shard {
 //   "input"   -> wasapi_input_capture        (mic / Voicemeeter AUX in)
 //   "output"  -> wasapi_output_capture       (Voicemeeter bus / device out)
 //   "process" -> wasapi_process_output_capture (per-app audio; `window` set)
+// A process row with `excludeFromDesktop` is an isolated app: its executable
+// is captured by Shard's process-loopback component and every enabled output
+// row is rebuilt from the non-isolated audio sessions of its endpoint, so the
+// app's audio exists on exactly one editable track (see audio_isolation.h).
 struct AudioSourceConfig {
   std::string id;     // WASAPI device id, or "default"; ignored for "process"
   std::string name;   // display name
@@ -18,6 +22,9 @@ struct AudioSourceConfig {
   std::string window; // "::<exe>" descriptor for kind == "process"
   float gain = 1.0f; // 0..2
   bool enabled = true;
+  // Missing in configs written before isolation existed: false keeps the
+  // original duplicate-capture behavior instead of silently changing tracks.
+  bool excludeFromDesktop = false; // kind == "process" only
 
   nlohmann::json toJson() const;
   static AudioSourceConfig fromJson(const nlohmann::json& j);

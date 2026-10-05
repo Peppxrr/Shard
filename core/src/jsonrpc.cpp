@@ -5,6 +5,22 @@
 
 namespace shard {
 
+namespace {
+
+// Canvas ownership follows the visible subject identity. A game keeps its
+// identity across session PID changes; switching games or desktop <-> game
+// does not.
+std::string captureSubjectKey(const SourceManager::Subject& subject)
+{
+  switch (subject.kind) {
+    case SourceManager::Subject::Kind::Monitor: return "monitor";
+    case SourceManager::Subject::Kind::Window: return "game:" + subject.name;
+    default: return {};
+  }
+}
+
+} // namespace
+
 Rpc::Rpc(App& app, Config& config, Events& events, SourceManager& sources, EncoderManager& encoders,
          ReplayRing& ring, Recorder& recorder, GameSystem& games)
     : app_(app), config_(config), events_(events), sources_(sources), encoders_(encoders), ring_(ring),
@@ -253,6 +269,7 @@ void Rpc::restartCaptureOutputs()
 void Rpc::restartVideoPipeline()
 {
   preservedCaptureSize_ = {};
+  canvasOwner_.reset();
   // Resolution/fps/monitor changes need obs_reset_video, which requires every
   // output and source stopped and released. Stop the watchdog first so its
   // activity callback cannot restart the ring during the reset.
@@ -304,6 +321,15 @@ void Rpc::updateCaptureGeometry()
     captureSizeStability_.reset();
     return;
   }
+  const auto subject = sources_.subject();
+  const std::string subjectKey = captureSubjectKey(subject);
+  if (subjectKey != lastSubjectKey_) {
+    // The 1.5 s stability gate applies to the new subject's own geometry.
+    lastSubjectKey_ = subjectKey;
+    captureSizeStability_.reset();
+    preservedCaptureSize_ = {};
+  }
+  const bool ownsCanvas = canvasOwner_.update(subjectKey, ring_.active());
   const auto size = sources_.captureSize();
   const bool sizeStable = captureSizeStability_.ready(size, duration_ms_now());
   if (!size.valid() || (size.width == app_.baseWidth() && size.height == app_.baseHeight())) {
@@ -311,6 +337,17 @@ void Rpc::updateCaptureGeometry()
     return;
   }
   if (!sizeStable) return;
+  if (!ownsCanvas) {
+    // A swap must not discard the buffered history of the previous subject.
+    // The watchdog already fits the new subject inside the current canvas.
+    if (size != preservedCaptureSize_) {
+      std::fprintf(stderr, "[capture-geometry][info] source=%ux%u canvas=%ux%u subject=\"%s\" canvas_subject=\"%s\" replay_preserved=true reason=subject_switch\n",
+                   size.width, size.height, app_.baseWidth(), app_.baseHeight(), subjectKey.c_str(),
+                   canvasOwner_.owner().c_str());
+      preservedCaptureSize_ = size;
+    }
+    return;
+  }
 
   int width = 0, height = 0, fps = 0, bitrate = 0;
   encoders_.effectiveVideoParams(size.width, size.height, width, height, fps, bitrate);

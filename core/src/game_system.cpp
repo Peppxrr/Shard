@@ -269,7 +269,7 @@ void GameSystem::evaluateProcess(uint32_t pid)
       candidateSince_.erase(pid);
       visibleSince_.erase(pid);
     }
-    sessions_.onDetected(result, process, probe.foreground);
+    sessions_.onDetected(result, process);
 
     // The process passed positive game qualification. Persist only this
     // executable, never its unobserved directory siblings.

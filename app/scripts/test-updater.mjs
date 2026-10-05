@@ -287,15 +287,22 @@ try {
   // This checks integration ordering rather than another copy of the lifecycle.
   const mainText = readFileSync(new URL("../src/main/main.ts", import.meta.url), "utf8");
   const mainLifecycleText = mainText.slice(mainText.indexOf("const jobs = new Set"), mainText.indexOf('app.on("window-all-closed"'));
+  const mainLibraryText = mainText.slice(mainText.indexOf("function openLibrary("), mainText.indexOf("function savedLabel("));
   const appEvents = new EventEmitter(), nativeUpdaterEvents = new EventEmitter();
-  const rootExit = deferred(), foregroundDone = deferred(), resourceOwned = new OwnedProcesses();
-  const resourceCounts = { dbClosed: 0, dbOpened: 0, coreStarted: 0, storageStarted: 0, watchStarted: 0, auxClosed: 0, hotkeysResumed: 0 };
+  const rootExit = deferred(), foregroundDone = deferred(), libraryWatchDrain = deferred(), resourceOwned = new OwnedProcesses();
+  const resourceCounts = { dbClosed: 0, dbOpened: 0, coreStarted: 0, storageStarted: 0, watchStarted: 0,
+    libraryWatchStarted: 0, libraryWatchStopped: 0, auxClosed: 0, hotkeysResumed: 0 };
   const applicationWindow = { isDestroyed: () => false };
   const resourceChild = new EventEmitter();
   resourceChild.pid = 777; resourceChild.exitCode = null; resourceChild.signalCode = null;
   let resourceKilled = false; resourceChild.kill = () => { resourceKilled = true; return true; };
   resourceOwned.track(resourceChild, "resources/core-bin/ffmpeg.exe");
-  class ResourceLibrary { constructor() { resourceCounts.dbOpened++; } close() { resourceCounts.dbClosed++; } }
+  class ResourceLibrary extends EventEmitter {
+    constructor() { super(); resourceCounts.dbOpened++; }
+    async stopWatching() { await libraryWatchDrain.promise; resourceCounts.libraryWatchStopped++; }
+    startWatching() { resourceCounts.libraryWatchStarted++; }
+    close() { resourceCounts.dbClosed++; }
+  }
   class ResourceStorage extends EventEmitter { async stop() {} start() { resourceCounts.storageStarted++; } }
   const resourceContext = { exports: {}, ShutdownLifecycle, bounded: (label, promise) => promise, ownedProcesses: resourceOwned,
     jobs: undefined, win: applicationWindow, core: { ready: true, supervised: true, hasProcess: true,
@@ -315,7 +322,7 @@ try {
     BrowserWindow: { getAllWindows: () => [applicationWindow, { isDestroyed: () => false, destroy() { resourceCounts.auxClosed++; } }] },
     electronAutoUpdater: nativeUpdaterEvents, app: Object.assign(appEvents, { quit() {}, getPath: () => "test-data" }),
   };
-  vm.runInNewContext(require("typescript").transpileModule(mainLifecycleText + "\nexports.shutdown = shutdown; exports.trackJob = trackJob;", {
+  vm.runInNewContext(require("typescript").transpileModule(mainLibraryText + mainLifecycleText + "\nexports.shutdown = shutdown; exports.trackJob = trackJob;", {
     compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS },
   }).outputText, resourceContext);
   resourceContext.exports.trackJob(foregroundDone.promise);
@@ -327,7 +334,10 @@ try {
   resourceChild.exitCode = 0; resourceChild.emit("close", 0);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(resourceCounts.dbClosed, 0, "Database must wait for foreground/background users after child exit");
-  foregroundDone.resolve(); await integratedPrep;
+  foregroundDone.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resourceCounts.dbClosed, 0, "Database must wait for active library reconciliation");
+  libraryWatchDrain.resolve(); await integratedPrep;
+  assert.equal(resourceCounts.libraryWatchStopped, 1);
   assert.equal(resourceCounts.dbClosed, 1); assert.equal(resourceCounts.auxClosed, 1);
   await resourceContext.exports.shutdown.prepareUpdate(); assert.equal(resourceCounts.dbClosed, 1);
   nativeUpdaterEvents.emit("before-quit-for-update");
@@ -335,6 +345,7 @@ try {
   await resourceContext.exports.shutdown.recoverUpdate();
   assert.equal(resourceCounts.dbOpened, 2); assert.equal(resourceCounts.coreStarted, 1);
   assert.equal(resourceCounts.storageStarted, 1); assert.equal(resourceCounts.watchStarted, 1);
+  assert.equal(resourceCounts.libraryWatchStarted, 1, "Library watching resumes after failed update handoff");
   assert.equal(resourceCounts.hotkeysResumed, 1); assert.equal(resourceContext.quitting, false);
   let staleBlocked = false;
   nativeUpdaterEvents.emit("before-quit-for-update");

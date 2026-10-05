@@ -41,10 +41,10 @@ export function attachTimelineChecks(): void {
       host.dispatchEvent(event("pointerdown", x));
       await frame();
       check(!dragActive(), "native scrollbar area cannot start a seek");
-      const mute = document.querySelector<HTMLButtonElement>(".timeline__audio-label button")!;
-      mute.dispatchEvent(event("pointerdown", x));
+      const labelControl = document.querySelector<HTMLButtonElement>(".timeline__label button")!;
+      labelControl.dispatchEvent(event("pointerdown", x));
       await frame();
-      check(!dragActive(), "audio controls cannot start a seek");
+      check(!dragActive(), "track label controls cannot start a seek");
       const sampleTime = () => (x - ruler.getBoundingClientRect().left) / ruler.getBoundingClientRect().width * video.duration;
       const beforeZoom = sampleTime();
       ruler.dispatchEvent(event("pointerdown", x));

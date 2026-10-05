@@ -4,6 +4,7 @@ import type { ClipRecord, CoreState, Settings } from "../../shared/contracts";
 import { fmtDuration, fmtSize, relativeDate, Viewer } from "./LibraryPage";
 import { Button, Card, EmptyState, Icon, Segmented, StatusDot } from "./ui";
 import { mediaFileUrl } from "../editor/VideoPreview";
+import { StorageSummary } from "./StorageSummary";
 
 interface Props {
   settings: Settings;
@@ -95,14 +96,6 @@ export function CapturePage({ settings, clips }: Props) {
     void window.shard.invoke(recording ? "recording.stop" : "recording.start").catch(() => {});
   };
 
-  const usedBytes = clips.reduce(
-    (sum, clip) => sum + (clip.protected === 0 && (settings.storage.deleteEdited || clip.source !== "edited") ? clip.sizeBytes : 0),
-    0,
-  );
-  const limitBytes = settings.storage.limitGb * 1024 * 1024 * 1024;
-  const usedGb = usedBytes / 1024 / 1024 / 1024;
-  const pct = limitBytes > 0 ? Math.min(100, (usedBytes / limitBytes) * 100) : 0;
-  const fillClass = pct >= 100 ? "is-over" : pct >= 75 ? "is-warn" : "";
   const lastClips = [...clips].sort((a, b) => b.createdAt - a.createdAt).slice(0, recentCapacity);
 
   return (
@@ -176,11 +169,7 @@ export function CapturePage({ settings, clips }: Props) {
         </Card>
 
         <Card title="Storage" icon={<Icon name="hardDrive" size={16} />}>
-          <div className="meter">
-            <div className="meter__track"><div className={`meter__fill ${fillClass}`} style={{ width: `${pct}%` }} /></div>
-          </div>
-          <p className="kv__line num dim"><strong>{usedGb.toFixed(2)} GB</strong> of {settings.storage.limitGb} GB auto-managed</p>
-          <p className="kv__line dim">Favorites never count. Edited clips count only when their auto-delete setting is enabled.</p>
+          <StorageSummary />
         </Card>
       </div>
 

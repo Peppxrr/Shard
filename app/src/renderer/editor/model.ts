@@ -1,25 +1,41 @@
 import type { AudioTrackInfo } from "../../shared/contracts";
 
-export interface TimelineSegment {
+/**
+ * A clip placed on the output timeline: source range [sourceStart,
+ * sourceEnd) shown from timelineStart. Clips on one track never overlap;
+ * uncovered timeline time is black video / silent audio.
+ */
+export interface TimelineClip {
   id: string;
+  timelineStart: number;
   sourceStart: number;
   sourceEnd: number;
-  sourceMin: number;
-  sourceMax: number;
 }
 
 export interface EditorAudioTrack extends AudioTrackInfo {
   included: boolean;
   muted: boolean;
   volume: number;
-  excludedSegments?: string[];
+  /** The track's own clips once audio is separated; empty while linked. */
+  clips: TimelineClip[];
+}
+
+/** `"video"` or an audio stream index. */
+export type ClipTrack = "video" | number;
+
+export interface ClipSelection {
+  track: ClipTrack;
+  clipId: string;
 }
 
 export interface EditorState {
+  /** Source media duration. */
   duration: number;
-  segments: TimelineSegment[];
+  videoClips: TimelineClip[];
+  /** Linked audio follows the video clips; separated tracks own their clips. */
+  audioLinked: boolean;
   audioTracks: EditorAudioTrack[];
-  selectedSegmentId: string | null;
+  selection: ClipSelection | null;
   revision: number;
 }
 
@@ -29,19 +45,22 @@ export interface EditorHistory {
   future: EditorState[];
 }
 
-export const MIN_SEGMENT_DURATION = 0.05;
+export const MIN_CLIP_DURATION = 0.05;
 const EPSILON = 0.000001;
+
+export function clipEnd(clip: TimelineClip): number {
+  return clip.timelineStart + clip.sourceEnd - clip.sourceStart;
+}
 
 export function createEditorState(duration: number, tracks: AudioTrackInfo[]): EditorState {
   const safeDuration = Number.isFinite(duration) ? Math.max(0, duration) : 0;
-  const segment = safeDuration > 0
-    ? { id: "segment-0", sourceStart: 0, sourceEnd: safeDuration, sourceMin: 0, sourceMax: safeDuration }
-    : null;
+  const clip = safeDuration > 0 ? { id: "clip-0", timelineStart: 0, sourceStart: 0, sourceEnd: safeDuration } : null;
   return {
     duration: safeDuration,
-    segments: segment ? [segment] : [],
-    audioTracks: tracks.map((track) => ({ ...track, included: true, muted: false, volume: 1, excludedSegments: [] })),
-    selectedSegmentId: segment?.id ?? null,
+    videoClips: clip ? [clip] : [],
+    audioLinked: true,
+    audioTracks: tracks.map((track) => ({ ...track, included: true, muted: false, volume: 1, clips: [] })),
+    selection: clip ? { track: "video", clipId: clip.id } : null,
     revision: 0,
   };
 }
@@ -79,92 +98,149 @@ export function redoHistory(history: EditorHistory): EditorHistory {
   };
 }
 
-export function splitSegment(state: EditorState, segmentId: string | null, sourceTime: number): EditorState {
-  if (!segmentId || !Number.isFinite(sourceTime)) return state;
-  const index = state.segments.findIndex((segment) => segment.id === segmentId);
-  if (index < 0) return state;
-  const segment = state.segments[index];
-  if (sourceTime - segment.sourceStart < MIN_SEGMENT_DURATION
-    || segment.sourceEnd - sourceTime < MIN_SEGMENT_DURATION) return state;
+/** While audio is linked, every audio edit is a video edit. */
+export function owningTrack(state: EditorState, track: ClipTrack): ClipTrack {
+  return state.audioLinked ? "video" : track;
+}
 
+export function trackClips(state: EditorState, track: ClipTrack): TimelineClip[] {
+  if (owningTrack(state, track) === "video") return state.videoClips;
+  return state.audioTracks.find((candidate) => candidate.streamIndex === track)?.clips ?? [];
+}
+
+function withTrackClips(state: EditorState, track: ClipTrack, clips: TimelineClip[], selection = state.selection): EditorState {
+  const owner = owningTrack(state, track);
+  const sorted = [...clips].sort((a, b) => a.timelineStart - b.timelineStart);
   const revision = state.revision + 1;
-  const left: TimelineSegment = {
-    id: `${segment.id}-L${revision}`,
-    sourceStart: segment.sourceStart,
-    sourceEnd: sourceTime,
-    sourceMin: segment.sourceMin,
-    sourceMax: sourceTime,
-  };
-  const right: TimelineSegment = {
-    id: `${segment.id}-R${revision}`,
-    sourceStart: sourceTime,
-    sourceEnd: segment.sourceEnd,
-    sourceMin: sourceTime,
-    sourceMax: segment.sourceMax,
-  };
-  const audioTracks = state.audioTracks.map((track) => {
-    const excluded = track.excludedSegments ?? [];
-    if (!excluded.includes(segmentId)) return track;
-    // This track had the original segment excluded (deleted) — propagate to both new segments
-    return { ...track, excludedSegments: [...excluded.filter((id) => id !== segmentId), left.id, right.id] };
-  });
+  if (owner === "video") return { ...state, videoClips: sorted, selection, revision };
   return {
     ...state,
+    audioTracks: state.audioTracks.map((candidate) => candidate.streamIndex === owner ? { ...candidate, clips: sorted } : candidate),
+    selection,
     revision,
-    segments: [...state.segments.slice(0, index), left, right, ...state.segments.slice(index + 1)],
-    selectedSegmentId: right.id,
-    audioTracks,
   };
 }
 
-export function deleteSegment(state: EditorState, segmentId: string | null): EditorState {
-  if (!segmentId) return state;
-  const index = state.segments.findIndex((segment) => segment.id === segmentId);
+/** The clip covering `time` (half-open: a clip's end belongs to what follows). */
+export function clipAt(clips: TimelineClip[], time: number): TimelineClip | null {
+  return clips.find((clip) => time >= clip.timelineStart - EPSILON && time < clipEnd(clip) - EPSILON) ?? null;
+}
+
+/** Free timeline space around a clip on its own track. */
+function clipBounds(clips: TimelineClip[], clip: TimelineClip): { min: number; max: number } {
+  let min = 0;
+  let max = Infinity;
+  for (const other of clips) {
+    if (other.id === clip.id) continue;
+    if (other.timelineStart < clip.timelineStart) min = Math.max(min, clipEnd(other));
+    else max = Math.min(max, other.timelineStart);
+  }
+  return { min, max };
+}
+
+export function splitClip(state: EditorState, track: ClipTrack, time: number): EditorState {
+  if (!Number.isFinite(time)) return state;
+  const clips = trackClips(state, track);
+  const clip = clipAt(clips, time);
+  if (!clip || time - clip.timelineStart < MIN_CLIP_DURATION || clipEnd(clip) - time < MIN_CLIP_DURATION) return state;
+  const revision = state.revision + 1;
+  const sourceSplit = clip.sourceStart + (time - clip.timelineStart);
+  const left: TimelineClip = { ...clip, id: `${clip.id}-L${revision}`, sourceEnd: sourceSplit };
+  const right: TimelineClip = { id: `${clip.id}-R${revision}`, timelineStart: time, sourceStart: sourceSplit, sourceEnd: clip.sourceEnd };
+  const owner = owningTrack(state, track);
+  return withTrackClips(state, owner, clips.flatMap((value) => value.id === clip.id ? [left, right] : [value]), { track: owner, clipId: right.id });
+}
+
+/**
+ * Razor through every track at `time`: the video clip and, once audio is
+ * separated, each audio track's clip under the playhead. Keeps the
+ * selection on the selected track (its right-hand piece).
+ */
+export function splitAllTracks(state: EditorState, time: number): EditorState {
+  let next = splitClip(state, "video", time);
+  if (!state.audioLinked) for (const track of state.audioTracks) next = splitClip(next, track.streamIndex, time);
+  if (next === state) return state;
+  const focus = owningTrack(next, state.selection?.track ?? "video");
+  const clip = clipAt(trackClips(next, focus), time);
+  return { ...next, selection: clip ? { track: focus, clipId: clip.id } : state.selection };
+}
+
+/** Removes the clip and leaves its time empty (black/silent) until filled. */
+export function deleteClip(state: EditorState, track: ClipTrack, clipId: string): EditorState {
+  const clips = trackClips(state, track);
+  const index = clips.findIndex((clip) => clip.id === clipId);
   if (index < 0) return state;
-  const segments = state.segments.filter((segment) => segment.id !== segmentId);
-  const selected = segments[Math.min(index, segments.length - 1)] ?? null;
-  const audioTracks = state.audioTracks.map((track) => {
-    const excluded = track.excludedSegments ?? [];
-    if (!excluded.includes(segmentId)) return track;
-    return { ...track, excludedSegments: excluded.filter((id) => id !== segmentId) };
-  });
+  const remaining = clips.filter((clip) => clip.id !== clipId);
+  const neighbour = remaining[Math.min(index, remaining.length - 1)];
+  const owner = owningTrack(state, track);
+  return withTrackClips(state, owner, remaining, neighbour ? { track: owner, clipId: neighbour.id } : null);
+}
+
+/**
+ * Moves one edge to timeline `time`. The opposite edge stays put; the edge
+ * stops at the source media bounds, the neighbouring clips, and the
+ * minimum clip length.
+ */
+export function trimClip(state: EditorState, track: ClipTrack, clipId: string, edge: "start" | "end", time: number): EditorState {
+  if (!Number.isFinite(time)) return state;
+  const clips = trackClips(state, track);
+  const clip = clips.find((value) => value.id === clipId);
+  if (!clip) return state;
+  const { min, max } = clipBounds(clips, clip);
+  let next: TimelineClip;
+  if (edge === "start") {
+    const start = clamp(time, Math.max(min, clip.timelineStart - clip.sourceStart), clipEnd(clip) - MIN_CLIP_DURATION);
+    next = { ...clip, timelineStart: start, sourceStart: Math.max(0, clip.sourceStart + start - clip.timelineStart) };
+  } else {
+    const end = clamp(time, clip.timelineStart + MIN_CLIP_DURATION, Math.min(max, clip.timelineStart + state.duration - clip.sourceStart));
+    next = { ...clip, sourceEnd: Math.min(state.duration, clip.sourceStart + end - clip.timelineStart) };
+  }
+  if (Math.abs(next.timelineStart - clip.timelineStart) < EPSILON && Math.abs(next.sourceEnd - clip.sourceEnd) < EPSILON) return state;
+  return withTrackClips(state, track, clips.map((value) => value.id === clipId ? next : value));
+}
+
+export function trimClipToPlayhead(state: EditorState, track: ClipTrack, clipId: string, time: number): EditorState {
+  const clip = trackClips(state, track).find((value) => value.id === clipId);
+  if (!clip || time <= clip.timelineStart || time >= clipEnd(clip)) return state;
+  return trimClip(state, track, clipId, time - clip.timelineStart <= clipEnd(clip) - time ? "start" : "end", time);
+}
+
+/** Slides a clip within the free space between its neighbours. */
+export function moveClip(state: EditorState, track: ClipTrack, clipId: string, timelineStart: number): EditorState {
+  if (!Number.isFinite(timelineStart)) return state;
+  const clips = trackClips(state, track);
+  const clip = clips.find((value) => value.id === clipId);
+  if (!clip) return state;
+  const { min, max } = clipBounds(clips, clip);
+  const start = clamp(timelineStart, min, max - (clip.sourceEnd - clip.sourceStart));
+  if (Math.abs(start - clip.timelineStart) < EPSILON) return state;
+  return withTrackClips(state, track, clips.map((value) => value.id === clipId ? { ...clip, timelineStart: start } : value));
+}
+
+/** Gives every audio track its own copy of the video clips to edit independently. */
+export function separateAudio(state: EditorState): EditorState {
+  if (!state.audioLinked) return state;
   return {
     ...state,
+    audioLinked: false,
     revision: state.revision + 1,
-    segments,
-    selectedSegmentId: selected?.id ?? null,
-    audioTracks,
+    audioTracks: state.audioTracks.map((track) => ({
+      ...track,
+      clips: state.videoClips.map((clip) => ({ ...clip, id: `${clip.id}-a${track.streamIndex}` })),
+    })),
   };
 }
 
-export function trimSegment(
-  state: EditorState,
-  segmentId: string,
-  edge: "start" | "end",
-  sourceTime: number,
-): EditorState {
-  if (!Number.isFinite(sourceTime)) return state;
-  const index = state.segments.findIndex((segment) => segment.id === segmentId);
-  if (index < 0) return state;
-  const segment = state.segments[index];
-  const clamped = edge === "start"
-    ? clamp(sourceTime, segment.sourceMin, segment.sourceEnd - MIN_SEGMENT_DURATION)
-    : clamp(sourceTime, segment.sourceStart + MIN_SEGMENT_DURATION, segment.sourceMax);
-  if (Math.abs(clamped - (edge === "start" ? segment.sourceStart : segment.sourceEnd)) < EPSILON) return state;
-  const next = { ...segment, [edge === "start" ? "sourceStart" : "sourceEnd"]: clamped };
+/** Audio follows the video clips again; separate audio edits are discarded. */
+export function linkAudio(state: EditorState): EditorState {
+  if (state.audioLinked) return state;
   return {
     ...state,
+    audioLinked: true,
     revision: state.revision + 1,
-    segments: state.segments.map((value, i) => i === index ? next : value),
+    audioTracks: state.audioTracks.map((track) => ({ ...track, clips: [] })),
+    selection: state.selection?.track === "video" ? state.selection : null,
   };
-}
-
-export function trimSegmentToPlayhead(state: EditorState, segmentId: string, sourceTime: number): EditorState {
-  const segment = state.segments.find((value) => value.id === segmentId);
-  if (!segment || sourceTime <= segment.sourceStart || sourceTime >= segment.sourceEnd) return state;
-  const distanceFromStart = sourceTime - segment.sourceStart;
-  const distanceFromEnd = segment.sourceEnd - sourceTime;
-  return trimSegment(state, segmentId, distanceFromStart <= distanceFromEnd ? "start" : "end", sourceTime);
 }
 
 export function updateAudioTrack(
@@ -187,70 +263,64 @@ export function updateAudioTrack(
 }
 
 export function deleteAudioTrack(state: EditorState, streamIndex: number): EditorState {
-  if (!state.audioTracks.some((t) => t.streamIndex === streamIndex)) return state;
+  if (!state.audioTracks.some((track) => track.streamIndex === streamIndex)) return state;
   return {
     ...state,
     revision: state.revision + 1,
-    audioTracks: state.audioTracks.filter((t) => t.streamIndex !== streamIndex),
+    audioTracks: state.audioTracks.filter((track) => track.streamIndex !== streamIndex),
+    selection: state.selection?.track === streamIndex ? null : state.selection,
   };
 }
 
-export function deleteAudioSegment(state: EditorState, streamIndex: number, segmentId: string): EditorState {
-  const idx = state.audioTracks.findIndex((t) => t.streamIndex === streamIndex);
-  if (idx < 0) return state;
-  const track = state.audioTracks[idx];
-  const excluded = track.excludedSegments ?? [];
-  if (excluded.includes(segmentId)) return state;
-  // If this is the only segment, delete entire track instead (individual track deletion)
-  if (state.segments.length <= 1) {
-    return deleteAudioTrack(state, streamIndex);
-  }
-  const nextTrack = { ...track, excludedSegments: [...excluded, segmentId] };
-  const audioTracks = state.audioTracks.map((t, i) => i === idx ? nextTrack : t);
-  return { ...state, revision: state.revision + 1, audioTracks };
-}
-
 export function resetEditorState(state: EditorState): EditorState {
-  const reset = createEditorState(state.duration, state.audioTracks);
-  return { ...reset, revision: state.revision + 1 };
+  return { ...createEditorState(state.duration, state.audioTracks), revision: state.revision + 1 };
 }
 
-export function editedDuration(segments: TimelineSegment[]): number {
-  return segments.reduce((total, segment) => total + Math.max(0, segment.sourceEnd - segment.sourceStart), 0);
-}
-
-export function sourceToResultTime(segments: TimelineSegment[], sourceTime: number): number {
-  let result = 0;
-  for (const segment of segments) {
-    if (sourceTime < segment.sourceStart) return result;
-    if (sourceTime <= segment.sourceEnd) return result + sourceTime - segment.sourceStart;
-    result += segment.sourceEnd - segment.sourceStart;
+/** Output length: the last clip end on the video track or an exported audio track. */
+export function outputDuration(state: EditorState): number {
+  let end = 0;
+  for (const clip of state.videoClips) end = Math.max(end, clipEnd(clip));
+  if (!state.audioLinked) {
+    for (const track of state.audioTracks) {
+      if (track.included) for (const clip of track.clips) end = Math.max(end, clipEnd(clip));
+    }
   }
-  return result;
+  return end;
+}
+
+/** Every clip edge on every track, plus 0 and the playhead, except the dragged clip's own edges. */
+export function snapTargets(state: EditorState, track: ClipTrack, clipId: string, playhead: number): number[] {
+  const owner = owningTrack(state, track);
+  const targets = [0, playhead];
+  const add = (clips: TimelineClip[], clipsTrack: ClipTrack) => {
+    for (const clip of clips) {
+      if (clipsTrack === owner && clip.id === clipId) continue;
+      targets.push(clip.timelineStart, clipEnd(clip));
+    }
+  };
+  add(state.videoClips, "video");
+  if (!state.audioLinked) for (const audio of state.audioTracks) add(audio.clips, audio.streamIndex);
+  return targets;
 }
 
 /**
- * RESULT time -> SOURCE time. Note: at a cut boundary the two source edges
- * (end of segment N, start of segment N+1) share ONE result instant; this
- * inverse deliberately resolves to the EARLIER edge (end of the previous
- * retained range). Interior points round-trip exactly.
+ * Pulls the closest of `edges` onto the nearest target within `threshold`
+ * seconds. `offset` is added to the dragged value; `target` is the time it
+ * locked to (null when nothing was close enough).
  */
-export function resultToSourceTime(segments: TimelineSegment[], resultTime: number): number {
-  let remaining = Math.max(0, resultTime);
-  for (const segment of segments) {
-    const segmentDuration = segment.sourceEnd - segment.sourceStart;
-    if (remaining <= segmentDuration) return segment.sourceStart + remaining;
-    remaining -= segmentDuration;
+export function snapOffset(edges: number[], targets: number[], threshold: number): { offset: number; target: number | null } {
+  let best: { offset: number; target: number | null } = { offset: 0, target: null };
+  let bestDistance = threshold;
+  for (const edge of edges) {
+    for (const target of targets) {
+      const distance = Math.abs(target - edge);
+      if (distance <= bestDistance) {
+        bestDistance = distance;
+        best = { offset: target - edge, target };
+      }
+    }
   }
-  return segments.at(-1)?.sourceEnd ?? 0;
-}
-
-export function segmentAtTime(segments: TimelineSegment[], sourceTime: number): TimelineSegment | null {
-  return segments.find((segment) => sourceTime >= segment.sourceStart - EPSILON && sourceTime <= segment.sourceEnd + EPSILON) ?? null;
-}
-
-export function nextSegmentAfter(segments: TimelineSegment[], sourceTime: number): TimelineSegment | null {
-  return segments.find((segment) => segment.sourceStart > sourceTime + EPSILON) ?? null;
+  return best;
 }
 
 export function pixelsPerSecond(duration: number, viewportWidth: number, zoom: number): number {
@@ -273,7 +343,7 @@ export function pixelToTime(pixel: number, pxPerSecond: number, scrollOffset = 0
  * `getBoundingClientRect` walks.
  *
  * Coordinates:
- * - `clientXToTime`: viewport X -> source seconds on the timeline content
+ * - `clientXToTime`: viewport X -> timeline seconds on the content
  *   (accounts for label column, scroll position, zoom). Clamped to [0, duration].
  * - `timeToContentX` / `contentXToTime`: content-space pixels <-> seconds,
  *   independent of scrolling. All rows share this origin.
@@ -282,9 +352,9 @@ export interface TimelineGeometry {
   duration: number;
   pxPerSecond: number;
   viewportWidth(): number;
-  /** Viewport client X -> clamped source time. The single authoritative pointer conversion. */
+  /** Viewport client X -> clamped timeline time. The single authoritative pointer conversion. */
   clientXToTime(clientX: number): number;
-  /** Source time -> pixel offset within the timeline content (ignores scroll). */
+  /** Timeline time -> pixel offset within the timeline content (ignores scroll). */
   timeToContentX(time: number): number;
   /** Content-space pixel -> unclamped time (>= 0). */
   contentXToTime(x: number): number;
@@ -349,7 +419,7 @@ export function formatRulerTime(time: number, step: number): string {
   return precision ? `${whole}.${String(units % scale).padStart(precision, "0")}` : whole;
 }
 
-// Keep the source time beneath an anchor pixel fixed while zoom changes width.
+// Keep the timeline time beneath an anchor pixel fixed while zoom changes width.
 export function zoomScrollOffset(scroll: number, anchor: number, oldPx: number, newPx: number, viewport: number, duration: number): number {
   const time = (scroll + anchor) / oldPx;
   return clamp(time * newPx - anchor, 0, Math.max(0, duration * newPx - viewport));

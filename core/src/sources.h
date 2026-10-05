@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app.h"
+#include "audio_isolation_capture.h"
 #include "config.h"
 #include "capture_resilience.h"
 #include "capture_geometry.h"
@@ -29,9 +30,9 @@ inline uint64_t duration_ms_now()
 // is preferred while healthy; WGC is promoted when the hook fails. Also owns
 // configured audio sources and WASAPI device enumeration.
 //
-// Subject model: while a game window is the subject, capture follows that
-// game until its process exits, even if another window takes focus. When a
-// second game takes focus the switch is debounced by 10 s (buffer is kept).
+// Subject model: GameSystem selects the primary game (focus swaps between
+// running games are debounced there); SourceManager only follows it. Swaps
+// retarget the live sources in place, so replay history and audio continue.
 class SourceManager {
 public:
   struct Subject {
@@ -72,7 +73,8 @@ public:
 
   // GameSystem session callback: the primary game session changed. Switches
   // the capture subject to that game's layered WGC + game-hook sources; a
-  // repeat call with the same pid refreshes the window descriptor.
+  // repeat call with the same pid refreshes the window descriptor. The request
+  // is retained across capture-mode changes (screen -> auto/game).
   void setGameSubject(const std::string& exe, const std::string& name, const std::string& title,
                       const std::string& cls, uint32_t pid);
   // The primary session ended; fall back to the desktop (auto mode) or
@@ -158,6 +160,7 @@ private:
   CaptureSize windowClientSize_; // Validated client geometry before cosmetic caption inset.
 
   Subject subject_; // what is currently captured/shown
+  Subject requestedGame_; // GameSystem's current primary game, independent of mode
 
   // Hook-primary health + retry state. Verified black hook output can promote
   // WGC even when OBS still reports nonzero hook texture dimensions.
@@ -201,6 +204,9 @@ private:
 
   std::vector<obs_source_t*> audioSources_;
   std::vector<obs_sceneitem_t*> audioItems_;
+  // Isolated App rows and filtered Desktop rows (sources change with
+  // processes/sessions, so they are owned by the controller, not the vectors).
+  AudioIsolationController audioIsolation_;
 
   std::thread watchdogThread_;
   std::atomic<bool> watchdogRun_{false};

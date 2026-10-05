@@ -5,13 +5,14 @@ import type { NativeImage } from "electron";
 import { join as joinPath } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { cpSync, existsSync, readdirSync, readFileSync, unlinkSync, promises as fs } from "node:fs";
+import { cpSync, existsSync, readdirSync, readFileSync, unlinkSync, statSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { ThemeStore } from "./themes";
 import { CoreClient } from "./core-client";
 import { loadSettings, getSettings, saveSettings, seedGamesJson } from "./settings";
 import { HotkeyManager } from "./hotkeys";
 import { Library, clipsDir, editorDir } from "./library";
+import { clipDragIcon } from "./drag-icon";
 import { medalImportMetadata, scanMp4Tree } from "./library-import";
 import { StorageWatchdog } from "./storage";
 import { ExportManager } from "./export";
@@ -23,7 +24,7 @@ import { copyPlaybackReport } from "./playback-diagnostics";
 import { registerUpdater } from "./updater";
 import { ShutdownLifecycle } from "./shutdown-lifecycle";
 import { bounded, ownedProcesses } from "./bundled-processes";
-import type { AudioSourceConfig, AudioTrackInfo, ClipRecord, DevConsoleLine, EditorExportProject, ExportProgress, Settings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
+import type { AudioSourceConfig, AudioTrackInfo, ClipRecord, DevConsoleLine, EditorExportProject, ExportProgress, Settings, StorageSettings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -118,8 +119,33 @@ let updater: ReturnType<typeof registerUpdater> | undefined;
 let coreFatal: string | null = null;
 const overlay = new SaveOverlay();
 const devConsole = new DevConsole();
-const editorProbeCache = new Map<string, { path: string; tracks: Promise<AudioTrackInfo[]> }>();
+const editorProbeCache = new Map<string, { identity: string; tracks: Promise<AudioTrackInfo[]> }>();
 const timelineRequests = new Map<string, AbortController>();
+const preparationRequests = new Map<string, { controller: AbortController; users: number; closed: () => void }>();
+
+async function withEditorPreparation<T>(event: Electron.IpcMainInvokeEvent, requestId: string | undefined,
+  task: (signal?: AbortSignal) => Promise<T>): Promise<T> {
+  if (requestId === undefined) return task();
+  if (typeof requestId !== "string" || requestId.length > 128) throw new Error("Invalid preparation request");
+  const key = `${event.sender.id}:${requestId}`;
+  let request = preparationRequests.get(key);
+  if (!request) {
+    const controller = new AbortController();
+    const closed = () => controller.abort();
+    preparationRequests.set(key, request = { controller, users: 0, closed });
+    // One listener per editor session, including clips with many audio tracks.
+    event.sender.once("destroyed", closed);
+  }
+  const current = request;
+  current.users++;
+  try { return await task(current.controller.signal); }
+  finally {
+    if (!--current.users && preparationRequests.get(key) === current) {
+      event.sender.removeListener("destroyed", current.closed);
+      preparationRequests.delete(key);
+    }
+  }
+}
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -190,10 +216,11 @@ async function main(): Promise<void> {
   await seedGamesJson();
   if (!shutdown.acceptingWork) return;
 
-  library = new Library(userData);
-  await trackJob(library.reconcile(clipsDir()));
+  openLibrary(userData);
+  await trackJob(library.reconcile());
   if (!shutdown.acceptingWork) return;
-  storage = new StorageWatchdog(library);
+  library.startWatching();
+  storage = createStorageWatchdog();
   storage.start();
 
   exporter = new ExportManager();
@@ -203,13 +230,9 @@ async function main(): Promise<void> {
       // Edited exports land in the library as source "edited" (never auto-deleted).
       const src = library.get(p.clipId);
       library.importMp4(p.result.path, "edited", src?.game ?? null);
-      win?.webContents.send("library:changed");
       toast(`Export ready: ${path.basename(p.result.path)} (${p.result.sizeMb} MB)`);
       void storage.check();
     }
-  });
-  storage.on("deleted", ({ count, limitGb }) => {
-    toast(`Deleted ${count} old clips to stay under your ${limitGb} GB limit`);
   });
 
   core = new CoreClient();
@@ -327,6 +350,16 @@ function registerIpc(): void {
   handle("settings:get", () => getSettings());
   handle("settings:set", (_e, s: Settings) => applySettings(s));
   handle("storage:defaultFolder", () => app.getPath("userData"));
+  handle("storage:status", (_e, draft?: StorageSettings) => {
+    if (draft === undefined) return storage.status();
+    if (typeof draft?.autoCleanup !== "boolean" || typeof draft.deleteEdited !== "boolean" || typeof draft.limitGb !== "number")
+      throw new Error("Invalid storage settings");
+    return storage.status({ ...getSettings().storage, autoCleanup: draft.autoCleanup, limitGb: draft.limitGb, deleteEdited: draft.deleteEdited });
+  });
+  handle("storage:cleanUp", (_e, maxBytes: number) => {
+    if (typeof maxBytes !== "number" || !Number.isFinite(maxBytes) || maxBytes < 0) throw new Error("Invalid cleanup amount");
+    return storage.cleanUpNow(maxBytes);
+  });
   handle("storage:pickFolder", async (_e, currentPath: string) => {
     const current = String(currentPath ?? "").trim();
     const options: Electron.OpenDialogOptions = {
@@ -349,7 +382,6 @@ function registerIpc(): void {
   handle("library:delete", async (_e, id: string) => {
     await library.delete(id);
     void storage.check();
-    win?.webContents.send("library:changed");
   });
   handle("library:rename", async (_e, id: string, name: string) => {
     if (typeof id !== "string" || typeof name !== "string") throw new Error("Invalid clip name");
@@ -398,13 +430,14 @@ function registerIpc(): void {
     void storage.check();
   });
   handle("editor:probe", (_e, clipId: string) => probeClipTracks(clipId));
-  handle("editor:waveform", async (_e, clipId: string, streamIndex: number, points: number) => {
+  handle("editor:waveform", (event, clipId: string, streamIndex: number, points: number, requestId?: string) => withEditorPreparation(event, requestId, async (signal) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
     const tracks = await probeClipTracks(clipId);
     if (!tracks.some((track) => track.streamIndex === streamIndex)) throw new Error("The requested audio stream does not exist");
-    return generateWaveform(clip.path, streamIndex, clip.durationMs / 1000, points);
-  });
+    signal?.throwIfAborted();
+    return generateWaveform(clip.path, streamIndex, clip.durationMs / 1000, points, library.waveformStorage(clipId, streamIndex), signal);
+  }));
   handle("editor:timeline-frames", async (event, clipId: string, count: number, requestId: string) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
@@ -428,20 +461,25 @@ function registerIpc(): void {
   ipcMain.on("editor:timeline-cancel", (event, requestId: string) => {
     timelineRequests.get(`${event.sender.id}:${requestId}`)?.abort();
   });
-  handle("editor:audio-preview", async (_e, clipId: string, streamIndex: number) => {
+  ipcMain.on("editor:preparation-cancel", (event, requestId: string) => {
+    preparationRequests.get(`${event.sender.id}:${requestId}`)?.controller.abort();
+  });
+  handle("editor:audio-preview", (event, clipId: string, streamIndex: number, requestId?: string) => withEditorPreparation(event, requestId, async (signal) => {
     const clip = library.get(clipId);
     if (!clip) throw new Error("The source clip is no longer in the library");
     const tracks = await probeClipTracks(clipId);
     if (!tracks.some((track) => track.streamIndex === streamIndex)) throw new Error("The requested audio stream does not exist");
-    return prepareAudioPreview(clip.path, streamIndex);
-  });
+    signal?.throwIfAborted();
+    return prepareAudioPreview(clip.path, streamIndex, signal);
+  }));
 
   // Windows drag-out: renderer dragstart hands us the file + icon; Electron's
   // webContents.startDrag hands the native drag to Explorer/Discord/etc.
   ipcMain.on("drag:start", (_e, filePath: string, iconPath?: string) => {
     if (!win) return;
-    const icon = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
-    win.webContents.startDrag({ file: filePath, icon: icon.isEmpty() ? nativeImage.createEmpty() : icon });
+    const thumbnail = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
+    const icon = clipDragIcon(thumbnail.isEmpty() ? appIcon() : thumbnail);
+    win.webContents.startDrag({ file: filePath, icon });
   });
 
   handle("export:start", (_e, clipId: string, project: EditorExportProject) => doExport(clipId, project));
@@ -528,7 +566,7 @@ function registerIpc(): void {
 async function doExport(clipId: string, project: EditorExportProject): Promise<void> {
   const clip = library.get(clipId);
   if (!clip) throw new Error("The source clip is no longer in the library");
-  if (!project || !Array.isArray(project.segments) || !Array.isArray(project.audioTracks)) {
+  if (!project || !Array.isArray(project.videoClips) || !Array.isArray(project.audioTracks)) {
     throw new Error("The editor project is malformed");
   }
   const release = library.tryLockPath(clip.path);
@@ -541,7 +579,9 @@ function probeClipTracks(clipId: string): Promise<AudioTrackInfo[]> {
   const clip = library.get(clipId);
   if (!clip) throw new Error("The source clip is no longer in the library");
   const cached = editorProbeCache.get(clipId);
-  if (cached?.path === clip.path) return cached.tracks;
+  const stat = statSync(clip.path);
+  const identity = `${clip.path}:${stat.mtimeMs}:${stat.size}`;
+  if (cached?.identity === identity) return cached.tracks;
   const pending = probeAudioTracks(clip.path).then((probed) => {
     // Configured rows keep stable mix indexes while disabled so live toggles do
     // not restart the ring. Use the same stable row order when naming streams.
@@ -551,8 +591,8 @@ function probeClipTracks(clipId: string): Promise<AudioTrackInfo[]> {
     const tracks = sourceTracks.map((track, index) => identifyAudioTrack(track, nativeCapture ? configuredSources[index] : undefined, sourceTracks.length));
     return tracks;
   });
-  editorProbeCache.set(clipId, { path: clip.path, tracks: pending });
-  void pending.catch(() => editorProbeCache.delete(clipId));
+  editorProbeCache.set(clipId, { identity, tracks: pending });
+  void pending.catch(() => { if (editorProbeCache.get(clipId)?.tracks === pending) editorProbeCache.delete(clipId); });
   return pending;
 }
 
@@ -678,7 +718,6 @@ async function importClip(file: string): Promise<void> {
   try {
     const rec = await library.importMp4Async(final, "clip", game);
     win?.webContents.send("library:added", rec);
-    win?.webContents.send("library:changed");
   } catch (e) {
     console.error("[importClip] failed", e);
     // Fallback: still notify library changed so UI can refresh
@@ -697,6 +736,23 @@ async function finalizeRecording(mp4: string): Promise<void> {
   } catch (e) {
     toast(`Recording import failed: ${(e as Error).message}`);
   }
+}
+
+function openLibrary(userData: string): void {
+  library = new Library(userData);
+  // Notify after the row exists, including asynchronous recording finalization.
+  library.on("added", () => win?.webContents.send("library:changed"));
+  library.on("removed", (clip: ClipRecord) => {
+    editorProbeCache.delete(clip.id);
+    win?.webContents.send("library:changed");
+  });
+}
+
+function createStorageWatchdog(): StorageWatchdog {
+  const watchdog = new StorageWatchdog(library);
+  watchdog.on("deleted", ({ count }) => toast(`Cleaned up ${count} old ${count === 1 ? "clip" : "clips"}`));
+  watchdog.on("status", status => win?.webContents.send("storage:status", status));
+  return watchdog;
 }
 
 function savedLabel(durationSec: number): string {
@@ -779,6 +835,7 @@ const shutdown = new ShutdownLifecycle({
     themes?.close();
     hotkeys?.dispose();
     const storageStopped = storage?.stop();
+    const libraryStopped = library?.stopWatching();
     exporter?.cancel();
     for (const controller of timelineRequests.values()) controller.abort();
     // Normal quit must still let the core finalize a recording/clip first.
@@ -793,6 +850,7 @@ const shutdown = new ShutdownLifecycle({
     const previewsStopped = stopEditorPreviews();
     const childrenStopped = ownedProcesses.stop();
     const settled = await Promise.allSettled([childrenStopped, bounded("Timeline preview shutdown", previewsStopped),
+      bounded("Library watcher shutdown", Promise.resolve(libraryStopped)),
       bounded("Storage watchdog shutdown", Promise.resolve(storageStopped))]);
     for (const result of settled) if (result.status === "rejected") errors.push(result.reason);
     updateLog("Shutdown: draining active application jobs");
@@ -819,13 +877,13 @@ const shutdown = new ShutdownLifecycle({
     quitting = false;
     if (servicesStoppedForUpdate) {
       if (libraryClosedForUpdate) {
-        library = new Library(app.getPath("userData"));
-        storage = new StorageWatchdog(library);
-        storage.on("deleted", ({ count, limitGb }) => toast("Deleted " + count + " old clips to stay under your " + limitGb + " GB limit"));
+        openLibrary(app.getPath("userData"));
+        storage = createStorageWatchdog();
         libraryClosedForUpdate = false;
       }
       await themes?.startWatching().catch(error => updateLog(`Theme watcher recovery failed: ${String(error)}`));
       if (applicationStarted) {
+        library?.startWatching();
         storage?.start();
         setSoundWindow(win);
         if (!win || win.isDestroyed()) createWindow();
