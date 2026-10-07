@@ -58,6 +58,9 @@ Important areas in `core/src/`:
 - `process_monitor.*`, `detector.*`, `launchers.*`, `game_registry.*`, `game_session.*`, `game_system.*` — process evidence, launcher product hints, qualification, persistence, sessions, primary selection, and capture-subject handoff.
 - `jsonrpc.*` — RPC dispatch and config side effects.
 - `server.*` — local WebSocket server and port announcement.
+- `log.*` — asynchronous stderr logger (libobs log handler included) and libobs log facts (GPU priority result, hook API/transport).
+- `perf_monitor.*`, `perf_analysis.h`, `gpu_engines.*`, `system_info.*` — frame pacing/GPU engine sampling, lag cause classification, `perf.stats`, clip lag segments, session diagnostics.
+- `priority_task.*` — opt-in Recording priority scheduled task, bridge and elevated entry (see `docs/CAPTURE.md`).
 
 ### Game detection/session model
 
@@ -80,6 +83,7 @@ Important files under `app/src/main/` include:
 - `themes.ts` — custom theme loading/protocol/watching.
 - `overlay.ts`, `sound.ts` — clip feedback.
 - `dev-console.ts`, `playback-diagnostics.ts` — diagnostics surfaces.
+- `perf-timeline.ts`, `diagnostics-bundle.ts`, `recording-priority.ts` — perf.stats history, Export diagnostics zip, Recording priority task control.
 - `updater.ts`, `update-controller.ts`, `update-storage.ts`, `update-log.ts` — update lifecycle.
 
 The Electron main process is CommonJS. The renderer is built through Vite as ESM. Do not casually change that module boundary.

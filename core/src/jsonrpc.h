@@ -3,6 +3,7 @@
 #include "app.h"
 #include "config.h"
 #include "game_system.h"
+#include "perf_monitor.h"
 #include "recorder.h"
 #include "replay_ring.h"
 #include "sources.h"
@@ -19,7 +20,7 @@ namespace shard {
 class Rpc {
 public:
   Rpc(App& app, Config& config, Events& events, SourceManager& sources, EncoderManager& encoders,
-      ReplayRing& ring, Recorder& recorder, GameSystem& games);
+      ReplayRing& ring, Recorder& recorder, GameSystem& games, PerfMonitor& perf);
 
   // Full JSON-RPC request text -> response text ("" for notifications).
   std::string handle(const std::string& requestText);
@@ -51,6 +52,7 @@ private:
   ReplayRing& ring_;
   Recorder& recorder_;
   GameSystem& games_;
+  PerfMonitor& perf_;
 
   std::atomic<bool> shutdownRequested_{false};
   mutable std::recursive_mutex dispatchMutex_;

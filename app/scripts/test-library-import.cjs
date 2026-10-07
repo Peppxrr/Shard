@@ -32,7 +32,8 @@ function loadTs(file) {
   mod.paths = Module._nodeModulePaths(path.dirname(absolute));
   const original = mod.require.bind(mod);
   mod.require = id => id in stubs ? stubs[id] : id === './library-import' ? loadTs('src/main/library-import.ts')
-    : id === '../shared/storage-policy' ? loadTs('src/shared/storage-policy.ts') : original(id);
+    : id === '../shared/storage-policy' ? loadTs('src/shared/storage-policy.ts')
+    : id === '../shared/perf' ? loadTs('src/shared/perf.ts') : original(id);
   mod._compile(ts.transpileModule(readFileSync(absolute, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, absolute);
   return mod.exports;
 }

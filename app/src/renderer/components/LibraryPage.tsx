@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ClipRecord } from "../../shared/contracts";
+import { PERF_CAUSE_LABEL } from "../../shared/perf";
 import { Icon, IconButton, Button, EmptyState, Modal, ShardSelect } from "./ui";
 import { mediaFileUrl, StandaloneVideoPlayer } from "../editor/VideoPreview";
 import { ClipRename } from "./ClipRename";
@@ -198,6 +199,12 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
         <span data-shard-slot="clip-play" className="clip__play" aria-hidden="true"><Icon name="play" size={24} /></span>
         <span data-shard-slot="clip-source" className="clip__source">{SOURCE_NAMES[clip.source]}</span>
         <span data-shard-slot="clip-duration" className="badge badge--dur num">{fmtDuration(clip.durationMs)}</span>
+        {clip.lag && clip.lag.segments.length > 0 && (
+          <span data-shard-slot="clip-lag" data-shard-state={clip.lag.cause} className="badge badge--lag"
+            title={`${clip.lag.lagged + clip.lag.skipped} dropped frames · ${PERF_CAUSE_LABEL[clip.lag.cause]}. Open in the editor to see where.`}>
+            Dropped frames
+          </span>
+        )}
       </button>
       <div data-shard-slot="clip-details" className="clip__meta">
         <div data-shard-slot="clip-heading" className="clip__heading">

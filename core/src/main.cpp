@@ -7,6 +7,10 @@
 #include "config.h"
 #include "encoders.h"
 #include "game_system.h"
+#include "log.h"
+#include "perf_monitor.h"
+#include "priority_task.h"
+#include "system_info.h"
 #include "recorder.h"
 #include "replay_ring.h"
 #include "jsonrpc.h"
@@ -25,7 +29,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -66,37 +69,10 @@ void setProcessDpiAware()
 #endif
 }
 
-const char* obsLogLevelName(int level)
-{
-  switch (level) {
-    case LOG_ERROR: return "error";
-    case LOG_WARNING: return "warn";
-    case LOG_INFO: return "info";
-    case LOG_DEBUG: return "debug";
-    default: return "unknown";
-  }
-}
-
-void coreObsLog(int level, const char* format, va_list args, void*)
-{
-  va_list measureArgs;
-  va_copy(measureArgs, args);
-  const int length = std::vsnprintf(nullptr, 0, format, measureArgs);
-  va_end(measureArgs);
-  if (length < 0) {
-    std::fprintf(stderr, "[obs][error] could not format OBS log message\n");
-    std::fflush(stderr);
-    return;
-  }
-
-  std::vector<char> message(static_cast<size_t>(length) + 1);
-  va_list formatArgs;
-  va_copy(formatArgs, args);
-  std::vsnprintf(message.data(), message.size(), format, formatArgs);
-  va_end(formatArgs);
-  std::fprintf(stderr, "[obs][%s] %s\n", obsLogLevelName(level), message.data());
-  std::fflush(stderr);
-}
+struct LogSession {
+  LogSession() { logStart(); }
+  ~LogSession() { logStop(); }
+};
 
 struct CliOptions {
   std::string configDir;
@@ -105,6 +81,8 @@ struct CliOptions {
   bool selftest = false;
   std::string selftestOut;
   std::string gamesPath;
+  // "task" when the Recording priority scheduled task launched this core.
+  std::string launchMode = "normal";
 };
 
 CliOptions parseArgs(int argc, char** argv)
@@ -114,7 +92,7 @@ CliOptions parseArgs(int argc, char** argv)
     std::string a = argv[i];
     auto need = [&](const char* name) -> std::string {
       if (i + 1 >= argc) {
-        std::fprintf(stderr, "missing value for %s\n", name);
+        logFormat("missing value for %s", name);
         std::exit(2);
       }
       return argv[++i];
@@ -131,6 +109,8 @@ CliOptions parseArgs(int argc, char** argv)
       o.selftest = true;
     else if (a == "--out")
       o.selftestOut = need("--out");
+    else if (a == "--launch-mode")
+      o.launchMode = need("--launch-mode") == "task" ? "task" : "normal";
     else if (a == "--help" || a == "-h") {
       std::printf(
           "shardcore [--config-dir <dir>] [--core-bin <dir>] [--port <n>] [--games <games.json>] [--selftest --out "
@@ -163,13 +143,13 @@ void selftestSink(void* ctx, const char* type, const nlohmann::json& params)
     st->ok = !st->path.empty();
     st->done.store(true);
   } else if (std::strcmp(type, "error") == 0) {
-    std::fprintf(stderr, "selftest: error %s: %s\n", params.value("code", std::string()).c_str(),
+    logFormat("selftest: error %s: %s", params.value("code", std::string()).c_str(),
                  params.value("message", std::string()).c_str());
   }
 }
 
 int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, SourceManager& sources,
-                EncoderManager& encoders, ReplayRing& ring)
+                EncoderManager& encoders, ReplayRing& ring, PerfMonitor& perf)
 {
   SelftestState st;
   events.sinkCtx = &st;
@@ -186,15 +166,16 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
   sources.applyVideoSource();
   sources.applyAudioSources();
   sources.startWatchdog();
+  perf.start();
 
   if (!ring.start()) {
-    std::fprintf(stderr, "SELFTEST {\"ok\":false,\"reason\":\"ring start failed\"}\n");
+    logLine("SELFTEST {\"ok\":false,\"reason\":\"ring start failed\"}");
     sources.stopWatchdog();
     return 1;
   }
 
   // Warm the ring for 10 s.
-  std::fprintf(stderr, "selftest: warming ring 10 s...\n");
+  logLine("selftest: warming ring 10 s...");
   std::this_thread::sleep_for(seconds(10));
 
   ring.save(3);
@@ -205,7 +186,7 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
     std::this_thread::sleep_for(milliseconds(100));
 
   if (!st.done.load() || !st.ok) {
-    std::fprintf(stderr, "SELFTEST {\"ok\":false,\"reason\":\"no clip.saved within timeout\"}\n");
+    logLine("SELFTEST {\"ok\":false,\"reason\":\"no clip.saved within timeout\"}");
     sources.stopWatchdog();
     ring.stop();
     return 1;
@@ -217,6 +198,7 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
   // Order matters: stop the watchdog before the ring so the capture-activity
   // callback can never touch the ring during teardown, then release sources
   // before obs_shutdown.
+  perf.stop();
   sources.stopWatchdog();
   ring.stop();
   sources.releaseAll();
@@ -229,12 +211,18 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
 int main(int argc, char** argv)
 {
   setProcessDpiAware(); // before any window/obs_startup: WGC needs DPI awareness
-  // Keep all OBS levels and arbitrarily long messages in the diagnostic log
-  // while preserving stdout's first-line PORT handshake for Electron.
-  base_set_log_handler(coreObsLog, nullptr);
+  // An elevated core (Recording priority, or Shard run as administrator)
+  // must never resolve DLLs from PATH or the working directory.
+  if (processElevated())
+    hardenElevatedDllSearch();
+  // Asynchronous diagnostic log: libobs threads only enqueue, so a slow
+  // stderr reader can never stall rendering, audio or encoding. Keeps all OBS
+  // levels and long messages while stdout carries only the PORT handshake.
+  LogSession logSession;
+  base_set_log_handler(logObs, nullptr);
   CliOptions opt = parseArgs(argc, argv);
   if (opt.configDir.empty()) {
-    std::fprintf(stderr, "shardcore: --config-dir is required\n");
+    logLine("shardcore: --config-dir is required");
     return 2;
   }
   if (opt.coreBinDir.empty())
@@ -258,43 +246,48 @@ int main(int argc, char** argv)
   Events events;
   App app(config, events);
   if (!app.init()) {
-    std::fprintf(stderr, "shardcore: %s\n", app.lastError().c_str());
+    logFormat("shardcore: %s", app.lastError().c_str());
     return 2;
   }
 
   EncoderManager encoders(config);
   const std::string preferredEncoder = encoders.resolveVideoEncoderId(config.video.encoder);
-  std::fprintf(stderr,
-               "[startup][info] capture_mode=%s encoder_requested=%s encoder_preferred=%s video_preset=%s"
-               " fps=%d bitrate_kbps=%d replay_max_seconds=%d replay_max_mb=%d\n",
-               config.capture.mode.c_str(), config.video.encoder.c_str(), preferredEncoder.c_str(),
-               config.video.preset.c_str(), config.video.fps, encoders.effectiveBitrateKbps(),
-               config.replay.maxSeconds, config.replay.maxMb);
-  std::fflush(stderr);
+  logFormat("[startup][info] capture_mode=%s encoder_requested=%s encoder_preferred=%s video_preset=%s"
+            " fps=%d bitrate_kbps=%d replay_max_seconds=%d replay_max_mb=%d launch=%s",
+            config.capture.mode.c_str(), config.video.encoder.c_str(), preferredEncoder.c_str(),
+            config.video.preset.c_str(), config.video.fps, encoders.effectiveBitrateKbps(),
+            config.replay.maxSeconds, config.replay.maxMb, opt.launchMode.c_str());
   SourceManager sources(app, config, events);
   ReplayRing ring(app, config, events, encoders);
   Recorder recorder(app, config, events, encoders);
   GameSystem games(config, events, sources, recorder);
+  // Declared after its users so it is destroyed (and its sampler joined)
+  // before them on early returns.
+  PerfMonitor perf(app, config, events, sources);
+  perf.setLaunchMode(opt.launchMode);
+  ring.setPerfMonitor(&perf);
+  recorder.setPerfMonitor(&perf);
 
   // Buffer only while something is being captured; the watchdog's activity
   // signal drives the ring's start/stop (15 s grace) lifecycle.
   sources.setCaptureActivityCb([&ring](bool active) { ring.setCaptureActive(active); });
 
   if (opt.selftest)
-    return runSelftest(opt, config, events, app, sources, encoders, ring);
+    return runSelftest(opt, config, events, app, sources, encoders, ring, perf);
 
   sources.applyVideoSource();
   sources.applyAudioSources();
+  perf.start();
 
   // Game-only startup has no subject until a game is detected. Avoid showing
   // a briefly counting buffer of empty video before the first real capture.
   if (sources.subject().kind != SourceManager::Subject::Kind::None && !ring.start()) {
-    std::fprintf(stderr, "shardcore: replay ring failed to start\n");
+    logLine("shardcore: replay ring failed to start");
     return 3;
   }
   sources.startWatchdog();
 
-  Rpc rpc(app, config, events, sources, encoders, ring, recorder, games);
+  Rpc rpc(app, config, events, sources, encoders, ring, recorder, games, perf);
   Server server(config, rpc);
 
   // Route core events to all connected RPC clients. A single process-wide
@@ -307,7 +300,7 @@ int main(int argc, char** argv)
   g_server = &server;
 
   if (!server.start()) {
-    std::fprintf(stderr, "shardcore: failed to start RPC server\n");
+    logLine("shardcore: failed to start RPC server");
     sources.stopWatchdog();
     return 4;
   }
@@ -333,11 +326,12 @@ int main(int argc, char** argv)
   }
 
   // Ordered shutdown.
-  std::fprintf(stderr, "shardcore: shutdown requested\n");
+  logLine("shardcore: shutdown requested");
   games.stop();
   statsRun.store(false);
   statsThread.join();
   recorder.prepareVideoReset();
+  perf.stop();
   // Stop the watchdog before the ring so its capture-activity callback can
   // never touch the ring during teardown.
   sources.stopWatchdog();
@@ -353,6 +347,10 @@ int main(int argc, char** argv)
 int main(int argc, char** argv)
 {
 #ifdef _WIN32
+  // Recording priority helpers (status/install/bridge/elevated entry) run
+  // instead of the core and never start the normal supervisor.
+  if (const auto code = shard::runPriorityMode(argc, argv))
+    return *code;
   if (!shard::isSupervisedChild(argc, argv))
     return shard::superviseProcessTree();
 #endif

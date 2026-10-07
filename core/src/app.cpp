@@ -2,6 +2,7 @@
 
 #include "audio_isolation_capture.h"
 #include "encoders.h"
+#include "log.h"
 #include "x265_encoder.h"
 #include "capture_adapter.h"
 
@@ -9,6 +10,7 @@
 #include <algorithm>
 
 #include <filesystem>
+#include <sstream>
 #include <unordered_map>
 
 #ifdef _WIN32
@@ -16,7 +18,6 @@
 #include <d3d11.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
-#include <iostream>
 #endif
 
 namespace shard {
@@ -44,16 +45,17 @@ uint64_t adapterLuid(LUID luid)
   return (static_cast<uint64_t>(static_cast<uint32_t>(luid.HighPart)) << 32) | luid.LowPart;
 }
 
-uint32_t automaticCaptureAdapter()
+GraphicsAdapterInfo automaticCaptureAdapter()
 {
   using Microsoft::WRL::ComPtr;
   ComPtr<IDXGIFactory1> factory;
   if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-    std::cerr << "[capture-adapter] enumeration_failed selected_index=0 reason=dxgi_unavailable\n";
-    return 0;
+    logLine("[capture-adapter] enumeration_failed selected_index=0 reason=dxgi_unavailable");
+    return {};
   }
   std::vector<CaptureAdapter> adapters;
   std::vector<DXGI_ADAPTER_DESC1> descriptions;
+  std::vector<uint64_t> driverVersions;
   for (UINT index = 0;; ++index) {
     ComPtr<IDXGIAdapter1> adapter;
     if (FAILED(factory->EnumAdapters1(index, &adapter))) break;
@@ -63,12 +65,17 @@ uint32_t automaticCaptureAdapter()
     const bool supported = !software && SUCCEEDED(D3D11CreateDevice(
         adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
         D3D11_SDK_VERSION, nullptr, nullptr, nullptr));
+    LARGE_INTEGER umd{};
+    driverVersions.push_back(SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd))
+                                 ? static_cast<uint64_t>(umd.QuadPart) : 0);
     adapters.push_back({index, adapterLuid(desc.AdapterLuid), desc.DedicatedVideoMemory, software, supported});
     descriptions.push_back(desc);
-    std::cerr << "[capture-adapter] detected index=" << index << " name=\"" << utf8FromWide(desc.Description)
-              << "\" vendor_id=" << desc.VendorId << " device_id=" << desc.DeviceId
-              << " luid=" << adapterLuid(desc.AdapterLuid) << " dedicated_bytes=" << desc.DedicatedVideoMemory
-              << " software=" << software << " d3d11=" << supported << '\n';
+    std::ostringstream line;
+    line << "[capture-adapter] detected index=" << index << " name=\"" << utf8FromWide(desc.Description)
+         << "\" vendor_id=" << desc.VendorId << " device_id=" << desc.DeviceId
+         << " luid=" << adapterLuid(desc.AdapterLuid) << " dedicated_bytes=" << desc.DedicatedVideoMemory
+         << " software=" << software << " d3d11=" << supported;
+    logLine(line.str());
   }
   uint64_t preferred = 0;
   ComPtr<IDXGIFactory6> modernFactory;
@@ -86,15 +93,23 @@ uint32_t automaticCaptureAdapter()
       if (usable != adapters.end()) { preferred = id; break; }
     }
   }
-  const auto selected = selectCaptureAdapter(adapters, preferred);
+  GraphicsAdapterInfo info;
+  info.index = selectCaptureAdapter(adapters, preferred);
   for (size_t i = 0; i < adapters.size(); ++i) {
-    if (adapters[i].index != selected) continue;
+    if (adapters[i].index != info.index) continue;
     const auto& desc = descriptions[i];
-    std::cerr << "[capture-adapter] selected_index=" << selected << " name=\"" << utf8FromWide(desc.Description)
-              << "\" vendor_id=" << desc.VendorId << " luid=" << adapters[i].luid
-              << " reason=" << (preferred ? "windows_high_performance" : "hardware_memory_fallback") << '\n';
+    info.luid = adapters[i].luid;
+    info.name = utf8FromWide(desc.Description);
+    info.vendorId = desc.VendorId;
+    info.driverVersion = driverVersions[i];
+    std::ostringstream line;
+    line << "[capture-adapter] selected_index=" << info.index << " name=\"" << info.name
+         << "\" vendor_id=" << desc.VendorId << " luid=" << adapters[i].luid
+         << " driver=" << formatDriverVersion(info.driverVersion, info.vendorId)
+         << " reason=" << (preferred ? "windows_high_performance" : "hardware_memory_fallback");
+    logLine(line.str());
   }
-  return selected;
+  return info;
 }
 
 std::unordered_map<std::string, std::string> activeMonitorNames()
@@ -270,7 +285,7 @@ bool App::resetVideo(uint32_t captureWidth, uint32_t captureHeight)
     graphicsAdapter_ = automaticCaptureAdapter();
     graphicsAdapterSelected_ = true;
   }
-  ovi.adapter = graphicsAdapter_;
+  ovi.adapter = graphicsAdapter_.index;
 #endif
   ovi.fps_den = 1;
 
@@ -307,7 +322,11 @@ bool App::resetVideo(uint32_t captureWidth, uint32_t captureHeight)
   ovi.range = VIDEO_RANGE_PARTIAL;
   ovi.scale_type = OBS_SCALE_BILINEAR;
 
-  int ret = obs_reset_video(&ovi);
+  int ret = OBS_VIDEO_FAIL;
+  {
+    std::unique_lock<std::shared_mutex> lock(videoMutex_);
+    ret = obs_reset_video(&ovi);
+  }
   if (ret != OBS_VIDEO_SUCCESS) {
     lastError_ = "obs_reset_video failed: " + std::to_string(ret);
     return false;

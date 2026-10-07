@@ -178,15 +178,18 @@ obs_data_t* EncoderManager::videoSettings(const std::string& encoderId) const
   } else if (id == "obs_x265") {
     obs_data_set_string(s, "preset", "veryfast");
   } else if (id.find("nvenc") != std::string::npos) {
-    // Single-pass NVENC keeps the capture path light enough to coexist with
-    // games already saturating the GPU. Texture encoders avoid a GPU->CPU copy.
+    // Keys are obs-nvenc's (OBS 31+); the legacy jim-nvenc "preset2" and
+    // "psycho_aq" names are read only by its compatibility ids, never by the
+    // *_tex encoders used here. Lookahead and psycho-visual tuning
+    // (adaptive_quantization) cost extra GPU work and stay off; single pass
+    // ("disabled") avoids even the quarter-resolution first pass. The *_tex
+    // ids take NV12 textures straight from the libobs mix (no GPU->CPU copy);
+    // PerfMonitor logs whether that path is actually active.
     obs_data_set_string(s, "preset", "p3");
-    obs_data_set_string(s, "preset2", "p3");
     obs_data_set_string(s, "tune", "ll");
     obs_data_set_string(s, "multipass", "disabled");
     obs_data_set_string(s, "profile", id.find("h264") != std::string::npos ? "high" : "main");
     obs_data_set_bool(s, "adaptive_quantization", false);
-    obs_data_set_bool(s, "psycho_aq", false);
     obs_data_set_bool(s, "lookahead", false);
     obs_data_set_int(s, "bf", 2);
   } else if (id.find("_amf") != std::string::npos) {

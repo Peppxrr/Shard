@@ -1,5 +1,7 @@
 #include "server.h"
 
+#include "log.h"
+
 #include <cstdio>
 #include <random>
 
@@ -82,22 +84,36 @@ bool Server::start()
       if (!ws)
         return;
 
-      {
-        std::lock_guard<std::mutex> lock(clientsMtx_);
-        clients_.insert(ws.get());
-      }
-
       ws->setOnMessageCallback([this, wsWeak](const ix::WebSocketMessagePtr& msg) {
         std::shared_ptr<ix::WebSocket> ws = wsWeak.lock();
         if (!ws)
           return;
 
         if (msg->type == ix::WebSocketMessageType::Open) {
+          // Browsers always send Origin on WebSocket handshakes; the Electron
+          // main process (Node) and Shard's tools never do. Refusing them keeps
+          // web pages from scanning localhost and driving the core.
+          const auto origin = msg->openInfo.headers.find("Origin");
+          if (origin != msg->openInfo.headers.end()) {
+            logFormat("[rpc][warn] rejected WebSocket client with Origin \"%s\"", origin->second.c_str());
+            ws->close(4003, "browser clients are not allowed");
+            return;
+          }
+          {
+            std::lock_guard<std::mutex> lock(clientsMtx_);
+            clients_.insert(ws.get());
+          }
           // Handshake complete — greet the client so the app knows the core
           // came up. (Sending from the connection callback would race the
           // HTTP upgrade.)
           ws->send(nlohmann::json({{"jsonrpc", "2.0"}, {"method", "ready"}, {"params", rpc_.buildState()}}).dump());
         } else if (msg->type == ix::WebSocketMessageType::Message) {
+          {
+            // Only clients accepted at Open may issue RPCs.
+            std::lock_guard<std::mutex> lock(clientsMtx_);
+            if (!clients_.count(ws.get()))
+              return;
+          }
           onMessage(ws.get(), msg);
         } else if (msg->type == ix::WebSocketMessageType::Close) {
           std::lock_guard<std::mutex> lock(clientsMtx_);
@@ -114,14 +130,11 @@ bool Server::start()
   }
 
   if (port_.load() <= 0) {
-    std::fprintf(stderr, "shardcore: failed to bind RPC server after %d attempts\n", attempt);
+    logFormat("shardcore: failed to bind RPC server after %d attempts\n", attempt);
     return false;
   }
 
-  thread_ = std::thread([this] {
-    while (running_.load())
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  });
+  thread_ = std::thread([this] { senderLoop(); });
 
   std::printf("PORT %d\n", port_.load());
   std::fflush(stdout);
@@ -132,14 +145,18 @@ void Server::stop()
 {
   if (!running_.exchange(false))
     return;
+  // The sender flushes already queued notifications before it exits. Taking
+  // the queue lock orders the flag change before the sender's wait.
+  { std::lock_guard<std::mutex> lock(outboxMtx_); }
+  outboxCv_.notify_all();
+  if (thread_.joinable())
+    thread_.join();
   {
     std::lock_guard<std::mutex> lock(clientsMtx_);
     clients_.clear();
   }
   if (server_)
     server_->stop();
-  if (thread_.joinable())
-    thread_.join();
   server_.reset();
 }
 
@@ -152,15 +169,45 @@ void Server::onMessage(ix::WebSocket* ws, const ix::WebSocketMessagePtr& msg)
 
 void Server::broadcast(const char* type, const nlohmann::json& params)
 {
-  if (!running_.load() || !server_)
+  if (!running_.load())
     return;
-  nlohmann::json notification = {{"jsonrpc", "2.0"}, {"method", type}, {"params", params}};
-  std::string text = notification.dump();
+  // Bounded: a stalled client must not grow memory without limit. Events are
+  // low-rate; reaching this bound means nobody is draining the socket.
+  constexpr size_t kMaxQueuedEvents = 1024;
+  std::string text = nlohmann::json({{"jsonrpc", "2.0"}, {"method", type}, {"params", params}}).dump();
+  {
+    std::lock_guard<std::mutex> lock(outboxMtx_);
+    if (outbox_.size() >= kMaxQueuedEvents) {
+      if (droppedEvents_++ == 0)
+        logFormat("[rpc][warn] event queue full; dropping notifications until clients catch up");
+      return;
+    }
+    outbox_.push_back(std::move(text));
+  }
+  outboxCv_.notify_one();
+}
 
-  std::lock_guard<std::mutex> lock(clientsMtx_);
-  for (ix::WebSocket* ws : clients_) {
-    if (ws)
-      ws->send(text);
+void Server::senderLoop()
+{
+  std::deque<std::string> batch;
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> lock(outboxMtx_);
+      outboxCv_.wait(lock, [this] { return !running_.load() || !outbox_.empty(); });
+      if (outbox_.empty() && !running_.load())
+        return;
+      batch.swap(outbox_);
+      if (droppedEvents_) {
+        logFormat("[rpc][warn] dropped %llu event notifications", static_cast<unsigned long long>(droppedEvents_));
+        droppedEvents_ = 0;
+      }
+    }
+    std::lock_guard<std::mutex> lock(clientsMtx_);
+    for (const auto& text : batch)
+      for (ix::WebSocket* ws : clients_)
+        if (ws)
+          ws->send(text);
+    batch.clear();
   }
 }
 

@@ -13,6 +13,8 @@ import type {
   EditorExportProject,
   ExportProgress,
   ExportEncoderInfo,
+  PerfSample,
+  RecordingPriorityStatus,
   Settings,
   StorageSettings,
   StorageStatus,
@@ -104,6 +106,15 @@ const api: ShardApi = {
   },
   version: () => ipcRenderer.invoke("app:version") as Promise<string>,
   copyPlaybackReport: (sampleJson: string) => ipcRenderer.invoke("playback:copy-report", sampleJson) as Promise<void>,
+  exportDiagnostics: () => ipcRenderer.invoke("diagnostics:export") as Promise<string | null>,
+  getPerfTimeline: () => ipcRenderer.invoke("perf:timeline") as Promise<PerfSample[]>,
+  getRecordingPriority: () => ipcRenderer.invoke("priority:status") as Promise<RecordingPriorityStatus>,
+  setRecordingPriority: (enabled: boolean) => ipcRenderer.invoke("priority:set", enabled) as Promise<RecordingPriorityStatus>,
+  onRecordingPriority: (cb) => {
+    const listener = (_e: unknown, status: RecordingPriorityStatus) => cb(status);
+    ipcRenderer.on("priority:status", listener);
+    return () => ipcRenderer.removeListener("priority:status", listener);
+  },
   restartApp: () => ipcRenderer.invoke("app:restart") as Promise<void>,
   windowControlsSupported: process.platform === "win32",
   minimizeWindow: () => ipcRenderer.invoke("window:minimize") as Promise<void>,

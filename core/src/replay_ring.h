@@ -19,6 +19,8 @@
 
 namespace shard {
 
+class PerfMonitor;
+
 // RAM replay ring. Registers a custom encoded output type ("shard_ring")
 // whose encoded_packet callback keeps a RAM ring of keyframe-anchored encoded
 // packets (byte cap + time cap). save(durationSec) snapshots the tail of the
@@ -57,6 +59,9 @@ public:
   bool active() const { return active_.load(); }
   bool muxing() const { return muxing_.load(); }
 
+  // Optional: encoder-path reporting and per-clip lag markers.
+  void setPerfMonitor(PerfMonitor* perf) { perf_ = perf; }
+
 private:
   // ---- registered output type ----
   static const char* ringGetName(void* type);
@@ -77,8 +82,10 @@ private:
   struct SaveRequest {
     int durationSec = 0;
     int64_t endTimeUs = 0;
+    uint64_t requestSteadyUs = 0; // steady clock at the hotkey/RPC
   };
-  bool snapshotSave(const SaveRequest& request, std::vector<encoder_packet>& out, std::string& path, double& actualSec);
+  bool snapshotSave(const SaveRequest& request, std::vector<encoder_packet>& out, std::string& path, double& actualSec,
+                    uint64_t& startSteadyUs, uint64_t& endSteadyUs);
   void saveWorker();
   void muxToFile(const std::vector<encoder_packet>& packets, const std::string& path, bool& success,
                  std::string& error);
@@ -87,6 +94,7 @@ private:
   Config& config_;
   Events& events_;
   EncoderManager& encoders_;
+  PerfMonitor* perf_ = nullptr;
 
   Ring* ring_ = nullptr;
   obs_output_t* output_ = nullptr;

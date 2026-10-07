@@ -1,7 +1,8 @@
 import { THEME_CHANGE_EVENT } from "../themeManager";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import type { WaveformData } from "../../shared/contracts";
+import type { ClipLagSegment, WaveformData } from "../../shared/contracts";
+import { PERF_CAUSE_LABEL } from "../../shared/perf";
 import { Button, ContextMenu, Icon, IconButton } from "../components/ui";
 import {
   clipAt,
@@ -53,6 +54,8 @@ interface TimelineProps {
   onRedo: () => void;
   onTrackChange: (streamIndex: number, change: Partial<Pick<EditorAudioTrack, "included" | "muted" | "volume">>) => void;
   onDeleteAudioTrack: (streamIndex: number) => void;
+  // Where frames were dropped while recording, in source seconds.
+  lagSegments?: ClipLagSegment[];
 }
 
 interface MenuState {
@@ -206,6 +209,7 @@ export function Timeline({
   onRedo,
   onTrackChange,
   onDeleteAudioTrack,
+  lagSegments = [],
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [viewportWidth, setViewportWidth] = useState(800);
@@ -707,6 +711,16 @@ export function Timeline({
                   </div>
                 );
               })}
+              {view.videoClips.flatMap(clip => lagSegments
+                .filter(segment => segment.end > clip.sourceStart && segment.start < clip.sourceEnd)
+                .map(segment => {
+                  const start = Math.max(segment.start, clip.sourceStart);
+                  const end = Math.min(segment.end, clip.sourceEnd);
+                  return <span key={`${clip.id}:${segment.start}`} data-shard-slot="timeline-lag" data-shard-state={segment.cause}
+                    className="timeline__lag"
+                    title={`${segment.lagged + segment.skipped} dropped frames (${PERF_CAUSE_LABEL[segment.cause]})`}
+                    style={{ left: timeToPixel(clip.timelineStart + start - clip.sourceStart, pxPerSecond), width: Math.max(2, (end - start) * pxPerSecond) }} />;
+                }))}
             </div>
           </div>
 

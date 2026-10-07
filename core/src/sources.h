@@ -106,6 +106,18 @@ public:
     return subject_;
   }
 
+  // Active capture method and why it is active, for diagnostics.
+  struct CaptureStatus {
+    std::string subject = "none"; // monitor | game | none
+    std::string name;
+    uint32_t pid = 0;
+    std::string method = "none"; // game_capture | wgc_window | wgc_monitor | none
+    std::string reason;
+    uint32_t hookWidth = 0;
+    uint32_t hookHeight = 0;
+  };
+  CaptureStatus captureStatus() const;
+
 private:
   friend struct SourceManagerCaptureTestAccess;
   void watchdogLoop();
@@ -141,6 +153,8 @@ private:
   void resetFrameProbeLocked();
   void emitSubjectChanged();
   void removeVideoSourceItem();
+  // Logs [capture-method] whenever the selected method or its reason changes.
+  void noteCaptureMethodLocked(const char* method, const std::string& reason);
 
   App& app_;
   Config& config_;
@@ -197,6 +211,8 @@ private:
   std::string lastHookAction_ = "none";
   std::string lastWindowAction_ = "none";
   uintptr_t targetWindow_ = 0;
+  std::string captureMethod_ = "none";
+  std::string captureMethodReason_;
   CaptureDisplayState captureDisplay_;
   uintptr_t captureDisplayWindow_ = 0;
   uint64_t lastDisplayQueryMs_ = 0;

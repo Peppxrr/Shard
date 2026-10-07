@@ -69,6 +69,8 @@ function normalizeSettings(next: Settings): Settings {
   }
   // Backwards compat: hardwareAcceleration defaults to true when missing (older installs)
   if (typeof (next.app as unknown as Record<string, unknown>).hardwareAcceleration !== "boolean") (next.app as unknown as Record<string, unknown>).hardwareAcceleration = true;
+  // Elevation is strictly opt-in: anything but an explicit true is off.
+  next.app.recordingPriority = next.app.recordingPriority === true;
   if ((next.export.resolution as string) === "auto") next.export.resolution = "source";
   // Older versions used a zero limit to turn cleanup off.
   if (!Number.isFinite(next.storage.limitGb) || next.storage.limitGb <= 0) {

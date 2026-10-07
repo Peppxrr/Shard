@@ -7,7 +7,8 @@ import { constants as fsConstants, promises as fs, watch, type FSWatcher } from 
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import type { ClipRecord, StorageSettings } from "../shared/contracts";
+import type { ClipLagInfo, ClipRecord, StorageSettings } from "../shared/contracts";
+import { parseClipLag } from "../shared/perf";
 import { ffprobe, ffprobeAsync, makeThumbnail, makeThumbnailAsync, removeEditorMedia } from "./ffmpeg";
 import type { WaveformStorage } from "./waveform-cache";
 import { getSettings } from "./settings";
@@ -23,6 +24,8 @@ import {
 export interface ClipImportMetadata {
   createdAt?: number;
   fingerprint?: ImportSourceFingerprint;
+  // Frames the core lost while capturing this file (clip.saved / recording.state).
+  lag?: ClipLagInfo | null;
 }
 
 // SQLite columns are snake_case; the renderer contract is camelCase.
@@ -41,6 +44,7 @@ function toClipRecord(r: Record<string, unknown>): ClipRecord {
     protected: Number(r.protected),
     source: (r.source as "clip" | "recording" | "edited") ?? "clip",
     ...(r.import_source_path ? { importedFrom: "medal" as const } : {}),
+    ...(r.lag_json ? { lag: parseClipLag(r.lag_json) } : {}),
   };
 }
 
@@ -77,6 +81,7 @@ export class Library extends EventEmitter {
     if (!columns.has("import_source_path")) this.db.exec("ALTER TABLE clips ADD COLUMN import_source_path TEXT");
     if (!columns.has("import_source_size")) this.db.exec("ALTER TABLE clips ADD COLUMN import_source_size INTEGER");
     if (!columns.has("import_source_mtime")) this.db.exec("ALTER TABLE clips ADD COLUMN import_source_mtime REAL");
+    if (!columns.has("lag_json")) this.db.exec("ALTER TABLE clips ADD COLUMN lag_json TEXT");
     if (!columns.has("imported_at")) {
       this.db.transaction(() => {
         this.db.exec("ALTER TABLE clips ADD COLUMN imported_at INTEGER NOT NULL DEFAULT 0");
@@ -218,21 +223,25 @@ export class Library extends EventEmitter {
       protected: 0,
       source,
       ...(metadata.fingerprint ? { importedFrom: "medal" as const } : {}),
+      ...(metadata.lag ? { lag: metadata.lag } : {}),
     };
     try {
       this.db
         .prepare(
           `INSERT INTO clips (id, path, thumb, game, created_at, duration_ms, size_bytes, width, height, fps, protected, source,
-             import_source_path, import_source_size, import_source_mtime, imported_at)
+             import_source_path, import_source_size, import_source_mtime, imported_at, lag_json)
            VALUES (@id, @path, @thumb, @game, @createdAt, @durationMs, @sizeBytes, @width, @height, @fps, @protected, @source,
-             @importSourcePath, @importSourceSize, @importSourceMtime, @importedAt)`
+             @importSourcePath, @importSourceSize, @importSourceMtime, @importedAt, @lagJson)`
         )
         .run({
-          ...rec,
+          id: rec.id, path: rec.path, thumb: rec.thumb, game: rec.game, createdAt: rec.createdAt,
+          durationMs: rec.durationMs, sizeBytes: rec.sizeBytes, width: rec.width, height: rec.height, fps: rec.fps,
+          protected: rec.protected, source: rec.source,
           importedAt: Date.now(),
           importSourcePath: metadata.fingerprint?.path ?? null,
           importSourceSize: metadata.fingerprint?.size ?? null,
           importSourceMtime: metadata.fingerprint?.mtimeMs ?? null,
+          lagJson: metadata.lag ? JSON.stringify(metadata.lag) : null,
         });
     } catch (error) {
       if (thumb) await fs.unlink(thumb).catch(() => {});

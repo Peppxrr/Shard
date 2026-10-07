@@ -120,6 +120,33 @@ export class DevConsole {
     return !!this.win && !this.win.isDestroyed();
   }
 
+  // The current session log up to its last complete record, for bundles.
+  async sessionSnapshot(): Promise<{ path: string; bytes: number } | null> {
+    if (!this.sessionLogPath) return null;
+    try {
+      return { path: this.sessionLogPath, bytes: await this.flushSessionLog() };
+    } catch {
+      return null;
+    }
+  }
+
+  // Earlier sessions' logs, newest first (each app launch writes one).
+  priorSessionLogs(): string[] {
+    if (!this.sessionLogPath) return [];
+    const directory = dirname(this.sessionLogPath);
+    try {
+      return readdirSync(directory)
+        .filter(name => /^dev-console-.*\.jsonl$/i.test(name))
+        .map(name => joinPath(directory, name))
+        .filter(file => !isSameFile(file, this.sessionLogPath!))
+        .map(file => ({ file, modified: statSync(file).mtimeMs }))
+        .sort((a, b) => b.modified - a.modified)
+        .map(entry => entry.file);
+    } catch {
+      return [];
+    }
+  }
+
   // Returns the new open state.
   toggle(): boolean {
     if (this.open) {

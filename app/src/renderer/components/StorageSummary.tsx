@@ -1,8 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import type { StorageSettings, StorageStatus } from "../../shared/contracts";
 import { MIN_RETAINED_CLIPS } from "../../shared/storage-policy";
 import { Button, Confirm } from "./ui";
 import { fmtSize } from "./LibraryPage";
+
+export function storageMeterStyle(pct: number): CSSProperties {
+  const usage = Math.max(0, Math.min(100, pct));
+  const warning = Math.min(100, usage / 75 * 100);
+  const danger = Math.max(0, Math.min(100, (usage - 75) / 15 * 100));
+  return {
+    width: `${usage}%`,
+    "--_storage-color": `color-mix(in srgb, color-mix(in srgb, var(--accent), var(--warn) ${warning}%), var(--danger) ${danger}%)`,
+  } as CSSProperties;
+}
 
 // Live cleanup status for saved settings, or a preview of unsaved `draft` values.
 export function useStorageStatus(draft?: StorageSettings): { status: StorageStatus | null; failed: boolean } {
@@ -62,7 +72,7 @@ export function StorageSummary({ draft }: { draft?: StorageSettings }) {
       <span>{enabled ? <><strong>{fmtSize(status.managedBytes)}</strong> of {fmtSize(status.limitBytes)}</> : <><strong>{fmtSize(status.totalBytes)}</strong> in your library</>}</span>
       {enabled && status.keptBytes > 0 && <span className="storage-summary__detail" title="Favorites, recordings, and large videos">{fmtSize(status.keptBytes)} kept separately</span>}
     </div>
-    {enabled && <div className="meter"><div className="meter__track"><div className={`meter__fill ${pct >= 100 ? "is-over" : pct >= 75 ? "is-warn" : ""}`} style={{ width: `${pct}%` }} /></div></div>}
+    {enabled && <div className="meter"><div className="meter__track"><div className={`meter__fill ${pct >= 90 ? "is-over" : pct >= 75 ? "is-warn" : ""}`} style={storageMeterStyle(pct)} /></div></div>}
     {notice && <div data-shard-slot="storage-notice" className="storage-summary__notice" role="status">
       <span>{error || notice}</span>
       {status.reason === "needs-review" && !draft && <Button size="sm" variant="danger" disabled={cleaning} onClick={() => setConfirming(true)}>

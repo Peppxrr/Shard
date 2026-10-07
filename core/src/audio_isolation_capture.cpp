@@ -1,5 +1,7 @@
 #include "audio_isolation_capture.h"
 
+#include "log.h"
+
 #include <obs-module.h>
 
 #include <atomic>
@@ -48,8 +50,7 @@ constexpr uint32_t kEnumerationFailuresBeforeFallback = 3;
 
 void logIsolation(const char* level, const std::string& line)
 {
-  std::fprintf(stderr, "[audio-isolation][%s] %s\n", level, line.c_str());
-  std::fflush(stderr);
+  logFormat("[audio-isolation][%s] %s\n", level, line.c_str());
 }
 
 std::string hrText(HRESULT hr)

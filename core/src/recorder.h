@@ -13,6 +13,8 @@
 
 namespace shard {
 
+class PerfMonitor;
+
 // Manual recording: an ffmpeg_muxer output (mkv container — crash-safe) with
 // its own encoder instances identical to the ring's. The app remuxes the mkv
 // to mp4 after `recording.state {active:false}` and imports it into the
@@ -38,6 +40,9 @@ public:
   // Path of the in-progress mkv (empty when inactive).
   std::string currentPath() const { return currentPath_; }
 
+  // Optional: encoder-path reporting and lag markers on the stop event.
+  void setPerfMonitor(PerfMonitor* perf) { perf_ = perf; }
+
 private:
   static void onOutputStop(void* data, calldata_t* cd);
   void releaseOutput();
@@ -47,6 +52,7 @@ private:
   Config& config_;
   Events& events_;
   EncoderManager& encoders_;
+  PerfMonitor* perf_ = nullptr;
 
   obs_output_t* output_ = nullptr;
   obs_encoder_t* videoEncoder_ = nullptr;
@@ -54,6 +60,7 @@ private:
   std::atomic<bool> active_{false};
   std::recursive_mutex lifecycleMutex_;
   std::string currentPath_;
+  std::atomic<uint64_t> startSteadyUs_{0};
 };
 
 } // namespace shard

@@ -1,6 +1,7 @@
 #include "game_system.h"
 
 #include "game_util.h"
+#include "log.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -671,10 +672,10 @@ void GameSystem::applyFocusPrimary()
       focusGameId_ = target;
       focusSinceMs_ = target.empty() ? 0 : unixNowMs();
       if (registry_.verboseLogging() && !target.empty()) {
-        std::fprintf(stderr, "[GameDetection] focus changed -> %s (pid %u) debounce start\n",
+        logFormat("[GameDetection] focus changed -> %s (pid %u) debounce start\n",
                      fgSession->gameName.c_str(), fgSession->pid);
       } else if (registry_.verboseLogging() && target.empty()) {
-        std::fprintf(stderr, "[GameDetection] focus -> non-game/desktop, keeping primary %s\n",
+        logFormat("[GameDetection] focus -> non-game/desktop, keeping primary %s\n",
                      sessions_.primary().gameName.c_str());
       }
     }
@@ -690,7 +691,7 @@ void GameSystem::applyFocusPrimary()
     const GameSession prim = sessions_.primary();
     if (prim.gameId != focusGameId_) {
       if (registry_.verboseLogging()) {
-        std::fprintf(stderr, "[GameDetection] debounce satisfied %lldms: primary %s -> %s\n",
+        logFormat("[GameDetection] debounce satisfied %lldms: primary %s -> %s\n",
                      (long long)(unixNowMs() - sinceMs),
                      prim.gameName.empty() ? "<none>" : prim.gameName.c_str(),
                      fgSession ? fgSession->gameName.c_str() : focusGameId_.c_str());
@@ -749,7 +750,7 @@ void GameSystem::runDiscoveryScan()
   auto scan = discovery_.scanAll();
   if (registry_.verboseLogging()) {
     for (const auto& result : scan.results)
-      std::fprintf(stderr, "[GameDetection] discovery %s: %d product hint(s)\n",
+      logFormat("[GameDetection] discovery %s: %d product hint(s)\n",
                    result.type.c_str(), result.games);
   }
   // Purge previously learned executables for products that Steam now
@@ -1006,13 +1007,13 @@ void GameSystem::logDetection(const ProcessInfo& p, const DetectionResult& r)
   const char* decision = r.decision == DetectionResult::Decision::Detected
                              ? "DETECTED"
                              : r.decision == DetectionResult::Decision::Candidate ? "CANDIDATE" : "IGNORED";
-  std::fprintf(stderr, "[GameDetection]\n  Process: %s (pid %u)\n", p.exe.c_str(), p.pid);
+  logFormat("[GameDetection]\n  Process: %s (pid %u)\n", p.exe.c_str(), p.pid);
   if (!r.gameName.empty())
-    std::fprintf(stderr, "  Candidate: %s\n", r.gameName.c_str());
-  std::fprintf(stderr, "  Score: %d\n", r.score);
+    logFormat("  Candidate: %s\n", r.gameName.c_str());
+  logFormat("  Score: %d\n", r.score);
   for (const auto& reason : r.reasons)
-    std::fprintf(stderr, "  - %s %+d (%s)\n", reason.signal.c_str(), reason.delta, reason.note.c_str());
-  std::fprintf(stderr, "  Decision: %s\n", decision);
+    logFormat("  - %s %+d (%s)\n", reason.signal.c_str(), reason.delta, reason.note.c_str());
+  logFormat("  Decision: %s\n", decision);
 }
 
 } // namespace shard

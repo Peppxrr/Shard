@@ -1,5 +1,7 @@
 #include "jsonrpc.h"
 
+#include "log.h"
+
 #include <algorithm>
 #include <atomic>
 
@@ -22,9 +24,9 @@ std::string captureSubjectKey(const SourceManager::Subject& subject)
 } // namespace
 
 Rpc::Rpc(App& app, Config& config, Events& events, SourceManager& sources, EncoderManager& encoders,
-         ReplayRing& ring, Recorder& recorder, GameSystem& games)
+         ReplayRing& ring, Recorder& recorder, GameSystem& games, PerfMonitor& perf)
     : app_(app), config_(config), events_(events), sources_(sources), encoders_(encoders), ring_(ring),
-      recorder_(recorder), games_(games)
+      recorder_(recorder), games_(games), perf_(perf)
 {
 }
 
@@ -64,6 +66,7 @@ nlohmann::json Rpc::buildState() const
       {"sessions", games_.sessionsJson()},
       {"storage", {{"limitGb", config_.storageLimitGb}, {"clipsDir", config_.clipsBaseDir}}},
       {"dirs", {{"clips", config_.clipsDir}, {"recordings", config_.recordingsDir}}},
+      {"perf", perf_.stateJson()},
       {"version", SHARD_VERSION},
   };
 }
@@ -293,7 +296,7 @@ void Rpc::restartVideoPipeline()
     // Attempt the last accepted canvas once; the watchdog's retained cooldown
     // governs subsequent recovery if the driver is still unavailable.
     const bool restored = app_.resetVideo(previousCanvas.width, previousCanvas.height);
-    std::fprintf(stderr, "[capture-pipeline][warn] reset_failed previous_canvas_restored=%s error=\"%s\"\n",
+    logFormat("[capture-pipeline][warn] reset_failed previous_canvas_restored=%s error=\"%s\"\n",
                  restored ? "true" : "false", app_.lastError().c_str());
   }
 
@@ -305,7 +308,7 @@ void Rpc::restartVideoPipeline()
   if (wasRecording && ringStarted)
     recorder_.start();
   sources_.startWatchdog();
-  std::fprintf(stderr, "[capture-pipeline][info] video_mix_available=%s replay_started=%s recording_resumed=%s\n",
+  logFormat("[capture-pipeline][info] video_mix_available=%s replay_started=%s recording_resumed=%s\n",
                obs_get_video() ? "true" : "false", ringStarted ? "true" : "false",
                wasRecording && recorder_.active() ? "true" : "false");
 }
@@ -341,7 +344,7 @@ void Rpc::updateCaptureGeometry()
     // A swap must not discard the buffered history of the previous subject.
     // The watchdog already fits the new subject inside the current canvas.
     if (size != preservedCaptureSize_) {
-      std::fprintf(stderr, "[capture-geometry][info] source=%ux%u canvas=%ux%u subject=\"%s\" canvas_subject=\"%s\" replay_preserved=true reason=subject_switch\n",
+      logFormat("[capture-geometry][info] source=%ux%u canvas=%ux%u subject=\"%s\" canvas_subject=\"%s\" replay_preserved=true reason=subject_switch\n",
                    size.width, size.height, app_.baseWidth(), app_.baseHeight(), subjectKey.c_str(),
                    canvasOwner_.owner().c_str());
       preservedCaptureSize_ = size;
@@ -359,7 +362,7 @@ void Rpc::updateCaptureGeometry()
     // OBS here would clear real replay packets and split recording despite
     // producing exactly the same encoded size, aspect ratio and cadence.
     if (size != preservedCaptureSize_) {
-      std::fprintf(stderr, "[capture-geometry][info] source=%ux%u canvas=%ux%u output=%ux%u fps=%u/%u replay_preserved=true reason=compatible_source_resize\n",
+      logFormat("[capture-geometry][info] source=%ux%u canvas=%ux%u output=%ux%u fps=%u/%u replay_preserved=true reason=compatible_source_resize\n",
                    size.width, size.height, app_.baseWidth(), app_.baseHeight(),
                    current.output_width, current.output_height, current.fps_num, current.fps_den);
       preservedCaptureSize_ = size;
@@ -367,7 +370,7 @@ void Rpc::updateCaptureGeometry()
     return;
   }
   preservedCaptureSize_ = {};
-  std::fprintf(stderr, "[capture-geometry][info] source=%ux%u previous_canvas=%ux%u previous_output=%ux%u output=%dx%d fps=%d replay_preserved=false reason=video_format_or_aspect_change\n",
+  logFormat("[capture-geometry][info] source=%ux%u previous_canvas=%ux%u previous_output=%ux%u output=%dx%d fps=%d replay_preserved=false reason=video_format_or_aspect_change\n",
                size.width, size.height, app_.baseWidth(), app_.baseHeight(),
                current.output_width, current.output_height, width, height, fps);
 
@@ -390,7 +393,7 @@ void Rpc::updateCaptureGeometry()
   if (wasRecording && started) recorder_.start();
   sources_.startWatchdog();
   captureSizeStability_.reset();
-  std::fprintf(stderr, "capture: canvas %ux%u, resized=%s; replay buffer restarted%s\n",
+  logFormat("capture: canvas %ux%u, resized=%s; replay buffer restarted%s\n",
                size.width, size.height, resized ? "true" : "false", wasRecording ? ", recording continued in new file" : "");
 }
 

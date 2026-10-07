@@ -52,6 +52,7 @@ import asset49 from "../assets/icons/upstream/lucide-gamepad-2.svg?raw";
 import asset50 from "../assets/icons/upstream/lucide-keyboard.svg?raw";
 import asset51 from "../assets/icons/upstream/lucide-paintbrush.svg?raw";
 import asset52 from "../assets/icons/upstream/lucide-picture-in-picture-2.svg?raw";
+import asset53 from "../assets/icons/upstream/feather-alert-circle.svg?raw";
 
 const assets: Record<string, string> = {
   aperture: asset0,
@@ -62,6 +63,7 @@ const assets: Record<string, string> = {
   scissor: asset32,
   scissors: asset32,
   question: asset18,
+  alert: asset53,
   settings: asset34,
   gear: asset34,
   export: asset41,

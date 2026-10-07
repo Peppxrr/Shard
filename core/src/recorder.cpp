@@ -1,5 +1,9 @@
 #include "recorder.h"
 
+#include "log.h"
+#include "perf_monitor.h"
+#include "priority_task.h"
+
 #include <obs-module.h>
 #include <algorithm>
 
@@ -44,6 +48,8 @@ void Recorder::releaseOutput()
   audioEncoders_.clear();
 }
 
+// Runs on a libobs output thread. Only flips the atomic and enqueues the
+// event (emit never performs socket I/O); the lag lookup is an in-memory scan.
 void Recorder::onOutputStop(void* data, calldata_t* /*cd*/)
 {
   auto* self = static_cast<Recorder*>(data);
@@ -51,7 +57,13 @@ void Recorder::onOutputStop(void* data, calldata_t* /*cd*/)
     return;
   std::string path = self->currentPath_;
   self->active_.store(false);
-  self->events_.emit("recording.state", {{"active", false}, {"path", path}});
+  nlohmann::json state = {{"active", false}, {"path", path}};
+  if (self->perf_) {
+    nlohmann::json lag = self->perf_->lagJson(self->startSteadyUs_.load(), PerfMonitor::nowUs());
+    if (!lag.is_null())
+      state["lag"] = std::move(lag);
+  }
+  self->events_.emit("recording.state", state);
 }
 
 bool Recorder::start()
@@ -77,17 +89,25 @@ bool Recorder::start()
   std::snprintf(name, sizeof(name), "recording-%04d%02d%02d-%02d%02d%02d-%06lld.mp4", tm.tm_year + 1900, tm.tm_mon + 1,
                 tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (long long)us);
 
+  if (!interactiveUserCanWrite(config_.recordingsDir.c_str())) {
+    logFormat("[recording][warn] refused: folder not writable by the interactive user: %s",
+              config_.recordingsDir.c_str());
+    events_.emit("error", {{"code", "STORAGE_DENIED"},
+                           {"message", "Your Windows account can't write to the recordings folder: " +
+                                           config_.recordingsDir}});
+    return false;
+  }
   fs::create_directories(config_.recordingsDir);
   currentPath_ = (fs::path(config_.recordingsDir) / name).string();
 
   for (const auto& videoId : encoders_.videoEncoderCandidates(config_.video.encoder)) {
     if (startWithVideoEncoder(videoId)) {
-      std::fprintf(stderr, "[encoder] recording using %s\n", videoId.c_str());
+      logFormat("[encoder] recording using %s\n", videoId.c_str());
       active_.store(true);
       events_.emit("recording.state", {{"active", true}, {"path", currentPath_}});
       return true;
     }
-    std::fprintf(stderr, "[encoder] recording rejected %s; trying fallback\n", videoId.c_str());
+    logFormat("[encoder] recording rejected %s; trying fallback\n", videoId.c_str());
   }
 
   events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "No supported video encoder could start recording"}});
@@ -139,10 +159,14 @@ bool Recorder::startWithVideoEncoder(const std::string& videoId)
   signal_handler_t* sh = obs_output_get_signal_handler(output_);
   signal_handler_connect(sh, "stop", onOutputStop, this);
 
+  ObsLogCapture startLog;
+  startSteadyUs_.store(PerfMonitor::nowUs());
   if (!obs_output_start(output_)) {
     releaseOutput();
     return false;
   }
+  if (perf_)
+    perf_->outputStarted(inspectVideoEncoderPath("recording", videoEncoder_, startLog.messages()));
   return true;
 }
 

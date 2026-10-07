@@ -6,7 +6,7 @@ import { fmtSize, LibraryPage } from "./components/LibraryPage";
 import { GamesPage } from "./components/GamesPage";
 import { getSavedSettingsSection, SettingsPage, type SettingsSection } from "./components/SettingsPage";
 import { Editor } from "./components/Editor";
-import { useStorageStatus } from "./components/StorageSummary";
+import { storageMeterStyle, useStorageStatus } from "./components/StorageSummary";
 import { Button, Icon, Modal, Spinner, Toasts, type ToastItem } from "./components/ui";
 import { setTheme } from "./themeManager";
 
@@ -290,7 +290,7 @@ export function App() {
             </button>
           ))}
         </nav>
-        <span className="spacer" />
+        <div data-shard-slot="titlebar-drag" className="app__drag" />
         {tab === "settings" && (
           <Button variant="primary" size="sm" icon={<Icon name="check" size={15} />} onClick={() => void saveSettings()} disabled={!isDirty}>
             {saved && !isDirty ? "Saved" : "Save changes"}
@@ -431,10 +431,10 @@ function StorageMeter() {
   if (!status) return null;
   if (!status.limitBytes) return <span className="meter-sm meter-sm__label num" title="Automatic cleanup is off">{fmtSize(status.totalBytes)}</span>;
   const pct = Math.min(100, status.managedBytes / status.limitBytes * 100);
-  const cls = status.reason === "needs-review" || pct >= 100 ? "is-over" : pct >= 75 ? "is-warn" : "";
+  const cls = status.reason === "needs-review" || pct >= 90 ? "is-over" : pct >= 75 ? "is-warn" : "";
   return (
     <div className="meter-sm" title={`Clips: ${fmtSize(status.managedBytes)} of ${fmtSize(status.limitBytes)}. ${fmtSize(status.keptBytes)} kept separately (favorites, recordings, and large videos).`}>
-      <div className="meter-sm__track"><div className={`meter-sm__fill ${cls}`} style={{ width: `${pct}%` }} /></div>
+      <div className="meter-sm__track"><div className={`meter-sm__fill ${cls}`} style={storageMeterStyle(pct)} /></div>
       <span className="meter-sm__label num">{(status.managedBytes / 1024 ** 3).toFixed(1)}/{Number((status.limitBytes / 1024 ** 3).toFixed(1))} GB</span>
     </div>
   );

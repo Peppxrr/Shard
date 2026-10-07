@@ -1,6 +1,6 @@
 import { KeyCaps } from "./HotkeyControls";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ClipRecord, CoreState, Settings } from "../../shared/contracts";
+import type { ClipRecord, CoreState, PerfSample, Settings } from "../../shared/contracts";
 import { fmtDuration, fmtSize, relativeDate, Viewer } from "./LibraryPage";
 import { Button, Card, EmptyState, Icon, Segmented, StatusDot } from "./ui";
 import { mediaFileUrl } from "../editor/VideoPreview";
@@ -41,6 +41,7 @@ export function CapturePage({ settings, clips }: Props) {
   const [saving, setSaving] = useState(false);
   const [dur, setDur] = useState<Dur>("60");
   const [recent, setRecent] = useState<ClipRecord | null>(null);
+  const [perf, setPerf] = useState<PerfSample | null>(null);
   const recentGrid = useRef<HTMLDivElement>(null);
   const [recentCapacity, setRecentCapacity] = useState(0);
   const hasClips = clips.length > 0;
@@ -65,6 +66,7 @@ export function CapturePage({ settings, clips }: Props) {
         setRingSeconds(st.ring.secondsBuffered);
         setRecording(st.recording.active);
         setSubject(st.capture.subject);
+        setPerf(st.perf?.latest ?? null);
       }).catch(() => {});
     };
     loadState();
@@ -74,6 +76,7 @@ export function CapturePage({ settings, clips }: Props) {
       else if (type === "recording.state") setRecording((params as { active: boolean }).active);
       else if (type === "capture.subject") setSubject(params as unknown as Subject);
       else if (type === "clip.saved") setSaving(false);
+      else if (type === "perf.stats") setPerf(params as unknown as PerfSample); // core contract shape
     });
   }, []);
 
@@ -118,6 +121,12 @@ export function CapturePage({ settings, clips }: Props) {
             </div>
             <p className="capture__meta num dim">
               {MODE_LABEL[settings.capture.mode]} · {v.fps} FPS · {resLabel} · {settings.replay.maxSeconds}s buffer
+              {perf?.active && perf.cause !== "ok" && (
+                <span data-shard-component="perf-hint" data-shard-state={perf.cause} role="status" className="perf-hint"
+                  title={`${perf.lostPct}% of frames lost in the last 5 s. ${perf.hint ?? ""}${perf.gpu.available ? ` GPU 3D ${Math.round(perf.gpu.engine3d ?? 0)}% · Video encoder ${Math.round(perf.gpu.videoEncode ?? 0)}%.` : ""}`}>
+                  · Dropping frames ({perf.lostPct}%)
+                </span>
+              )}
             </p>
           </div>
           <div className="capture__ring">
@@ -126,7 +135,6 @@ export function CapturePage({ settings, clips }: Props) {
             {recording && <span className="chip chip--rec"><span className="dot dot--rec" /> REC</span>}
           </div>
         </div>
-
         <div data-shard-slot="capture-actions" className="capture__actions">
           <div className="capture__save">
             <Segmented<Dur>

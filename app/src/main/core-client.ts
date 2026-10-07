@@ -13,6 +13,14 @@ import { coreGamePayload, gamesJsonPath, getSettings, seedGamesJson } from "./se
 import { CoreLineDecoder } from "./core-line-decoder";
 
 const MAX_RESTARTS = 5;
+// shardcore --priority-bridge exits with this code when the elevated task is
+// unusable; the core is then started normally right away.
+const PRIORITY_FALLBACK_EXIT = 124;
+
+export interface CoreClientOptions {
+  // Start through the Recording priority bridge (elevated core) when true.
+  priorityLaunch?: () => boolean;
+}
 
 interface Pending {
   resolve: (v: unknown) => void;
@@ -21,6 +29,11 @@ interface Pending {
 }
 
 export class CoreClient extends EventEmitter {
+  private readonly options: CoreClientOptions;
+  // A failed elevated start falls back to the normal core until the next
+  // explicit restart (e.g. after Recording priority is re-enabled).
+  private priorityUnavailable = false;
+  launchMode: "normal" | "priority" = "normal";
   private proc: ChildProcess | null = null;
   private ws: WebSocket | null = null;
   private nextId = 1;
@@ -36,6 +49,19 @@ export class CoreClient extends EventEmitter {
   get hasProcess(): boolean { return this.proc !== null; }
   ready = false;
 
+  constructor(options: CoreClientOptions = {}) {
+    super();
+    this.options = options;
+  }
+
+  // Ordered stop and start, e.g. to switch between normal and elevated cores.
+  async restart(): Promise<void> {
+    await this.shutdown();
+    this.restarts = 0;
+    this.priorityUnavailable = false;
+    await this.start();
+  }
+
   get coreBinDir(): string {
     // Dev runner override (scripts/dev.ps1 stages the Debug core here); the
     // packaged app and the e2e/selftest runners never set it.
@@ -44,6 +70,12 @@ export class CoreClient extends EventEmitter {
     const packaged = path.join(process.resourcesPath ?? "", "core-bin");
     const dev = path.join(app.getAppPath(), "resources", "core-bin");
     return existsSync(packaged) ? packaged : dev;
+  }
+
+  // Paths every core launch uses; the Recording priority task bakes in the
+  // same values, so they must stay identical.
+  get launchPaths(): { bin: string; configDir: string; games: string } {
+    return { bin: this.coreBinDir, configDir: path.join(app.getPath("userData"), "core"), games: gamesJsonPath() };
   }
 
   start(): Promise<void> {
@@ -68,20 +100,21 @@ export class CoreClient extends EventEmitter {
   private spawnCore(): void {
     this.reconnectTimer = null;
     if (this.shuttingDown || this.proc) return;
-    const bin = this.coreBinDir;
+    const { bin, configDir, games } = this.launchPaths;
     const exe = path.join(bin, "shardcore.exe");
-    const configDir = path.join(app.getPath("userData"), "core");
-    const games = gamesJsonPath();
     const args = ["--config-dir", configDir, "--core-bin", bin, "--games", games, "--port", "0"];
-    this.emit("log", "core", `Spawning ${exe} with registry ${games}`);
+    const priority = process.platform === "win32" && !this.priorityUnavailable && (this.options.priorityLaunch?.() ?? false);
+    this.launchMode = priority ? "priority" : "normal";
+    this.emit("log", "core", `Spawning ${exe}${priority ? " through the Recording priority task" : ""} with registry ${games}`);
 
     this.supervised = false;
     this.lastPort = undefined;
-    this.proc = spawn(exe, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    this.proc = spawn(exe, priority ? ["--priority-bridge", ...args] : args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     if (process.platform === "win32") ownedProcesses.awaitOnly(this.proc);
     const proc = this.proc;
     const stdout = new CoreLineDecoder(line => {
       if (line === "SUPERVISOR READY") this.supervised = true;
+      if (line.startsWith("PRIORITY FALLBACK ")) this.emit("priority-fallback", line.slice("PRIORITY FALLBACK ".length).trim());
       this.emitCoreOutput(line, "stdout");
       // Keep the first stdout PORT line visible while still consuming it as
       // the WebSocket handshake value.
@@ -121,6 +154,12 @@ export class CoreClient extends EventEmitter {
       this.ws = null;
       this.ready = false;
       if (this.shuttingDown) return;
+      if (priority && code === PRIORITY_FALLBACK_EXIT) {
+        // Not a crash: the elevated task is unavailable. Start normally now.
+        this.priorityUnavailable = true;
+        this.spawnCore();
+        return;
+      }
       this.emit("core-exited", code, signal);
       if (this.restarts < MAX_RESTARTS) {
         this.restarts++;

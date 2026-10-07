@@ -766,6 +766,7 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
               onRedo={redo}
               onTrackChange={(streamIndex: number, change: Partial<Pick<EditorAudioTrack, "included" | "muted" | "volume">>) => commit((current) => updateAudioTrack(current, streamIndex, change))}
               onDeleteAudioTrack={(streamIndex: number) => commit((current) => deleteAudioTrack(current, streamIndex))}
+              lagSegments={clip.lag?.segments}
             />
           )}
 

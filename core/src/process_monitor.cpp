@@ -2,6 +2,7 @@
 #include "runtime_roles.h"
 
 #include "game_util.h"
+#include "log.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -275,7 +276,7 @@ void ProcessMonitor::wmiLoop()
 {
   HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
-    std::fprintf(stderr, "[process_monitor] WMI unavailable (CoInitializeEx 0x%08lx)\n", (unsigned long)hr);
+    logFormat("[process_monitor] WMI unavailable (CoInitializeEx 0x%08lx)\n", (unsigned long)hr);
     return;
   }
   // Only succeeds once per process; RPC_E_TOO_LATE is fine (somebody else
@@ -289,13 +290,13 @@ void ProcessMonitor::wmiLoop()
 
   hr = CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (void**)&locator);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "[process_monitor] WMI locator failed (0x%08lx)\n", (unsigned long)hr);
+    logFormat("[process_monitor] WMI locator failed (0x%08lx)\n", (unsigned long)hr);
     CoUninitialize();
     return;
   }
   hr = locator->ConnectServer(BSTR(L"ROOT\\CIMV2"), nullptr, nullptr, 0, 0, 0, nullptr, &service);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "[process_monitor] WMI connect failed (0x%08lx)\n", (unsigned long)hr);
+    logFormat("[process_monitor] WMI connect failed (0x%08lx)\n", (unsigned long)hr);
     locator->Release();
     CoUninitialize();
     return;
@@ -305,7 +306,7 @@ void ProcessMonitor::wmiLoop()
   hr = service->ExecNotificationQueryAsync(BSTR(L"WQL"), BSTR(L"SELECT * FROM Win32_ProcessStartTrace"), 0,
                                            nullptr, sink);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "[process_monitor] WMI start-trace subscribe failed (0x%08lx)\n", (unsigned long)hr);
+    logFormat("[process_monitor] WMI start-trace subscribe failed (0x%08lx)\n", (unsigned long)hr);
     sink->Release();
     service->Release();
     locator->Release();
@@ -318,9 +319,9 @@ void ProcessMonitor::wmiLoop()
                                            nullptr, sink);
   if (SUCCEEDED(hr)) {
     wmiOk_.store(true);
-    std::fprintf(stderr, "[process_monitor] WMI process events subscribed\n");
+    logFormat("[process_monitor] WMI process events subscribed\n");
   } else {
-    std::fprintf(stderr, "[process_monitor] WMI stop-trace subscribe failed (0x%08lx)\n", (unsigned long)hr);
+    logFormat("[process_monitor] WMI stop-trace subscribe failed (0x%08lx)\n", (unsigned long)hr);
     // Start-trace still works; fall back to reconcile-only for exits.
   }
 

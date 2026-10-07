@@ -42,6 +42,13 @@
     "sha256": "9a44e077e60f863dcf23dd9d9add0e552d47cfbdaaa5824ae7f715190a9b07d1"
   },
   {
+    "file": "feather-alert-circle.svg",
+    "project": "feather",
+    "version": "v4.29.2",
+    "source": "https://raw.githubusercontent.com/feathericons/feather/v4.29.2/icons/alert-circle.svg",
+    "sha256": "e47498ca4bedaef470e42a6a70cbac15373869853a82f38642998887edf6cfc6"
+  },
+  {
     "file": "feather-help-circle.svg",
     "project": "feather",
     "version": "v4.29.2",

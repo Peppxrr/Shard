@@ -89,6 +89,18 @@ preserved ring history and the `replay_preserved=true` diagnostics across both
 replacements, fresh decodable clips at the fixed output size, and one continuous
 decodable recording file.
 
+To reproduce recording lag under GPU starvation, build
+`shard_gpu_stress_fixture` (Debug, `EXCLUDE_FROM_ALL`). It is a windowed D3D11
+"game" that pins the 3D engine on a schedule: `SHARD_STRESS_PHASES` is
+`seconds:level,...` (default `10:0,40:1,60:0`; level 1 = uncapped heavy pixel
+shading), `SHARD_STRESS_ITERATIONS` tunes the load and phase changes are
+printed as `PHASE <level> <unix-ms>`. Register it as a user game and capture it
+in Game only mode; the core's `perf.stats` events and `[perf]`/`[perf-session]`
+log lines show render lag, encoder backlog, GPU 3D/VideoEncode utilization and
+the classified cause per second, and saved clips carry `lag` segments. The
+pure attribution/backlog logic is covered by `shard_perf_tests` in the `core`
+scope.
+
 To verify game swapping with real hooks, run `node scripts/game-swap-test.mjs`
 with `CF_COREBIN` and `CF_GC_FIXTURE` pointing at matching builds. It registers
 two copies of the D3D11 fixture with different aspect ratios, then checks that

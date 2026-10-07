@@ -1,6 +1,9 @@
 #include "replay_ring.h"
 
+#include "log.h"
 #include "mux.h"
+#include "perf_monitor.h"
+#include "priority_task.h"
 #include "replay_timing.h"
 
 #include <obs-av1.h>
@@ -29,7 +32,16 @@ struct ReplayRing::Ring {
   int64_t cur_size = 0;
   int64_t cur_time = 0;
   int64_t latest_time = 0;
+  // Newest video timestamp. Video can trail audio by seconds while a
+  // starved encoder works through libobs' backlog.
+  int64_t latest_video_time = 0;
   int64_t latest_ingest_us = 0;
+  // Smallest (arrival steady time - dts) seen for video this output session:
+  // the pipeline delay without a backlog. Packets arrive later than this
+  // while a starved encoder works through libobs' queue, and libobs' output
+  // interleaver then holds audio back as well, so "newest packet + time since
+  // it arrived" no longer describes the present.
+  int64_t video_delivery_offset_us = INT64_MAX;
   int keyframes = 0;
   int64_t max_size = 0; // bytes
   int64_t max_time = 0; // usec
@@ -109,6 +121,8 @@ bool ReplayRing::ringStart(void* data)
     r->cur_size = 0;
     r->cur_time = 0;
     r->latest_time = 0;
+    r->latest_video_time = 0;
+    r->video_delivery_offset_us = INT64_MAX;
     r->latest_ingest_us = 0;
     r->keyframes = 0;
     r->active = true;
@@ -184,7 +198,7 @@ void ReplayRing::setCaptureActive(bool active)
   if (active && !active_.load()) startLocked();
   const auto nowMs = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
   if (activityGrace_.shouldStop(active, active_.load(), nowMs)) {
-    std::fprintf(stderr, "[replay-ring][info] action=stop reason=capture_inactive grace_ms=15000 history_cleared=true\n");
+    logFormat("[replay-ring][info] action=stop reason=capture_inactive grace_ms=15000 history_cleared=true\n");
     stopLocked();
   }
 }
@@ -214,11 +228,10 @@ bool ReplayRing::startLocked()
   const auto candidates = encoders_.videoEncoderCandidates(config_.video.encoder);
   for (const auto& videoId : candidates) {
     if (startWithVideoEncoderLocked(videoId)) {
-      std::fprintf(stderr, "[encoder][info] replay ring using %s\n", videoId.c_str());
-      std::fflush(stderr);
+      logFormat("[encoder][info] replay ring using %s\n", videoId.c_str());
       return true;
     }
-    std::fprintf(stderr, "[encoder] replay ring rejected %s; trying fallback\n", videoId.c_str());
+    logFormat("[encoder] replay ring rejected %s; trying fallback\n", videoId.c_str());
   }
   events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "No supported video encoder could start the replay ring"}});
   return false;
@@ -292,12 +305,17 @@ bool ReplayRing::startWithVideoEncoderLocked(const std::string& videoId)
   saveThreadRun_.store(true);
   saveThread_ = std::thread([this] { saveWorker(); });
 
+  // Encoder plugins initialize inside obs_output_start; capture their
+  // messages to see whether a texture encoder fell back to system memory.
+  ObsLogCapture startLog;
   if (!obs_output_start(output_)) {
     stopLocked();
     return false;
   }
 
-  std::fprintf(stderr, "[encoder] replay ring using %s\n", videoId.c_str());
+  logFormat("[encoder] replay ring using %s\n", videoId.c_str());
+  if (perf_)
+    perf_->outputStarted(inspectVideoEncoderPath("replay", videoEncoder_, startLog.messages()));
   active_.store(true);
   return true;
 }
@@ -364,23 +382,27 @@ void ReplayRing::save(int durationSec)
 {
   SaveRequest request;
   request.durationSec = durationSec;
+  request.requestSteadyUs = PerfMonitor::nowUs();
   {
     std::lock_guard<std::mutex> lifecycleLock(lifecycleMtx_);
     if (ring_) {
       std::lock_guard<std::mutex> ringLock(ring_->mtx);
       if (!ring_->packets.empty()) {
-        const int64_t nowUs = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
-        const int64_t elapsedUs = std::max<int64_t>(0, nowUs - ring_->latest_ingest_us);
-        request.endTimeUs = ring_->latest_time + elapsedUs;
+        const int64_t nowUs = static_cast<int64_t>(request.requestSteadyUs);
+        if (ring_->video_delivery_offset_us != INT64_MAX) {
+          request.endTimeUs = nowUs - ring_->video_delivery_offset_us;
+        } else {
+          const int64_t elapsedUs = std::max<int64_t>(0, nowUs - ring_->latest_ingest_us);
+          request.endTimeUs = ring_->latest_time + elapsedUs;
+        }
       }
     }
   }
   {
     std::lock_guard<std::mutex> lock(saveMtx_);
     saveQueue_.push_back(request);
-    std::fprintf(stderr, "save: queued %d at %lld (depth %zu)\n", durationSec,
+    logFormat("save: queued %d at %lld (depth %zu)\n", durationSec,
                  (long long)request.endTimeUs, saveQueue_.size());
-    std::fflush(stderr);
   }
   saveCv_.notify_one();
 }
@@ -429,8 +451,12 @@ void ReplayRing::ingestPacket(Ring* r, struct encoder_packet* packet)
     r->cur_time = pkt.dts_usec;
   r->cur_size += pkt.size;
   r->latest_time = std::max(r->latest_time, pkt.dts_usec);
+  if (pkt.type == OBS_ENCODER_VIDEO)
+    r->latest_video_time = std::max(r->latest_video_time, pkt.dts_usec);
 
   r->latest_ingest_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+  if (pkt.type == OBS_ENCODER_VIDEO)
+    r->video_delivery_offset_us = std::min(r->video_delivery_offset_us, r->latest_ingest_us - pkt.dts_usec);
   r->packetCv.notify_all();
   r->packets.push_back(pkt);
   if (pkt.type == OBS_ENCODER_VIDEO && pkt.keyframe)
@@ -475,6 +501,7 @@ bool ReplayRing::purgeFront(Ring* r)
   if (r->packets.empty()) {
     r->cur_size = 0;
     r->latest_time = 0;
+    r->latest_video_time = 0;
     r->cur_time = 0;
     r->latest_ingest_us = 0;
   } else {
@@ -489,8 +516,7 @@ bool ReplayRing::purgeFront(Ring* r)
 
 void ReplayRing::saveWorker()
 {
-  std::fprintf(stderr, "save: worker started\n");
-  std::fflush(stderr);
+  logFormat("save: worker started\n");
   for (;;) {
     SaveRequest request;
     request.durationSec = -1;
@@ -508,34 +534,54 @@ void ReplayRing::saveWorker()
       continue;
 
     if (!active_.load() || muxing_.load()) {
-      std::fprintf(stderr, "save: DROPPED request (active=%d muxing=%d)\n", active_.load() ? 1 : 0, muxing_.load() ? 1 : 0);
-      std::fflush(stderr);
+      logFormat("save: DROPPED request (active=%d muxing=%d)\n", active_.load() ? 1 : 0, muxing_.load() ? 1 : 0);
       continue; // ring not running; drop the request
+    }
+
+    // An elevated core (Recording priority) writes only where the user's own
+    // non-elevated account could, so the RPC-configurable folder cannot be
+    // used to create files in protected locations.
+    if (!interactiveUserCanWrite(config_.clipsDir.c_str())) {
+      logFormat("save: REFUSED clips folder not writable by the interactive user: %s", config_.clipsDir.c_str());
+      events_.emit("error", {{"code", "STORAGE_DENIED"},
+                             {"message", "Your Windows account can't write to the clips folder: " + config_.clipsDir}});
+      continue;
     }
 
     std::vector<encoder_packet> packets;
     std::string path;
     double actualSec = 0;
-    if (!snapshotSave(request, packets, path, actualSec)) {
+    uint64_t startSteadyUs = 0, endSteadyUs = 0;
+    if (!snapshotSave(request, packets, path, actualSec, startSteadyUs, endSteadyUs)) {
       events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Replay ring save failed (ring empty?)"}});
       continue;
     }
 
     bool success = false;
     std::string error;
-    std::fprintf(stderr, "save: snapshot %zu packets -> %s\n", packets.size(), path.c_str());
-    std::fflush(stderr);
+    logFormat("save: snapshot %zu packets -> %s\n", packets.size(), path.c_str());
     muxing_.store(true);
     muxToFile(packets, path, success, error);
     muxing_.store(false);
-    std::fprintf(stderr, "save: mux %s (success=%d err=%s)\n", path.c_str(), success ? 1 : 0, error.c_str());
-    std::fflush(stderr);
+    logFormat("save: mux %s (success=%d err=%s)\n", path.c_str(), success ? 1 : 0, error.c_str());
 
     for (auto& p : packets)
       obs_encoder_packet_release(&p);
 
     if (success) {
-      events_.emit("clip.saved", {{"path", path}, {"requestedSec", request.durationSec}, {"actualSec", actualSec}});
+      nlohmann::json saved = {{"path", path}, {"requestedSec", request.durationSec}, {"actualSec", actualSec}};
+      // Where libobs lost frames inside this clip (render lag / encoder
+      // skips), as seconds from the clip's first presented frame.
+      if (perf_) {
+        nlohmann::json lag = perf_->lagJson(startSteadyUs, endSteadyUs);
+        if (!lag.is_null()) {
+          logFormat("save: lag %s frames=%u lagged=%u skipped=%u segments=%zu cause=%s", path.c_str(),
+                    lag.value("frames", 0u), lag.value("lagged", 0u), lag.value("skipped", 0u),
+                    lag["segments"].size(), lag.value("cause", std::string("ok")).c_str());
+          saved["lag"] = std::move(lag);
+        }
+      }
+      events_.emit("clip.saved", saved);
     } else {
       events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Save failed: " + error + " (" + path + ")"}});
     }
@@ -569,7 +615,8 @@ void ReplayRing::muxToFile(const std::vector<encoder_packet>& packets, const std
   success = true;
 }
 
-bool ReplayRing::snapshotSave(const SaveRequest& request, std::vector<encoder_packet>& out, std::string& path, double& actualSec)
+bool ReplayRing::snapshotSave(const SaveRequest& request, std::vector<encoder_packet>& out, std::string& path, double& actualSec,
+                              uint64_t& startSteadyUs, uint64_t& endSteadyUs)
 {
   if (!ring_ || request.endTimeUs <= 0)
     return false;
@@ -580,33 +627,55 @@ bool ReplayRing::snapshotSave(const SaveRequest& request, std::vector<encoder_pa
 
   // Encoder callbacks trail capture by a small, variable pipeline delay.
   // save() maps the hotkey's steady-clock moment onto the media timeline; wait
-  // briefly for that frame/audio to arrive instead of cutting at the latest
-  // packet that happened to be encoded when the key was pressed.
-  r->packetCv.wait_for(lock, milliseconds(2000), [&] {
-    return !r->active || r->latest_time >= request.endTimeUs;
-  });
-  const int64_t end_time = std::min(request.endTimeUs, r->latest_time);
+  // for that frame/audio to arrive instead of cutting at the latest packet
+  // that happened to be encoded when the key was pressed. When a GPU-starved
+  // texture encoder has fallen behind, libobs encodes the queued frames once
+  // it catches up while audio stays current: keep waiting as long as video is
+  // still arriving, so the clip contains the requested moment.
+  constexpr auto kMaxEncoderCatchUp = seconds(30);
+  constexpr auto kNoVideoProgress = seconds(2);
+  const auto waitStart = steady_clock::now();
+  auto lastProgress = waitStart;
+  int64_t observedVideo = r->latest_video_time;
+  while (r->active && (r->latest_time < request.endTimeUs || r->latest_video_time < request.endTimeUs)) {
+    const auto now = steady_clock::now();
+    if (now - waitStart >= kMaxEncoderCatchUp || now - lastProgress >= kNoVideoProgress)
+      break;
+    r->packetCv.wait_for(lock, milliseconds(100));
+    if (r->latest_video_time != observedVideo) {
+      observedVideo = r->latest_video_time;
+      lastProgress = steady_clock::now();
+    }
+  }
+  const int64_t waitedMs = duration_cast<milliseconds>(steady_clock::now() - waitStart).count();
+  // Never end after the newest video: audio over a frozen or missing picture
+  // is worse than a slightly shorter clip.
+  const int64_t newestVideo = r->latest_video_time > 0 ? r->latest_video_time : r->latest_time;
+  const int64_t end_time = std::min({request.endTimeUs, r->latest_time, newestVideo});
+  if (waitedMs >= 1000 || request.endTimeUs - end_time >= 500000)
+    logFormat("save: video encoder catch-up waited_ms=%lld clip_end_short_ms=%lld",
+              static_cast<long long>(waitedMs), static_cast<long long>((request.endTimeUs - end_time) / 1000));
   const int64_t start_time = request.durationSec > 0
       ? end_time - (int64_t)request.durationSec * 1000000LL
       : r->packets.front().dts_usec;
   const size_t n = r->packets.size();
-  size_t begin = 0;
-  if (request.durationSec > 0) {
-    while (begin < n && r->packets[begin].dts_usec < start_time)
-      begin++;
-    // Include the preceding video keyframe as decode-only preroll. Its
-    // timestamp remains negative, so the MP4 edit list presents exactly the
-    // requested interval without losing the newest seconds.
-    while (begin > 0) {
-      const auto& p = r->packets[begin - 1];
-      if (p.type == OBS_ENCODER_VIDEO && p.keyframe)
-        break;
-      begin--;
-    }
-    if (begin > 0 && r->packets[begin - 1].type == OBS_ENCODER_VIDEO && r->packets[begin - 1].keyframe)
-      begin--;
+  // Select by each stream's own timestamps, not deque position: after a
+  // backlog, video arrives seconds after audio of the same moment. Video
+  // starts at the newest keyframe presented at or before the start (decode-
+  // only preroll; its timestamp stays negative so the MP4 edit list presents
+  // exactly the requested interval) or at the first keyframe after it.
+  size_t keyframe = n;
+  for (size_t i = 0; i < n; ++i) {
+    const auto& p = r->packets[i];
+    if (p.type != OBS_ENCODER_VIDEO || !p.keyframe)
+      continue;
+    const bool beforeStart = request.durationSec > 0 && replayRescale(p.pts, p.timebase_den, 1000000) <= start_time;
+    if (keyframe == n || beforeStart)
+      keyframe = i;
+    if (!beforeStart)
+      break;
   }
-  if (begin >= n)
+  if (keyframe >= n)
     return false;
 
   // obs-ffmpeg-mux interprets pts/dts in each stream timebase. Normalize to a
@@ -620,14 +689,16 @@ bool ReplayRing::snapshotSave(const SaveRequest& request, std::vector<encoder_pa
   const int64_t audioPacketUs = !audioEncoders_.empty()
       ? (int64_t)obs_encoder_get_frame_size(audioEncoders_.front()) * 1000000 / audioTb
       : 0;
-  const int64_t first_dts = r->packets[begin].dts_usec;
+  const int64_t first_dts = r->packets[keyframe].dts_usec;
   const int64_t presentation_start = request.durationSec > 0 ? std::max(start_time, first_dts) : first_dts;
 
   out.clear();
-  out.reserve(n - begin);
+  out.reserve(n);
   bool videoEndReached = false;
-  for (size_t i = begin; i < n; i++) {
+  for (size_t i = 0; i < n; i++) {
     const auto& pkt = r->packets[i];
+    if (pkt.type == OBS_ENCODER_VIDEO ? i < keyframe : pkt.dts_usec < first_dts)
+      continue;
     if (pkt.type == OBS_ENCODER_VIDEO) {
       // Decode order can put a future reference frame before earlier B-frames.
       // End at the last complete reference group inside the requested interval;
@@ -668,6 +739,10 @@ bool ReplayRing::snapshotSave(const SaveRequest& request, std::vector<encoder_pa
   actualSec = (end_time - presentation_start) / 1000000.0;
   if (actualSec < 0)
     actualSec = 0;
+  // save() mapped the request's steady-clock moment to request.endTimeUs on
+  // the media timeline; apply the same offset to the clip's actual bounds.
+  endSteadyUs = request.requestSteadyUs - static_cast<uint64_t>(std::max<int64_t>(0, request.endTimeUs - end_time));
+  startSteadyUs = endSteadyUs - static_cast<uint64_t>(std::max<int64_t>(0, end_time - presentation_start));
 
   // Unique filename: clip-YYYYMMDD-HHMMSS-<microsec>.mp4
   auto now = system_clock::now();

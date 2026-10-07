@@ -6,6 +6,7 @@ import { ChoiceCards, NumberControl, SettingRow, SwitchRow } from "./SettingCont
 import { UpdatesSettings } from "./UpdatesSettings";
 import { MedalImport } from "./MedalImport";
 import { StorageSummary } from "./StorageSummary";
+import { RecordingPerformanceCard } from "./PerformanceSettings";
 
 type Props = { settings: Settings; onChange: (settings: Settings) => void };
 
@@ -86,7 +87,7 @@ export function AppSettingsPanel({ settings, onChange, version }: Props & { vers
   </Card><Card title="Startup & background" sub="Keep capture available when you need it.">
     <SwitchRow title="Start with Windows" description="Open the app when you sign in." checked={settings.app.startWithWindows} onChange={startWithWindows => patch({ startWithWindows })} />
     <SwitchRow title="Keep running when closed" description="Closing the window sends the app to the system tray." checked={settings.app.minimizeToTray} onChange={minimizeToTray => patch({ minimizeToTray })} />
-  </Card><Card title="Advanced" sub="Performance and troubleshooting options.">
+  </Card><RecordingPerformanceCard /><Card title="Advanced" sub="Performance and troubleshooting options.">
     <SwitchRow title="Hardware acceleration" description="Use GPU acceleration for the app. Changing this requires a restart." checked={settings.app.hardwareAcceleration ?? true} onChange={setPending} />
     <SwitchRow title="Developer console" description="Show detailed logs in a separate window." checked={settings.app.developerConsole} onChange={developerConsole => patch({ developerConsole })} />
     {error && <p className="form-error" role="alert">{error}</p>}

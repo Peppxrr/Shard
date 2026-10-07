@@ -49,3 +49,7 @@ and locked in `app/package-lock.json`. C++ helper libraries (JSON, WebSocket, x2
 NASM) remain pinned in `core/CMakeLists.txt`; OBS's transitive libraries are pinned
 by the chosen OBS checkout. Upgrade these deliberately, review licenses/ABI changes,
 and run the relevant verification scope before preparing a release.
+
+## OBS build options
+
+`core/CMakeLists.txt` builds libobs-d3d11 with `GPU_PRIORITY_VAL=7`, matching OBS release builds, so libobs raises its own GPU scheduling priority (see `docs/CAPTURE.md`, Recording priority). Keep this when upgrading OBS; check that `D3D11 GPU priority setup` still appears in the core log.

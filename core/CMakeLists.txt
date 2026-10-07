@@ -28,6 +28,13 @@ set(ENABLE_SCRIPTING OFF CACHE BOOL "Disable Lua/Python scripting" FORCE)
 set(ENABLE_BROWSER OFF CACHE BOOL "Disable obs-browser (needs CEF)" FORCE)
 set(ENABLE_WEBSOCKET OFF CACHE BOOL "Disable obs-websocket (needs Qt)" FORCE)
 set(ENABLE_VLC OFF CACHE BOOL "Disable vlc-video plugin" FORCE)
+# libobs-d3d11 only contains its GPU scheduling priority code (set_priority:
+# D3DKMTSetProcessSchedulingPriorityClass + IDXGIDevice::SetGPUThreadPriority)
+# when built with a priority value, as OBS's release builds are. 7 is the
+# documented maximum. libobs applies it when the device is created and it only
+# succeeds in an elevated process (Recording priority); non-elevated cores log
+# "D3D11 GPU priority setup failed (not admin?)" and run unchanged.
+set(GPU_PRIORITY_VAL "7" CACHE STRING "libobs-d3d11 GPU thread priority (-7..7, 0 disables)" FORCE)
 
 # The target-side Game Capture payload is the official signed OBS release,
 # staged separately from the embedded host plugin. win-capture verifies this
@@ -104,6 +111,11 @@ endif()
 
 add_executable(shardcore
   src/main.cpp
+  src/log.cpp
+  src/system_info.cpp
+  src/gpu_engines.cpp
+  src/perf_monitor.cpp
+  src/priority_task.cpp
   src/app.cpp
   src/config.cpp
   src/audio_isolation.cpp
@@ -138,7 +150,14 @@ target_compile_definitions(shardcore PRIVATE SHARD_VERSION="${PROJECT_VERSION}")
 
 if(WIN32)
   target_compile_definitions(shardcore PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_link_libraries(shardcore PRIVATE d3d11.lib dxgi.lib dwmapi.lib PowrProf.lib uuid.lib ole32.lib wbemuuid.lib mmdevapi.lib)
+  target_link_libraries(shardcore PRIVATE d3d11.lib dxgi.lib dwmapi.lib PowrProf.lib uuid.lib ole32.lib wbemuuid.lib mmdevapi.lib
+    pdh.lib gdi32.lib taskschd.lib shell32.lib oleaut32.lib)
+  # No console window. Electron, scripts and the supervisor give the core
+  # pipes/files for stdio, which a GUI-subsystem process inherits normally;
+  # the elevated helpers (UAC prompt, scheduled task) get no stdio and would
+  # otherwise open an empty console window.
+  set_target_properties(shardcore PROPERTIES WIN32_EXECUTABLE ON)
+  target_link_options(shardcore PRIVATE /ENTRY:mainCRTStartup)
 endif()
 
 if(WIN32)
@@ -148,12 +167,17 @@ if(WIN32)
   add_executable(shard_gc_d3d11_fixture WIN32 EXCLUDE_FROM_ALL tests/gc_d3d11_fixture.cpp)
   target_compile_definitions(shard_gc_d3d11_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(shard_gc_d3d11_fixture PRIVATE d3d11.lib dxgi.lib)
+  # Opt-in GPU starvation fixture: pins the 3D engine on a schedule to check
+  # recording lag attribution and recovery (docs/VERIFYING.md).
+  add_executable(shard_gpu_stress_fixture WIN32 EXCLUDE_FROM_ALL tests/gpu_stress_fixture.cpp)
+  target_compile_definitions(shard_gpu_stress_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(shard_gpu_stress_fixture PRIVATE d3d11.lib dxgi.lib d3dcompiler.lib)
   add_executable(shard_gc_d3d12_fixture WIN32 EXCLUDE_FROM_ALL tests/gc_d3d12_fixture.cpp)
   target_compile_definitions(shard_gc_d3d12_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(shard_gc_d3d12_fixture PRIVATE d3d12.lib dxgi.lib)
   # Opt-in GPU test of black-frame detection, actual scene fallback and retry.
   add_executable(shard_capture_backend_fixture EXCLUDE_FROM_ALL
-    tests/capture_backend_fixture.cpp src/sources.cpp src/audio_isolation.cpp src/audio_isolation_capture.cpp)
+    tests/capture_backend_fixture.cpp src/sources.cpp src/log.cpp src/audio_isolation.cpp src/audio_isolation_capture.cpp)
   target_include_directories(shard_capture_backend_fixture PRIVATE src)
   target_compile_definitions(shard_capture_backend_fixture PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(shard_capture_backend_fixture PRIVATE OBS::libobs nlohmann_json::nlohmann_json
@@ -189,4 +213,13 @@ target_include_directories(shard_audio_isolation_tests PRIVATE src)
 target_link_libraries(shard_audio_isolation_tests PRIVATE nlohmann_json::nlohmann_json)
 if(WIN32)
   target_compile_definitions(shard_audio_isolation_tests PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+
+# Frame-loss attribution, clip lag segments and GPU engine counter parsing;
+# no OBS or PDH collection.
+add_executable(shard_perf_tests tests/perf_analysis_test.cpp src/gpu_engines.cpp)
+target_include_directories(shard_perf_tests PRIVATE src)
+if(WIN32)
+  target_compile_definitions(shard_perf_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(shard_perf_tests PRIVATE pdh.lib)
 endif()

@@ -6,6 +6,7 @@ import { join as joinPath } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { cpSync, existsSync, readdirSync, readFileSync, unlinkSync, statSync, promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { ThemeStore } from "./themes";
 import { CoreClient } from "./core-client";
@@ -24,7 +25,11 @@ import { copyPlaybackReport } from "./playback-diagnostics";
 import { registerUpdater } from "./updater";
 import { ShutdownLifecycle } from "./shutdown-lifecycle";
 import { bounded, ownedProcesses } from "./bundled-processes";
-import type { AudioSourceConfig, AudioTrackInfo, ClipRecord, DevConsoleLine, EditorExportProject, ExportProgress, Settings, StorageSettings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
+import { PerfTimeline } from "./perf-timeline";
+import { RecordingPriority, priorityFallbackMessage } from "./recording-priority";
+import { collectBundleMembers, writeBundle } from "./diagnostics-bundle";
+import { parseClipLag } from "../shared/perf";
+import type { AudioSourceConfig, AudioTrackInfo, ClipLagInfo, ClipRecord, CoreState, DevConsoleLine, EditorExportProject, ExportProgress, PerfSample, PerfSession, RecordingPriorityStatus, Settings, StorageSettings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -117,6 +122,10 @@ let servicesStoppedForUpdate = false;
 let libraryClosedForUpdate = false;
 let updater: ReturnType<typeof registerUpdater> | undefined;
 let coreFatal: string | null = null;
+let perfTimeline: PerfTimeline | null = null;
+let recordingPriority: RecordingPriority;
+// Session diagnostics of the running core (state.get / ready → perf.session).
+let coreSession: PerfSession | null = null;
 const overlay = new SaveOverlay();
 const devConsole = new DevConsole();
 const editorProbeCache = new Map<string, { identity: string; tracks: Promise<AudioTrackInfo[]> }>();
@@ -235,7 +244,25 @@ async function main(): Promise<void> {
     }
   });
 
-  core = new CoreClient();
+  perfTimeline = new PerfTimeline(path.join(userData, "logs"));
+  app.once("will-quit", () => perfTimeline?.close());
+  core = new CoreClient({ priorityLaunch: () => getSettings().app.recordingPriority });
+  recordingPriority = new RecordingPriority({
+    launchPaths: () => core.launchPaths,
+    enabled: () => getSettings().app.recordingPriority,
+    coreSession: () => coreSession && { elevated: coreSession.elevated, gpuPriority: coreSession.gpuPriority },
+    parentWindow: () => {
+      if (!win || win.isDestroyed()) return null;
+      const handle = win.getNativeWindowHandle();
+      return handle.length >= 8 ? handle.readBigUInt64LE(0).toString() : String(handle.readUInt32LE(0));
+    },
+  });
+  recordingPriority.on("status", (status: RecordingPriorityStatus) => win?.webContents.send("priority:status", status));
+  core.on("priority-fallback", (reason: string) => {
+    recordingPriority.noteFallback(reason);
+    toast(priorityFallbackMessage(reason));
+    devConsole.feed({ t: Date.now(), level: "app", severity: "warn", text: `Recording priority unavailable (${reason}); starting the capture core normally` });
+  });
   core.on("event", onCoreEvent);
   core.on("core-exited", (code: number | null, signal?: string | null) => {
     devConsole.feed({ t: Date.now(), level: "app", severity: code === 0 && !signal ? "info" : "error",
@@ -348,7 +375,10 @@ function registerIpc(): void {
     }));
   });
   handle("settings:get", () => getSettings());
-  handle("settings:set", (_e, s: Settings) => applySettings(s));
+  // Recording priority is changed only through priority:set (it installs or
+  // removes the scheduled task); a settings draft never toggles elevation.
+  handle("settings:set", (_e, s: Settings) =>
+    applySettings({ ...s, app: { ...s.app, recordingPriority: getSettings().app.recordingPriority } }));
   handle("storage:defaultFolder", () => app.getPath("userData"));
   handle("storage:status", (_e, draft?: StorageSettings) => {
     if (draft === undefined) return storage.status();
@@ -487,6 +517,10 @@ function registerIpc(): void {
   handle("export:listEncoders", () => listExportEncoders());
   handle("app:version", () => app.getVersion());
   handle("playback:copy-report", (event, sampleJson: string) => copyPlaybackReport(event.sender, sampleJson));
+  handle("diagnostics:export", () => exportDiagnostics());
+  handle("perf:timeline", () => perfTimeline?.recent() ?? []);
+  handle("priority:status", () => recordingPriority.refresh());
+  handle("priority:set", (_e, enabled: boolean) => setRecordingPriority(enabled));
   handle("app:restart", () => {
     quitting = true;
     app.relaunch();
@@ -638,12 +672,24 @@ async function applySettings(s: Settings): Promise<void> {
 function onCoreEvent(type: string, params: Record<string, unknown>): void {
   if (servicesStoppedForUpdate) return;
   win?.webContents.send("core:event", type, params);
+  // Once per second: kept in the perf timeline (and its session file) rather
+  // than the console log; the core logs [perf] transitions and heartbeats.
+  if (type === "perf.stats") {
+    if (typeof params.t === "number") perfTimeline?.add(params as unknown as PerfSample); // core contract shape
+    return;
+  }
   devConsole.feed({ t: Date.now(), level: "event", text: `${type} ${JSON.stringify(params)}` });
 
   switch (type) {
+    case "ready": {
+      const perf = (params as Partial<CoreState>).perf;
+      coreSession = perf?.session ?? null;
+      void recordingPriority.refresh().catch(() => {});
+      break;
+    }
     case "clip.saved": {
-      const p = params as { path: string; requestedSec: number; actualSec: number };
-      void trackJob(importClip(p.path));
+      const p = params as { path: string; requestedSec: number; actualSec: number; lag?: unknown };
+      void trackJob(importClip(p.path, parseClipLag(p.lag)));
       const label = savedLabel(p.requestedSec);
       const style = getSettings().app.notificationStyle;
       if (style === "overlay") {
@@ -661,8 +707,8 @@ function onCoreEvent(type: string, params: Record<string, unknown>): void {
       break;
     }
     case "recording.state": {
-      const p = params as { active: boolean; path: string };
-      if (!p.active && p.path) void trackJob(finalizeRecording(p.path));
+      const p = params as { active: boolean; path: string; lag?: unknown };
+      if (!p.active && p.path) void trackJob(finalizeRecording(p.path, parseClipLag(p.lag)));
       const style = getSettings().app.notificationStyle;
       if (style === "overlay") overlay.showRecording(p.active);
       else if (style === "windows" && (!win || win.isMinimized() || !win.isFocused()))
@@ -705,7 +751,7 @@ let lastCaptureGame: string | null = null;
 let lastCaptureAt = 0;
 
 
-async function importClip(file: string): Promise<void> {
+async function importClip(file: string, lag: ClipLagInfo | null): Promise<void> {
   // Core produces mp4 directly (verify with ffprobe; remux if it somehow is
   // not mp4 — e.g. muxer misbehaved). Async to avoid blocking main thread on ffprobe/thumbnail.
   const game = lastGame;
@@ -716,7 +762,7 @@ async function importClip(file: string): Promise<void> {
     try { existsSync(file) && unlinkSync(file); } catch {}
   }
   try {
-    const rec = await library.importMp4Async(final, "clip", game);
+    const rec = await library.importMp4Async(final, "clip", game, { lag });
     win?.webContents.send("library:added", rec);
   } catch (e) {
     console.error("[importClip] failed", e);
@@ -726,16 +772,83 @@ async function importClip(file: string): Promise<void> {
   void storage.check();
 }
 
-async function finalizeRecording(mp4: string): Promise<void> {
+async function finalizeRecording(mp4: string, lag: ClipLagInfo | null): Promise<void> {
   // The core now records fragmented mp4 directly; just probe + import (async).
   try {
-    const rec = await library.importMp4Async(mp4, "recording", lastGame);
+    const rec = await library.importMp4Async(mp4, "recording", lastGame, { lag });
     win?.webContents.send("library:added", rec);
     toast("Recording saved to library");
     void storage.check();
   } catch (e) {
     toast(`Recording import failed: ${(e as Error).message}`);
   }
+}
+
+// Enabling registers the scheduled task (one UAC prompt) before the core is
+// restarted through it; disabling restarts the core normally first, then
+// removes the task (UAC only if something remains to remove).
+async function setRecordingPriority(enabled: boolean): Promise<RecordingPriorityStatus> {
+  if (typeof enabled !== "boolean") throw new Error("Invalid Recording priority request");
+  if (process.platform !== "win32") return recordingPriority.status();
+  const current = getSettings();
+  if (enabled) {
+    if (!(await recordingPriority.install())) return recordingPriority.status();
+    await saveSettings({ ...current, app: { ...current.app, recordingPriority: true } });
+    recordingPriority.noteMessage(null);
+    await core.restart();
+  } else {
+    await saveSettings({ ...current, app: { ...current.app, recordingPriority: false } });
+    await core.restart();
+    await recordingPriority.uninstall();
+  }
+  return recordingPriority.refresh();
+}
+
+async function exportDiagnostics(): Promise<string | null> {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const options = {
+    title: "Export diagnostics",
+    defaultPath: path.join(app.getPath("desktop"), `Shard-diagnostics-${stamp}.zip`),
+    buttonLabel: "Export",
+    filters: [{ name: "ZIP archive", extensions: ["zip"] }],
+  };
+  const result = win && !win.isDestroyed() ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+  if (result.canceled || !result.filePath) return null;
+  const state = core.ready ? await core.invoke("state.get", {}, 5000).catch(() => null) as CoreState | null : null;
+  if (state?.perf) coreSession = state.perf.session;
+  const cpus = os.cpus();
+  const settings = getSettings();
+  const systemInfo = {
+    generatedAt: new Date().toISOString(),
+    app: { version: app.getVersion(), packaged: app.isPackaged, electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node },
+    os: { platform: process.platform, release: os.release(), version: os.version(), arch: process.arch, uptimeSec: Math.round(os.uptime()) },
+    cpu: { model: cpus[0]?.model ?? "unknown", logicalCores: cpus.length },
+    memory: { totalMb: Math.round(os.totalmem() / 1048576), freeMb: Math.round(os.freemem() / 1048576) },
+    gpu: await app.getGPUInfo("basic").catch(() => null),
+    displays: screen.getAllDisplays().map(display => ({
+      id: display.id, label: display.label, size: display.size, scaleFactor: display.scaleFactor,
+      refreshHz: display.displayFrequency, internal: display.internal,
+    })),
+    settings: { capture: settings.capture, video: settings.video, replay: settings.replay, audioSources: settings.audio.sources.length, app: { recordingPriority: settings.app.recordingPriority, hardwareAcceleration: settings.app.hardwareAcceleration } },
+    recordingPriority: recordingPriority.status(),
+    core: state
+      ? { version: state.version, capture: state.capture, ring: state.ring, recording: state.recording, launchMode: core.launchMode, perf: state.perf }
+      : { connected: false, launchMode: core.launchMode, lastSession: coreSession, fatal: coreFatal },
+  };
+  const recentClips = library.list().slice(0, 50).map(clip => ({
+    file: path.basename(clip.path), createdAt: new Date(clip.createdAt).toISOString(), durationMs: clip.durationMs,
+    source: clip.source, game: clip.game, width: clip.width, height: clip.height, fps: clip.fps, lag: clip.lag ?? null,
+  }));
+  await perfTimeline?.flush();
+  const members = await collectBundleMembers({
+    systemInfo,
+    recentClips,
+    devConsole: { current: await devConsole.sessionSnapshot(), prior: devConsole.priorSessionLogs() },
+    perf: { current: perfTimeline?.sessionPath ?? null, prior: perfTimeline?.priorSessions() ?? [] },
+  });
+  await writeBundle(result.filePath, members);
+  shell.showItemInFolder(result.filePath);
+  return result.filePath;
 }
 
 function openLibrary(userData: string): void {

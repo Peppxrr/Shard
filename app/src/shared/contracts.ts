@@ -141,6 +141,10 @@ export interface AppSettings {
   // Defaults true for performance; some hybrid-GPU / driver bug systems need
   // it off to make WGC/game-capture reliable (Terraria etc).
   hardwareAcceleration: boolean;
+  // Recording priority: start the native capture core elevated through a
+  // Windows scheduled task (one UAC prompt to enable), so libobs can raise its
+  // GPU priority. Off by default; it can add CPU load on weaker CPUs.
+  recordingPriority: boolean;
 }
 
 
@@ -176,7 +180,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   audio: { sources: [] },
   storage: { autoCleanup: true, limitGb: 20, clipsDir: "", deleteEdited: false },
-  app: { notificationStyle: "overlay", startWithWindows: false, minimizeToTray: true, clipSound: true, clipSoundVolume: 0.8, clipSoundPath: "", developerConsole: false, hardwareAcceleration: true },
+  app: { notificationStyle: "overlay", startWithWindows: false, minimizeToTray: true, clipSound: true, clipSoundVolume: 0.8, clipSoundPath: "", developerConsole: false, hardwareAcceleration: true, recordingPriority: false },
   export: { targetMb: 10, encoder: "auto", resolution: "source" },
   hotkeys: [
     { id: "save_60", label: "Save last minute", accelerator: "F8", action: "save_clip", durationSec: 60, durationUnit: "min" },
@@ -298,12 +302,125 @@ export interface CoreState {
   sessions: GameSessionInfo[];
   storage: { limitGb: number; clipsDir: string };
   dirs: { clips: string; recordings: string };
+  perf: { session: PerfSession; latest: PerfSample | null };
   version: string;
 }
 
 export interface CoreEvent {
-  type: "ready" | "game.changed" | "game.session" | "clip.saved" | "recording.state" | "ring.stats" | "error" | "capture.subject";
+  type: "ready" | "game.changed" | "game.session" | "clip.saved" | "recording.state" | "ring.stats" | "perf.stats" | "error" | "capture.subject";
   params: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Frame pacing diagnostics (core/src/perf_monitor.*, perf_analysis.h)
+// ---------------------------------------------------------------------------
+
+// Why recording lost frames:
+//   gpu_starved        libobs missed render deadlines while the GPU's 3D engine was saturated
+//   render_stall       libobs missed render deadlines although the 3D engine had headroom
+//   encoder_overloaded frames rendered on time but the encoder could not take them
+export type PerfCause = "ok" | "gpu_starved" | "render_stall" | "encoder_overloaded";
+
+// GPU engine utilization (percent) of the capture adapter from the
+// "\GPU Engine(*)\Utilization Percentage" counters. Engine values are the
+// busiest engine of that type; process values are per-process 3D time.
+export interface PerfGpuSample {
+  available: boolean;
+  engine3d?: number;
+  videoEncode?: number;
+  copy?: number;
+  game3d?: number | null; // capture subject's processes; null when capturing the desktop
+  shard3d?: number;
+  shardEncode?: number;
+  top3dPid?: number;
+  top3d?: number;
+}
+
+// `perf.stats` event, once per second. Frame counts cover the last second;
+// percentages and `cause` cover the last five seconds.
+export interface PerfSample {
+  t: number; // epoch ms
+  active: boolean; // an output (replay buffer/recording) is encoding
+  fps: number;
+  frameTimeMs: number; // libobs average render time per frame
+  rendered: number; // obs_get_total_frames delta (includes lagged)
+  lagged: number; // obs_get_lagged_frames delta: render deadlines missed
+  encoded: number; // video_output_get_total_frames delta
+  skipped: number; // repeated frames encoded beyond render lag (libobs "skipped", counted when encoded)
+  stalled: number; // new frames dropped because the encoder queue was full (counted when lost)
+  backlogMs: number; // frames rendered but not yet encoded, in milliseconds of video
+  renderLagPct: number;
+  lostPct: number; // (lagged + stalled) / rendered over the last five seconds
+  encoderSkipPct: number;
+  gpu: PerfGpuSample;
+  cause: PerfCause;
+  hint: string | null; // plain-English guidance while frames are being lost
+}
+
+export interface PerfEncoderPath {
+  encoder: string;
+  zeroCopy: boolean; // NV12 textures go straight from the libobs mix to the encoder
+  textureCapable: boolean;
+  nv12Texture: boolean;
+  gpuScaling: boolean;
+  fellBack: boolean;
+  reason: string;
+  settings: Record<string, unknown> | null;
+}
+
+export type CaptureMethod = "game_capture" | "wgc_window" | "wgc_monitor" | "none";
+
+// Logged as [perf-session] whenever an output starts.
+export interface PerfSession {
+  elevated: boolean;
+  launch: "normal" | "task";
+  gpuPriority: "set" | "failed" | "unknown"; // libobs-d3d11 GPU scheduling priority result
+  processPriority: string; // CPU priority class (never changed by Shard)
+  hags: boolean | null;
+  adapter: { name: string; vendor: string; driver: string };
+  capture: {
+    subject: "monitor" | "game" | "none";
+    name: string;
+    pid: number;
+    method: CaptureMethod;
+    reason: string;
+    hookApi: string | null;
+    hookMode: "shared_texture" | "shared_memory" | null;
+    hookSize: string;
+  };
+  video: { base: string; output: string; fps: number; rescaled: boolean; scale: string; format: string } | null;
+  encoders: { replay: PerfEncoderPath | null; recording: PerfEncoderPath | null };
+  gpuCounters: { available: boolean; error: string };
+}
+
+// Where frames were lost inside a saved clip or recording (seconds from its
+// first presented frame). Carried by `clip.saved` / `recording.state`.
+export interface ClipLagSegment {
+  start: number;
+  end: number;
+  lagged: number;
+  skipped: number;
+  cause: PerfCause;
+}
+
+export interface ClipLagInfo {
+  frames: number;
+  lagged: number;
+  skipped: number;
+  cause: PerfCause;
+  segments: ClipLagSegment[];
+}
+
+// Recording priority (Electron main; core: priority_task.*).
+export interface RecordingPriorityStatus {
+  enabled: boolean; // the user's setting
+  supported: boolean; // Windows with a core that has the priority launcher
+  installed: boolean; // scheduled task registered
+  current: boolean; // task and its protected runtime copy match this install
+  coreElevated: boolean; // the running core is elevated
+  gpuPriority: "set" | "failed" | "unknown";
+  busy: boolean; // install/remove in progress (UAC prompt may be open)
+  message: string | null; // last error/fallback, plain English
 }
 
 export interface AudioDeviceInfo {
@@ -340,6 +457,8 @@ export interface ClipRecord {
   protected: number;
   source: "clip" | "recording" | "edited";
   importedFrom?: "medal";
+  // Frames libobs lost while this capture was recorded (null: unknown).
+  lag?: ClipLagInfo | null;
 }
 
 export type LibraryImportKind = "clips" | "edited";
@@ -499,6 +618,15 @@ export interface ShardApi {
   // misc
   version(): Promise<string>;
   copyPlaybackReport(sampleJson: string): Promise<void>;
+  // One-click diagnostics bundle (zip: core/libobs log, perf timeline, system
+  // info). Resolves to the saved path, or null when the dialog was cancelled.
+  exportDiagnostics(): Promise<string | null>;
+  // Recent perf.stats samples kept by the main process (newest last).
+  getPerfTimeline(): Promise<PerfSample[]>;
+  getRecordingPriority(): Promise<RecordingPriorityStatus>;
+  // Enabling shows one UAC prompt; both directions restart the capture core.
+  setRecordingPriority(enabled: boolean): Promise<RecordingPriorityStatus>;
+  onRecordingPriority(cb: (status: RecordingPriorityStatus) => void): () => void;
   restartApp(): Promise<void>;
   onToast(cb: (message: string) => void): () => void;
   // Frameless Windows shell controls. Other platforms retain their native frame.

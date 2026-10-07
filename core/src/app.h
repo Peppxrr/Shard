@@ -1,10 +1,12 @@
 #pragma once
 
 #include "config.h"
+#include "system_info.h"
 
 #include <obs.h>
 
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -54,6 +56,11 @@ public:
   uint32_t baseWidth() const { return baseWidth_; }
   uint32_t baseHeight() const { return baseHeight_; }
   std::vector<MonitorInfo> monitors() const;
+  // Fixed for the graphics-device lifetime (see resetVideo).
+  const GraphicsAdapterInfo& graphicsAdapter() const { return graphicsAdapter_; }
+  // Held exclusively while obs_reset_video replaces the video output, so
+  // samplers on other threads never read a video_t being destroyed.
+  std::shared_mutex& videoMutex() const { return videoMutex_; }
 
 private:
   bool startup();
@@ -67,8 +74,9 @@ private:
   obs_scene_t* scene_ = nullptr;
   uint32_t baseWidth_ = 1920;
   uint32_t baseHeight_ = 1080;
-  uint32_t graphicsAdapter_ = 0;
+  GraphicsAdapterInfo graphicsAdapter_;
   bool graphicsAdapterSelected_ = false;
+  mutable std::shared_mutex videoMutex_;
 };
 
 } // namespace shard
