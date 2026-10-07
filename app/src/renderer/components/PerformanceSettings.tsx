@@ -1,16 +1,7 @@
 import { useEffect, useState } from "react";
 import type { RecordingPriorityStatus } from "../../shared/contracts";
+import { recordingPriorityEffect, recordingPriorityProblemText } from "../../shared/recording-priority";
 import { Button, Card, Confirm, Icon, Toggle } from "./ui";
-
-type PriorityState = "loading" | "unsupported" | "busy" | "off" | "active" | "inactive";
-
-function priorityState(status: RecordingPriorityStatus | null): PriorityState {
-  if (!status) return "loading";
-  if (!status.supported) return "unsupported";
-  if (status.busy) return "busy";
-  if (!status.enabled) return "off";
-  return status.coreElevated ? "active" : "inactive";
-}
 
 export function RecordingPerformanceCard() {
   const [status, setStatus] = useState<RecordingPriorityStatus | null>(null);
@@ -47,19 +38,22 @@ export function RecordingPerformanceCard() {
     }
   };
 
-  const state = priorityState(status);
+  const { state, problem } = recordingPriorityEffect(status);
   const staleTask = status?.enabled && status.installed && !status.current;
   return <Card title="Recording performance" sub="Keep recordings smooth when a game maxes out your GPU.">
     <div data-shard-component="recording-priority" data-shard-state={state}>
       <label className="setting-row setting-row--switch">
         <span className="setting-row__copy">
           <strong>Recording priority</strong>
-          <span>Gives recording GPU time ahead of the game. <span data-shard-slot="priority-warning">May increase CPU usage on slower PCs.</span> Windows asks for administrator permission once.</span>
+          <span>Gives recording GPU time ahead of the game. <span data-shard-slot="priority-warning">When the GPU is fully loaded, this may slightly reduce game performance to keep recording smooth.</span> Windows asks for administrator permission when enabling Recording priority. Shard may ask again after updates to the capture core.</span>
         </span>
         <Toggle checked={status?.enabled ?? false} disabled={state === "loading" || state === "unsupported" || state === "busy"} onChange={setConfirm} />
       </label>
       {state === "busy" && <p data-shard-slot="priority-status" className="priority-status">Waiting for Windows to approve…</p>}
-      {status?.message && <p data-shard-slot="priority-message" role="alert" className="form-error">{status.message}</p>}
+      {state === "active" && <p data-shard-slot="priority-status" className="priority-status">Active: recording has GPU priority.</p>}
+      {status?.message
+        ? <p data-shard-slot="priority-message" role="alert" className="form-error">{status.message}</p>
+        : problem && <p data-shard-slot="priority-message" role="status" className="priority-status">{recordingPriorityProblemText(problem)}</p>}
       {staleTask && <Button size="sm" onClick={() => void apply(true)}>Turn on again</Button>}
     </div>
     <div data-shard-slot="diagnostics-export" className="setting-row">

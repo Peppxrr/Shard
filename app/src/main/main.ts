@@ -27,6 +27,8 @@ import { ShutdownLifecycle } from "./shutdown-lifecycle";
 import { bounded, ownedProcesses } from "./bundled-processes";
 import { PerfTimeline } from "./perf-timeline";
 import { RecordingPriority, priorityFallbackMessage } from "./recording-priority";
+import { recordingPriorityDiagnostics } from "../shared/recording-priority";
+import { ClipSaveTracker } from "../shared/clip-saves";
 import { collectBundleMembers, writeBundle } from "./diagnostics-bundle";
 import { parseClipLag } from "../shared/perf";
 import type { AudioSourceConfig, AudioTrackInfo, ClipLagInfo, ClipRecord, CoreState, DevConsoleLine, EditorExportProject, ExportProgress, PerfSample, PerfSession, RecordingPriorityStatus, Settings, StorageSettings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
@@ -250,7 +252,7 @@ async function main(): Promise<void> {
   recordingPriority = new RecordingPriority({
     launchPaths: () => core.launchPaths,
     enabled: () => getSettings().app.recordingPriority,
-    coreSession: () => coreSession && { elevated: coreSession.elevated, gpuPriority: coreSession.gpuPriority },
+    coreSession: () => coreSession && { elevated: coreSession.elevated, gpuPriority: coreSession.gpuPriority, gpuVendor: coreSession.adapter.vendor },
     parentWindow: () => {
       if (!win || win.isDestroyed()) return null;
       const handle = win.getNativeWindowHandle();
@@ -680,6 +682,7 @@ function onCoreEvent(type: string, params: Record<string, unknown>): void {
   }
   devConsole.feed({ t: Date.now(), level: "event", text: `${type} ${JSON.stringify(params)}` });
 
+  if (clipSaves.apply(type, params)) updateClipAck(type === "clip.queued");
   switch (type) {
     case "ready": {
       const perf = (params as Partial<CoreState>).perf;
@@ -690,17 +693,7 @@ function onCoreEvent(type: string, params: Record<string, unknown>): void {
     case "clip.saved": {
       const p = params as { path: string; requestedSec: number; actualSec: number; lag?: unknown };
       void trackJob(importClip(p.path, parseClipLag(p.lag)));
-      const label = savedLabel(p.requestedSec);
-      const style = getSettings().app.notificationStyle;
-      if (style === "overlay") {
-        // On-screen popup (top-left, slides in/out) — visible even over games.
-        overlay.show(label);
-      } else if (style === "windows") {
-        const windowHidden = !win || win.isMinimized() || !win.isFocused();
-        if (windowHidden) new Notification({ title: "Shard", body: label }).show();
-        else toast(label);
-      }
-      // "off": no feedback.
+      notifyClip(savedLabel(p.requestedSec));
       // Clip sound is now handled in renderer (App.tsx onCoreEvent) for low latency + volume/custom support.
       // Main fallback only if window not available — renderer will play via preloaded Audio.
       if (getSettings().app.clipSound && (!win || win.isDestroyed())) playClipSound();
@@ -750,6 +743,45 @@ let lastGame: string | null = null;
 let lastCaptureGame: string | null = null;
 let lastCaptureAt = 0;
 
+// Clip saves normally finish within a second. After severe GPU starvation the
+// core may wait up to 30 s for the encoder to catch up so the clip still ends
+// where it was requested; a short "Saving clip…" acknowledgement then shows
+// the hotkey worked, without claiming the file exists. Once per batch of
+// overlapping saves, and never for saves that finish quickly.
+const CLIP_ACK_DELAY_MS = 1000;
+const clipSaves = new ClipSaveTracker();
+let clipAckTimer: NodeJS.Timeout | undefined;
+let clipAckShown = false;
+
+function updateClipAck(queued: boolean): void {
+  if (!clipSaves.size) {
+    clearTimeout(clipAckTimer);
+    clipAckTimer = undefined;
+    clipAckShown = false;
+    return;
+  }
+  if (!queued || clipAckShown || clipAckTimer) return;
+  clipAckTimer = setTimeout(() => {
+    clipAckTimer = undefined;
+    if (!clipSaves.size) return;
+    clipAckShown = true;
+    notifyClip(clipSaves.size > 1 ? `Saving ${clipSaves.size} clips…` : "Saving clip…");
+  }, CLIP_ACK_DELAY_MS);
+}
+
+// Clip feedback in the user's notification style ("off": none).
+function notifyClip(label: string): void {
+  const style = getSettings().app.notificationStyle;
+  if (style === "overlay") {
+    // On-screen popup (top-left, slides in/out) — visible even over games.
+    overlay.show(label);
+  } else if (style === "windows") {
+    const windowHidden = !win || win.isMinimized() || !win.isFocused();
+    if (windowHidden) new Notification({ title: "Shard", body: label }).show();
+    else toast(label);
+  }
+}
+
 
 async function importClip(file: string, lag: ClipLagInfo | null): Promise<void> {
   // Core produces mp4 directly (verify with ffprobe; remux if it somehow is
@@ -784,15 +816,27 @@ async function finalizeRecording(mp4: string, lag: ClipLagInfo | null): Promise<
   }
 }
 
-// Enabling registers the scheduled task (one UAC prompt) before the core is
+// Enabling registers the scheduled task (UAC prompt) before the core is
 // restarted through it; disabling restarts the core normally first, then
-// removes the task (UAC only if something remains to remove).
+// removes the task (UAC only if something remains to remove). A failed
+// install never leaves the setting on, even when re-enabling a stale task.
 async function setRecordingPriority(enabled: boolean): Promise<RecordingPriorityStatus> {
   if (typeof enabled !== "boolean") throw new Error("Invalid Recording priority request");
   if (process.platform !== "win32") return recordingPriority.status();
   const current = getSettings();
   if (enabled) {
-    if (!(await recordingPriority.install())) return recordingPriority.status();
+    // Shard's own elevated core runs from the protected copy, which setup
+    // cannot replace while it runs: stop it through the normal supervised
+    // shutdown (never by killing processes) before reinstalling.
+    const stoppedElevated = core.launchMode === "priority" && coreSession?.elevated === true;
+    if (stoppedElevated) await core.shutdown();
+    if (!(await recordingPriority.install())) {
+      if (current.app.recordingPriority) {
+        await saveSettings({ ...current, app: { ...current.app, recordingPriority: false } });
+      }
+      if (stoppedElevated || core.launchMode === "priority") await core.restart();
+      return recordingPriority.refresh();
+    }
     await saveSettings({ ...current, app: { ...current.app, recordingPriority: true } });
     recordingPriority.noteMessage(null);
     await core.restart();
@@ -816,6 +860,8 @@ async function exportDiagnostics(): Promise<string | null> {
   if (result.canceled || !result.filePath) return null;
   const state = core.ready ? await core.invoke("state.get", {}, 5000).catch(() => null) as CoreState | null : null;
   if (state?.perf) coreSession = state.perf.session;
+  // Re-check the task and protected runtime so the bundle shows current facts.
+  const priorityStatus = await recordingPriority.refresh().catch(() => recordingPriority.status());
   const cpus = os.cpus();
   const settings = getSettings();
   const systemInfo = {
@@ -830,7 +876,9 @@ async function exportDiagnostics(): Promise<string | null> {
       refreshHz: display.displayFrequency, internal: display.internal,
     })),
     settings: { capture: settings.capture, video: settings.video, replay: settings.replay, audioSources: settings.audio.sources.length, app: { recordingPriority: settings.app.recordingPriority, hardwareAcceleration: settings.app.hardwareAcceleration } },
-    recordingPriority: recordingPriority.status(),
+    recordingPriority: priorityStatus,
+    recordingPrioritySummary: recordingPriorityDiagnostics(priorityStatus, core.launchMode, state?.perf.session ?? coreSession,
+      state?.perf.latest ?? perfTimeline?.recent().at(-1) ?? null),
     core: state
       ? { version: state.version, capture: state.capture, ring: state.ring, recording: state.recording, launchMode: core.launchMode, perf: state.perf }
       : { connected: false, launchMode: core.launchMode, lastSession: coreSession, fatal: coreFatal },

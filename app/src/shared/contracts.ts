@@ -142,8 +142,9 @@ export interface AppSettings {
   // it off to make WGC/game-capture reliable (Terraria etc).
   hardwareAcceleration: boolean;
   // Recording priority: start the native capture core elevated through a
-  // Windows scheduled task (one UAC prompt to enable), so libobs can raise its
-  // GPU priority. Off by default; it can add CPU load on weaker CPUs.
+  // Windows scheduled task (UAC prompt when enabling, and again after capture
+  // core updates), so libobs can raise its GPU priority. Off by default; under
+  // full GPU load it trades a little game performance for smooth recording.
   recordingPriority: boolean;
 }
 
@@ -307,7 +308,9 @@ export interface CoreState {
 }
 
 export interface CoreEvent {
-  type: "ready" | "game.changed" | "game.session" | "clip.saved" | "recording.state" | "ring.stats" | "perf.stats" | "error" | "capture.subject";
+  // clip.queued {request, requestedSec, depth}: a save was accepted (before muxing);
+  // clip.saved/error carry the same `request` id; clip.dropped {request}: the ring stopped first.
+  type: "ready" | "game.changed" | "game.session" | "clip.queued" | "clip.saved" | "clip.dropped" | "recording.state" | "ring.stats" | "perf.stats" | "error" | "capture.subject";
   params: Record<string, unknown>;
 }
 
@@ -418,7 +421,8 @@ export interface RecordingPriorityStatus {
   installed: boolean; // scheduled task registered
   current: boolean; // task and its protected runtime copy match this install
   coreElevated: boolean; // the running core is elevated
-  gpuPriority: "set" | "failed" | "unknown";
+  gpuPriority: "set" | "failed" | "unknown"; // libobs result; only "set" + elevated means active
+  gpuVendor: string | null; // running core's adapter vendor ("intel": libobs skips GPU priority); null = no core reported yet
   busy: boolean; // install/remove in progress (UAC prompt may be open)
   message: string | null; // last error/fallback, plain English
 }

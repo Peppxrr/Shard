@@ -378,9 +378,10 @@ void ReplayRing::getStats(int& secondsBuffered, double& mbUsed) const
   mbUsed = (double)ring_->cur_size / (1024.0 * 1024.0);
 }
 
-void ReplayRing::save(int durationSec)
+uint64_t ReplayRing::save(int durationSec)
 {
   SaveRequest request;
+  request.id = nextSaveId_.fetch_add(1);
   request.durationSec = durationSec;
   request.requestSteadyUs = PerfMonitor::nowUs();
   {
@@ -398,13 +399,22 @@ void ReplayRing::save(int durationSec)
       }
     }
   }
+  const bool accepted = active_.load();
   {
     std::lock_guard<std::mutex> lock(saveMtx_);
     saveQueue_.push_back(request);
+    const size_t depth = saveQueue_.size();
     logFormat("save: queued %d at %lld (depth %zu)\n", durationSec,
-                 (long long)request.endTimeUs, saveQueue_.size());
+                 (long long)request.endTimeUs, depth);
+    // Acknowledged before muxing: the save may wait for the encoder to catch
+    // up (up to 30 s after severe GPU starvation), and "clip.saved" follows
+    // only once the file is written. Emitted under the queue lock so the
+    // worker cannot report this request's result first.
+    if (accepted)
+      events_.emit("clip.queued", {{"request", request.id}, {"requestedSec", durationSec}, {"depth", depth}});
   }
   saveCv_.notify_one();
+  return accepted ? request.id : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +545,10 @@ void ReplayRing::saveWorker()
 
     if (!active_.load() || muxing_.load()) {
       logFormat("save: DROPPED request (active=%d muxing=%d)\n", active_.load() ? 1 : 0, muxing_.load() ? 1 : 0);
-      continue; // ring not running; drop the request
+      // Ring not running (e.g. stopped after the request was acknowledged):
+      // end any "Saving clip" acknowledgement without a user-facing error.
+      events_.emit("clip.dropped", {{"request", request.id}});
+      continue;
     }
 
     // An elevated core (Recording priority) writes only where the user's own
@@ -543,7 +556,7 @@ void ReplayRing::saveWorker()
     // used to create files in protected locations.
     if (!interactiveUserCanWrite(config_.clipsDir.c_str())) {
       logFormat("save: REFUSED clips folder not writable by the interactive user: %s", config_.clipsDir.c_str());
-      events_.emit("error", {{"code", "STORAGE_DENIED"},
+      events_.emit("error", {{"code", "STORAGE_DENIED"}, {"request", request.id},
                              {"message", "Your Windows account can't write to the clips folder: " + config_.clipsDir}});
       continue;
     }
@@ -553,7 +566,7 @@ void ReplayRing::saveWorker()
     double actualSec = 0;
     uint64_t startSteadyUs = 0, endSteadyUs = 0;
     if (!snapshotSave(request, packets, path, actualSec, startSteadyUs, endSteadyUs)) {
-      events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Replay ring save failed (ring empty?)"}});
+      events_.emit("error", {{"code", "ENCODER_FAIL"}, {"request", request.id}, {"message", "Replay ring save failed (ring empty?)"}});
       continue;
     }
 
@@ -569,7 +582,7 @@ void ReplayRing::saveWorker()
       obs_encoder_packet_release(&p);
 
     if (success) {
-      nlohmann::json saved = {{"path", path}, {"requestedSec", request.durationSec}, {"actualSec", actualSec}};
+      nlohmann::json saved = {{"request", request.id}, {"path", path}, {"requestedSec", request.durationSec}, {"actualSec", actualSec}};
       // Where libobs lost frames inside this clip (render lag / encoder
       // skips), as seconds from the clip's first presented frame.
       if (perf_) {
@@ -583,7 +596,7 @@ void ReplayRing::saveWorker()
       }
       events_.emit("clip.saved", saved);
     } else {
-      events_.emit("error", {{"code", "ENCODER_FAIL"}, {"message", "Save failed: " + error + " (" + path + ")"}});
+      events_.emit("error", {{"code", "ENCODER_FAIL"}, {"request", request.id}, {"message", "Save failed: " + error + " (" + path + ")"}});
     }
   }
 }

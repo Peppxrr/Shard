@@ -157,11 +157,24 @@ struct WindowTotals {
   uint32_t repeated = 0;
   uint32_t stalled = 0;
   uint32_t backlog = 0; // at the end of the window
-  bool gpuKnown = false;         // a lossy slice had GPU counters
-  bool lossWhile3dBusy = false;  // frames were lost while the 3D engine was saturated
-  bool lossWhileEncodeBusy = false;
+  bool gpuKnown = false; // a lossy slice had GPU counters
+  // Lost frames (lagged + stalled) attributed slice by slice, so the window's
+  // cause follows where the frames were actually lost.
+  uint32_t lostGpu = 0;
+  uint32_t lostRender = 0;
+  uint32_t lostEncoder = 0;
+  // The previous slice dropped frames on a full encoder queue that GPU
+  // starvation filled; consecutive stalls drain that same queue.
+  bool gpuQueueDraining = false;
 };
 
+// Per-slice attribution:
+// - render lag while the 3D engine is saturated: GPU starvation; otherwise a
+//   render stall (CPU, driver, blocking work, or GPU counters unavailable).
+// - encoder-queue stalls: still GPU starvation while a queue filled by it
+//   drains; the encoder when the video encode engine is saturated; GPU
+//   starvation when the 3D engine is (the texture encoder's GPU copy waits
+//   behind the game); otherwise the encoder (e.g. a software encoder).
 inline void addSlice(WindowTotals& totals, const FrameSlice& slice)
 {
   totals.rendered += slice.rendered;
@@ -170,11 +183,20 @@ inline void addSlice(WindowTotals& totals, const FrameSlice& slice)
   totals.repeated += slice.repeated;
   totals.stalled += slice.stalled;
   totals.backlog = slice.backlog;
-  if (!slice.lagged && !slice.stalled)
+  if (!slice.lagged && !slice.stalled) {
+    totals.gpuQueueDraining = false;
     return;
+  }
   totals.gpuKnown = totals.gpuKnown || slice.engine3d >= 0;
-  totals.lossWhile3dBusy = totals.lossWhile3dBusy || slice.engine3d >= kGpuBusyPercent;
-  totals.lossWhileEncodeBusy = totals.lossWhileEncodeBusy || slice.videoEncode >= kEncoderBusyPercent;
+  const bool gpuBusy = slice.engine3d >= kGpuBusyPercent;
+  const bool encodeBusy = slice.videoEncode >= kEncoderBusyPercent;
+  (gpuBusy ? totals.lostGpu : totals.lostRender) += slice.lagged;
+  bool stallGpu = false;
+  if (slice.stalled) {
+    stallGpu = totals.gpuQueueDraining || (!encodeBusy && gpuBusy);
+    (stallGpu ? totals.lostGpu : totals.lostEncoder) += slice.stalled;
+  }
+  totals.gpuQueueDraining = slice.stalled && stallGpu;
 }
 
 inline PerfCause classifyFrameLoss(const WindowTotals& totals)
@@ -182,11 +204,10 @@ inline PerfCause classifyFrameLoss(const WindowTotals& totals)
   const uint32_t lost = totals.lagged + totals.stalled;
   if (!lost || !totals.rendered || double(lost) / double(totals.rendered) < kLossThreshold)
     return PerfCause::Ok;
-  // A saturated 3D engine explains both missed render deadlines and a
-  // texture encoder whose GPU work waits behind the game.
-  if (totals.lossWhile3dBusy)
+  // The cause that lost the most frames; ties favour GPU, then encoder.
+  if (totals.lostGpu >= totals.lostEncoder && totals.lostGpu >= totals.lostRender && totals.lostGpu)
     return PerfCause::GpuStarved;
-  if (totals.stalled > totals.lagged)
+  if (totals.lostEncoder >= totals.lostRender && totals.lostEncoder)
     return PerfCause::EncoderOverloaded;
   return PerfCause::RenderStall;
 }

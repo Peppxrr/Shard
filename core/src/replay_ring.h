@@ -50,7 +50,11 @@ public:
   void setCaptureActive(bool active);
 
   // Queue a save of the last durationSec (0 = save everything buffered).
-  void save(int durationSec);
+  // Returns the request id, or 0 when no replay buffer is running (the
+  // request is dropped). An accepted request emits "clip.queued" {request} at
+  // once; it ends with "clip.saved", "clip.dropped" or an "error" carrying
+  // the same request id.
+  uint64_t save(int durationSec);
 
   void updateCaps();
 
@@ -80,10 +84,12 @@ private:
   static bool purgeFront(Ring* ring);
   static void purge(Ring* ring);
   struct SaveRequest {
+    uint64_t id = 0;
     int durationSec = 0;
     int64_t endTimeUs = 0;
     uint64_t requestSteadyUs = 0; // steady clock at the hotkey/RPC
   };
+  std::atomic<uint64_t> nextSaveId_{1};
   bool snapshotSave(const SaveRequest& request, std::vector<encoder_packet>& out, std::string& path, double& actualSec,
                     uint64_t& startSteadyUs, uint64_t& endSteadyUs);
   void saveWorker();

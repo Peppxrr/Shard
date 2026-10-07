@@ -1,5 +1,6 @@
 #include "priority_task.h"
 
+#include "priority_policy.h"
 #include "system_info.h"
 
 #include <nlohmann/json.hpp>
@@ -45,6 +46,10 @@ enum PriorityExit : int {
   kRemoveFailed = 14,
   kComFailed = 15,
   kPipeFailed = 16,
+  kStandardUser = 17,  // the signed-in account cannot elevate itself
+  kWrongUser = 18,     // UAC elevated a different account
+  kRuntimeInUse = 19,  // the previous elevated runtime is still running
+  kVerifyFailed = 20,  // registered, but the task/runtime did not check out
   kCancelled = ERROR_CANCELLED, // UAC declined
 };
 
@@ -97,6 +102,7 @@ struct Args {
   std::wstring configDir;
   std::wstring coreBin;
   std::wstring games;
+  std::wstring expectedSid; // install/uninstall-elevated: the requesting user
   uint64_t parentWindow = 0;
 };
 
@@ -135,6 +141,8 @@ std::optional<Args> parseArgs()
       args.games = next();
     } else if (arg == L"--parent-window") {
       args.parentWindow = std::wcstoull(next().c_str(), nullptr, 10);
+    } else if (arg == L"--expected-sid") {
+      args.expectedSid = next();
     }
   }
   LocalFree(argv);
@@ -413,16 +421,40 @@ nlohmann::json manifestJson(const std::vector<RuntimeFile>& files, const fs::pat
   return {{"source", narrow(source.wstring())}, {"files", list}};
 }
 
-// Empty when the protected copy matches `sourceCoreBin` file for file.
+std::vector<RuntimeEntry> runtimeEntries(const std::vector<RuntimeFile>& files)
+{
+  std::vector<RuntimeEntry> entries;
+  entries.reserve(files.size());
+  for (const auto& file : files)
+    entries.push_back({file.path, file.size});
+  return entries;
+}
+
+// Empty when the protected copy matches `sourceCoreBin` file for file and
+// still holds every file its manifest lists, at the recorded size. Sizes, not
+// hashes: the copy is administrators-only, so this catches deletion,
+// truncation and interrupted copies without hashing the runtime per launch.
 std::string runtimeFreshness(const fs::path& sourceCoreBin, const fs::path& copy)
 {
   std::ifstream manifestFile(copy / kManifestName);
   if (!manifestFile)
     return "runtime_copy_missing";
   const nlohmann::json manifest = nlohmann::json::parse(manifestFile, nullptr, false);
-  if (manifest.is_discarded() || !manifest.contains("files"))
+  if (manifest.is_discarded() || !manifest.contains("files") || !manifest["files"].is_array())
     return "runtime_copy_invalid";
+  std::vector<RuntimeEntry> listed;
+  for (const auto& file : manifest["files"]) {
+    if (!file.is_object() || !file.contains("path") || !file["path"].is_string() || !file.contains("size") ||
+        !file["size"].is_number_unsigned())
+      return "runtime_copy_invalid";
+    listed.push_back({file["path"].get<std::string>(), file["size"].get<uintmax_t>()});
+  }
   std::error_code error;
+  const auto copied = listRuntime(copy, error);
+  if (error)
+    return "runtime_copy_invalid";
+  if (std::string problem = runtimeCopyProblem(listed, runtimeEntries(copied)); !problem.empty())
+    return problem;
   const auto files = listRuntime(sourceCoreBin, error);
   if (error)
     return "source_runtime_unreadable";
@@ -431,16 +463,28 @@ std::string runtimeFreshness(const fs::path& sourceCoreBin, const fs::path& copy
   return {};
 }
 
-bool copyRuntime(const fs::path& source, const fs::path& destination)
+enum class CopyResult { Ok, Failed, InUse };
+
+// Stages the new copy beside the old one and swaps by rename, so a failure at
+// any step leaves the previous copy intact. Leftovers of an interrupted run
+// (".staging", ".old") are removed first.
+CopyResult copyRuntime(const fs::path& source, const fs::path& destination)
 {
   std::error_code error;
   const auto files = listRuntime(source, error);
   if (error || files.empty()) {
     diagnostic("cannot read core runtime", narrow(source.wstring()));
-    return false;
+    return CopyResult::Failed;
   }
   const fs::path staging = destination.wstring() + L".staging";
+  const fs::path previous = destination.wstring() + L".old";
   fs::remove_all(staging, error);
+  fs::remove_all(previous, error);
+  if (fs::exists(previous, error)) {
+    diagnostic("cannot remove the previous runtime copy (is an elevated core still running?)",
+               narrow(previous.wstring()));
+    return CopyResult::InUse;
+  }
   error.clear();
   for (const auto& file : files) {
     const fs::path relative = fs::path(widen(file.path));
@@ -450,25 +494,38 @@ bool copyRuntime(const fs::path& source, const fs::path& destination)
         fs::file_size(target, error) != file.size) {
       diagnostic("copy failed", narrow(relative.wstring()) + ": " + error.message());
       fs::remove_all(staging, error);
-      return false;
+      return CopyResult::Failed;
     }
   }
   {
     std::ofstream manifest(staging / kManifestName, std::ios::binary | std::ios::trunc);
     manifest << manifestJson(files, source).dump();
-    if (!manifest) {
+    if (!manifest.flush()) {
+      manifest.close();
       fs::remove_all(staging, error);
-      return false;
+      return CopyResult::Failed;
     }
   }
-  fs::remove_all(destination, error);
-  if (error) {
-    diagnostic("cannot replace previous runtime copy (is an elevated core still running?)", error.message());
-    fs::remove_all(staging, error);
-    return false;
+  if (fs::exists(destination, error)) {
+    // Windows refuses to rename a directory while files in it are open, so a
+    // running elevated core keeps its copy and is reported, not half-deleted.
+    fs::rename(destination, previous, error);
+    if (error) {
+      diagnostic("cannot replace the previous runtime copy (is an elevated core still running?)", error.message());
+      fs::remove_all(staging, error);
+      return CopyResult::InUse;
+    }
   }
   fs::rename(staging, destination, error);
-  return !error;
+  if (error) {
+    diagnostic("cannot activate the new runtime copy", error.message());
+    std::error_code ignored;
+    fs::rename(previous, destination, ignored);
+    fs::remove_all(staging, ignored);
+    return CopyResult::Failed;
+  }
+  fs::remove_all(previous, error); // best effort; retried on the next install
+  return CopyResult::Ok;
 }
 
 // ---------------------------------------------------------- elevation ----
@@ -495,10 +552,10 @@ int runElevated(const std::wstring& parameters, uint64_t parentWindow)
   return static_cast<int>(code);
 }
 
-std::wstring forwardedArgs(const Args& args)
+std::wstring forwardedArgs(const Args& args, const std::wstring& sid)
 {
   return L" --config-dir " + quoted(args.configDir) + L" --core-bin " + quoted(args.coreBin) + L" --games " +
-         quoted(args.games);
+         quoted(args.games) + L" --expected-sid " + quoted(sid);
 }
 
 const char* exitMessage(int code)
@@ -507,12 +564,32 @@ const char* exitMessage(int code)
     case kOk: return "";
     case kCancelled: return "Administrator permission was declined.";
     case kNotElevated: return "Windows did not grant administrator rights.";
+    case kStandardUser:
+    case kWrongUser:
+      return "Recording priority needs your own Windows account to have administrator rights. Signing in to a "
+             "different administrator account in the Windows prompt isn't supported.";
     case kCopyFailed: return "Could not copy the capture core to Program Files.";
+    case kRuntimeInUse:
+      return "Another Shard capture core is still using the elevated copy. Close Shard completely (including the tray "
+             "icon) and try again; if it still fails, restart your PC.";
     case kRegisterFailed: return "Could not create the scheduled task.";
+    case kVerifyFailed: return "Windows created the scheduled task, but it didn't check out, so it was removed.";
     case kRemoveFailed: return "Could not remove the scheduled task.";
     case kBadArgs: return "Invalid Recording priority request.";
     default: return "Windows Task Scheduler is unavailable.";
   }
+}
+
+int tokenElevationType()
+{
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+    return 0;
+  TOKEN_ELEVATION_TYPE type = TokenElevationTypeDefault;
+  DWORD size = 0;
+  const bool ok = GetTokenInformation(token, TokenElevationType, &type, sizeof(type), &size) != FALSE;
+  CloseHandle(token);
+  return ok ? static_cast<int>(type) : 0;
 }
 
 // -------------------------------------------------------------- modes ----
@@ -553,71 +630,108 @@ int modeStatus(const Args& args)
   return kOk;
 }
 
-int modeInstallElevated(const Args& args)
+// Deletes this user's task and protected runtime (never another SID's).
+bool removeOwnInstall(const std::wstring& sid)
 {
-  if (!argsComplete(args))
-    return kBadArgs;
-  if (!processElevated())
-    return kNotElevated;
-  ComSession com;
-  if (!com.ok)
-    return kComFailed;
-  const std::wstring sid = userSid();
-  const fs::path coreBin = protectedCoreBin(sid);
-  if (!copyRuntime(args.coreBin, coreBin))
-    return kCopyFailed;
-  ComPtr<ITaskService> service;
-  ComPtr<ITaskFolder> folder;
-  if (FAILED(connect(service)) || FAILED(shardFolder(service.p, folder, true)))
-    return kRegisterFailed;
-  // Only SYSTEM and administrators may change the task; the user may read
-  // and run it (that is what avoids the UAC prompt on each launch).
-  VARIANT sddl;
-  VariantInit(&sddl);
-  sddl.vt = VT_BSTR;
-  sddl.bstrVal = SysAllocString((L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;" + sid + L")").c_str());
-  ComPtr<IRegisteredTask> registered;
-  const HRESULT hr = folder->RegisterTask(Bstr(taskName(sid)).value, Bstr(taskXml(args, sid, coreBin)).value,
-                                          TASK_CREATE_OR_UPDATE, emptyVariant(), emptyVariant(),
-                                          TASK_LOGON_INTERACTIVE_TOKEN, sddl, registered.put());
-  VariantClear(&sddl);
-  return SUCCEEDED(hr) ? kOk : kRegisterFailed;
-}
-
-int modeUninstallElevated()
-{
-  if (!processElevated())
-    return kNotElevated;
-  ComSession com;
-  if (!com.ok)
-    return kComFailed;
-  const std::wstring sid = userSid();
   bool ok = true;
   ComPtr<ITaskService> service;
   ComPtr<ITaskFolder> folder;
   if (SUCCEEDED(connect(service)) && SUCCEEDED(shardFolder(service.p, folder, false))) {
     const HRESULT hr = folder->DeleteTask(Bstr(taskName(sid)).value, 0);
     ok = SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
-    // Leave the folder when other users still have tasks in it.
+    // Fails (and is kept) while other users still have tasks in it.
     ComPtr<ITaskFolder> root;
     if (SUCCEEDED(service->GetFolder(Bstr(L"\\").value, root.put())))
       root->DeleteFolder(Bstr(kTaskFolderName).value, 0);
   }
   std::error_code error;
   fs::remove_all(protectedRoot(sid), error);
-  if (error)
-    ok = false;
-  return ok ? kOk : kRemoveFailed;
+  return ok && !error;
+}
+
+// Elevated helpers act only for the account that asked: over-the-shoulder
+// UAC (a standard user typing an administrator's password) elevates a
+// different SID, whose task and runtime the requesting user could not use.
+int checkElevatedIdentity(const Args& args, std::wstring& sid)
+{
+  if (!processElevated())
+    return kNotElevated;
+  sid = userSid();
+  if (!elevatedHelperIdentityOk(narrow(args.expectedSid), narrow(sid))) {
+    diagnostic("elevated helper runs as a different account; refusing", narrow(sid));
+    return kWrongUser;
+  }
+  return kOk;
+}
+
+int modeInstallElevated(const Args& args)
+{
+  if (!argsComplete(args))
+    return kBadArgs;
+  std::wstring sid;
+  if (const int code = checkElevatedIdentity(args, sid); code != kOk)
+    return code;
+  ComSession com;
+  if (!com.ok)
+    return kComFailed;
+  const fs::path coreBin = protectedCoreBin(sid);
+  switch (copyRuntime(args.coreBin, coreBin)) {
+    case CopyResult::Ok: break;
+    // The previous copy is intact (and possibly running): leave it and its task.
+    case CopyResult::InUse: return kRuntimeInUse;
+    case CopyResult::Failed: return kCopyFailed;
+  }
+  ComPtr<ITaskService> service;
+  ComPtr<ITaskFolder> folder;
+  HRESULT hr = connect(service);
+  if (SUCCEEDED(hr))
+    hr = shardFolder(service.p, folder, true);
+  if (SUCCEEDED(hr)) {
+    // Only SYSTEM and administrators may change the task; the user may read
+    // and run it (that is what avoids the UAC prompt on each launch).
+    VARIANT sddl;
+    VariantInit(&sddl);
+    sddl.vt = VT_BSTR;
+    sddl.bstrVal = SysAllocString((L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;" + sid + L")").c_str());
+    ComPtr<IRegisteredTask> registered;
+    hr = folder->RegisterTask(Bstr(taskName(sid)).value, Bstr(taskXml(args, sid, coreBin)).value,
+                              TASK_CREATE_OR_UPDATE, emptyVariant(), emptyVariant(), TASK_LOGON_INTERACTIVE_TOKEN,
+                              sddl, registered.put());
+    VariantClear(&sddl);
+  }
+  int code = SUCCEEDED(hr) ? kOk : kRegisterFailed;
+  if (code == kOk) {
+    const nlohmann::json status = statusJson(args);
+    if (!status.value("current", false)) {
+      diagnostic("installed task is not current:", status["reason"].is_string() ? status["reason"].get<std::string>() : "");
+      code = kVerifyFailed;
+    }
+  }
+  // Transactional: the app keeps the setting off, so nothing of this
+  // install may stay behind (the previous copy was already replaced).
+  if (code != kOk)
+    removeOwnInstall(sid);
+  return code;
+}
+
+int modeUninstallElevated(const Args& args)
+{
+  std::wstring sid;
+  if (const int code = checkElevatedIdentity(args, sid); code != kOk)
+    return code;
+  ComSession com;
+  if (!com.ok)
+    return kComFailed;
+  return removeOwnInstall(sid) ? kOk : kRemoveFailed;
 }
 
 int modeInstallOrUninstall(const Args& args, bool install)
 {
   if (install && !argsComplete(args))
     return kBadArgs;
-  int code = kOk;
+  const std::wstring sid = userSid();
   if (!install) {
     ComSession com;
-    const std::wstring sid = userSid();
     std::error_code error;
     // Nothing to remove: never show a UAC prompt for it.
     if (com.ok && !queryTask(sid).present && !fs::exists(protectedRoot(sid), error)) {
@@ -625,12 +739,24 @@ int modeInstallOrUninstall(const Args& args, bool install)
       return kOk;
     }
   }
-  if (processElevated())
-    code = install ? modeInstallElevated(args) : modeUninstallElevated();
-  else
-    code = runElevated(install ? L"--priority-task install-elevated" + forwardedArgs(args)
-                               : std::wstring(L"--priority-task uninstall-elevated"),
-                       args.parentWindow);
+  Args forwarded = args;
+  forwarded.expectedSid = sid;
+  int code = kOk;
+  switch (priorityElevationFor(processElevated(), tokenElevationType())) {
+    case PriorityElevation::AlreadyElevated:
+      code = install ? modeInstallElevated(forwarded) : modeUninstallElevated(forwarded);
+      break;
+    case PriorityElevation::SelfElevate:
+      code = sid.empty() ? kComFailed
+                         : runElevated(std::wstring(install ? L"--priority-task install-elevated"
+                                                            : L"--priority-task uninstall-elevated") +
+                                           forwardedArgs(args, sid),
+                                       args.parentWindow);
+      break;
+    case PriorityElevation::StandardUser:
+      code = kStandardUser; // no UAC prompt: it could only elevate another account
+      break;
+  }
   nlohmann::json result = {{"ok", code == kOk}, {"changed", code == kOk}, {"code", code}};
   if (code != kOk)
     result["error"] = exitMessage(code);
@@ -896,7 +1022,7 @@ std::optional<int> runPriorityMode(int, char**)
   if (args->mode == "install-elevated")
     return modeInstallElevated(*args);
   if (args->mode == "uninstall-elevated")
-    return modeUninstallElevated();
+    return modeUninstallElevated(*args);
   if (args->mode == "bridge")
     return modeBridge(*args);
   if (args->mode == "run")

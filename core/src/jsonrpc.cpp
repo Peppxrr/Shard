@@ -414,8 +414,11 @@ nlohmann::json Rpc::methodClipSave(const nlohmann::json& params)
   int durationSec = params["durationSec"];
   if (durationSec < 0)
     durationSec = 0;
-  ring_.save(durationSec);
-  return {{"ok", true}, {"queued", true}};
+  const uint64_t request = ring_.save(durationSec);
+  nlohmann::json result = {{"ok", request != 0}, {"queued", request != 0}};
+  if (request)
+    result["request"] = request;
+  return result;
 }
 
 } // namespace shard

@@ -31,7 +31,7 @@ export interface RecordingPriorityOptions {
   // Identical to the core launch (CoreClient.launchPaths).
   launchPaths: () => { bin: string; configDir: string; games: string };
   enabled: () => boolean;
-  coreSession: () => { elevated: boolean; gpuPriority: RecordingPriorityStatus["gpuPriority"] } | null;
+  coreSession: () => { elevated: boolean; gpuPriority: RecordingPriorityStatus["gpuPriority"]; gpuVendor: string } | null;
   parentWindow: () => string | null;
 }
 
@@ -54,6 +54,7 @@ export class RecordingPriority extends EventEmitter {
       current: this.current,
       coreElevated: session?.elevated ?? false,
       gpuPriority: session?.gpuPriority ?? "unknown",
+      gpuVendor: session?.gpuVendor ?? null,
       busy: this.busy,
       message: this.message,
     };
@@ -80,7 +81,7 @@ export class RecordingPriority extends EventEmitter {
     this.publish();
   }
 
-  // Registers the task (one UAC prompt). Resolves false when declined/failed.
+  // Registers the task (UAC prompt). Resolves false when declined/failed.
   async install(): Promise<boolean> {
     return this.change("install");
   }

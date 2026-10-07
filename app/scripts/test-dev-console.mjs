@@ -61,6 +61,41 @@ assert.deepEqual(filterDevConsoleLines(records, { source: "all", severity: "info
 assert.deepEqual(filterDevConsoleLines(records, { source: "all", severity: "warn", query: "marker" }).map(line => line.id), [3]);
 assert.match(serializeDevConsoleLines(records.slice(1, 2)), /\[core\.stdout\] \[info\] PORT 4521/);
 
+// Recording priority is active only when the elevated core applied libobs
+// GPU priority; anything else enabled is inactive with a stated reason.
+const { recordingPriorityEffect } = loadTs("src/shared/recording-priority.ts");
+const priority = { enabled: true, supported: true, installed: true, current: true, coreElevated: true, gpuPriority: "set", gpuVendor: "nvidia", busy: false, message: null };
+assert.deepEqual(recordingPriorityEffect(priority), { state: "active", problem: null });
+assert.deepEqual(recordingPriorityEffect({ ...priority, gpuPriority: "failed" }), { state: "inactive", problem: "gpu_priority_failed" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, gpuPriority: "unknown", gpuVendor: "intel" }), { state: "inactive", problem: "gpu_priority_unsupported" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, gpuPriority: "unknown" }), { state: "inactive", problem: "gpu_priority_unknown" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, current: false }), { state: "inactive", problem: "task_stale" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, installed: false, current: false }), { state: "inactive", problem: "not_installed" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, gpuPriority: "unknown" }), { state: "inactive", problem: "core_not_elevated" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, gpuPriority: "unknown", gpuVendor: null }), { state: "inactive", problem: null }); // core starting
+assert.equal(recordingPriorityEffect({ ...priority, enabled: false }).state, "off");
+assert.equal(recordingPriorityEffect({ ...priority, busy: true }).state, "busy");
+
+// Clip saves stay pending until their own terminal event, however long the
+// save takes; a result that beats the clip.save reply does not re-open it.
+const { ClipSaveTracker } = loadTs("src/shared/clip-saves.ts");
+const saves = new ClipSaveTracker();
+saves.apply("clip.queued", { request: 1 });
+saves.apply("clip.queued", { request: 2 });
+assert.equal(saves.apply("error", { message: "unrelated" }), false);
+saves.apply("clip.saved", { request: 1 });
+assert.equal(saves.size, 1);
+saves.apply("error", { request: 2, message: "Save failed" });
+assert.equal(saves.size, 0);
+saves.apply("clip.dropped", { request: 3 });
+saves.queued(3); // late clip.save reply for an already-finished request
+assert.equal(saves.size, 0);
+saves.apply("clip.queued", { request: 4 });
+saves.apply("ready", {}); // restarted core: nothing queued, ids restart
+assert.equal(saves.size, 0);
+saves.queued(1);
+assert.equal(saves.size, 1);
+
 const root = await mkdtemp(path.join(tmpdir(), "shard-dev-console-"));
 try {
   const child = spawn(electron, [path.join(appDir, "scripts/test-dev-console.cjs"), root], {
@@ -74,7 +109,7 @@ try {
     child.once("exit", (exitCode, signal) => signal ? reject(new Error("Developer console test helper exited from " + signal)) : resolve(exitCode));
   });
   assert.equal(code, 0, "developer console main-process filesystem harness");
-  console.log("PASS developer console line decoding, classification, filtering, serialization, and session logging");
+  console.log("PASS developer console line decoding, classification, filtering, serialization, session logging, and Recording priority state");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

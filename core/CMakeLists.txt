@@ -223,3 +223,7 @@ if(WIN32)
   target_compile_definitions(shard_perf_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(shard_perf_tests PRIVATE pdh.lib)
 endif()
+
+# Recording priority identity/runtime-copy decisions; no COM or filesystem.
+add_executable(shard_priority_tests tests/priority_policy_test.cpp)
+target_include_directories(shard_priority_tests PRIVATE src)
