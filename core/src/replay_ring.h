@@ -4,13 +4,12 @@
 #include "config.h"
 #include "encoders.h"
 #include "replay_timing.h"
+#include "save_queue.h"
 
 #include <obs.h>
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <deque>
 #include <mutex>
 #include <string>
 #include <cstdint>
@@ -50,10 +49,10 @@ public:
   void setCaptureActive(bool active);
 
   // Queue a save of the last durationSec (0 = save everything buffered).
-  // Returns the request id, or 0 when no replay buffer is running (the
-  // request is dropped). An accepted request emits "clip.queued" {request} at
-  // once; it ends with "clip.saved", "clip.dropped" or an "error" carrying
-  // the same request id.
+  // Returns the request id, or 0 when no replay buffer is running (nothing
+  // is queued). An accepted request emits "clip.queued" {request} at once and
+  // ends with exactly one "clip.saved", "clip.dropped" or "error" carrying
+  // the same request id, also when the ring stops concurrently.
   uint64_t save(int durationSec);
 
   void updateCaps();
@@ -89,7 +88,8 @@ private:
     int64_t endTimeUs = 0;
     uint64_t requestSteadyUs = 0; // steady clock at the hotkey/RPC
   };
-  std::atomic<uint64_t> nextSaveId_{1};
+  // Accepted only between startLocked() succeeding and stopLocked().
+  SaveQueue<SaveRequest> saves_;
   bool snapshotSave(const SaveRequest& request, std::vector<encoder_packet>& out, std::string& path, double& actualSec,
                     uint64_t& startSteadyUs, uint64_t& endSteadyUs);
   void saveWorker();
@@ -114,11 +114,7 @@ private:
   mutable std::mutex lifecycleMtx_;
   ReplayActivityGrace activityGrace_;
 
-  std::mutex saveMtx_;
-  std::condition_variable saveCv_;
-  std::deque<SaveRequest> saveQueue_;
   std::thread saveThread_;
-  std::atomic<bool> saveThreadRun_{true};
 };
 
 } // namespace shard

@@ -99,7 +99,10 @@ in Game only mode; the core's `perf.stats` events and `[perf]`/`[perf-session]`
 log lines show render lag, encoder backlog, GPU 3D/VideoEncode utilization and
 the classified cause per second, and saved clips carry `lag` segments. The
 pure attribution/backlog logic is covered by `shard_perf_tests` in the `core`
-scope.
+scope, which also runs `shard_priority_tests` (Recording priority setup
+decisions, runtime manifest and swap recovery on temporary directories) and
+`shard_save_queue_tests` (clip-save acceptance across concurrent ring
+stop/restart).
 
 To verify game swapping with real hooks, run `node scripts/game-swap-test.mjs`
 with `CF_COREBIN` and `CF_GC_FIXTURE` pointing at matching builds. It registers

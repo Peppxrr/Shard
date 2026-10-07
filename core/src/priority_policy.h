@@ -3,9 +3,11 @@
 // Pure Recording priority decisions shared by priority_task.cpp and its
 // tests. No Windows, COM or filesystem dependency.
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace shard {
@@ -39,7 +41,43 @@ inline bool elevatedHelperIdentityOk(const std::string& expectedSid, const std::
 struct RuntimeEntry {
   std::string path; // relative, generic separators
   uintmax_t size = 0;
+  int64_t modified = 0; // last write time (file_time_type ticks)
 };
+
+// Directory enumeration order is unspecified; manifests and comparisons use
+// path order.
+inline void sortRuntimeEntries(std::vector<RuntimeEntry>& entries)
+{
+  std::sort(entries.begin(), entries.end(),
+            [](const RuntimeEntry& a, const RuntimeEntry& b) { return a.path < b.path; });
+}
+
+// Same files with the same size and timestamp, regardless of order.
+inline bool sameRuntimeFiles(std::vector<RuntimeEntry> a, std::vector<RuntimeEntry> b)
+{
+  if (a.size() != b.size())
+    return false;
+  sortRuntimeEntries(a);
+  sortRuntimeEntries(b);
+  return std::equal(a.begin(), a.end(), b.begin(), [](const RuntimeEntry& x, const RuntimeEntry& y) {
+    return std::tie(x.path, x.size, x.modified) == std::tie(y.path, y.size, y.modified);
+  });
+}
+
+// What to do with leftovers of a runtime swap before staging a new copy.
+// The swap is: active -> ".old", ".staging" -> active, remove ".old".
+enum class RuntimeSwapRecovery {
+  None,       // no ".old"
+  RestoreOld, // interrupted between the two renames: ".old" is the last known-good copy
+  DiscardOld, // the swap completed; ".old" is a leftover of its cleanup
+};
+
+inline RuntimeSwapRecovery runtimeSwapRecovery(bool activeExists, bool oldExists)
+{
+  if (!oldExists)
+    return RuntimeSwapRecovery::None;
+  return activeExists ? RuntimeSwapRecovery::DiscardOld : RuntimeSwapRecovery::RestoreOld;
+}
 
 // Empty when every manifest file exists in the protected copy with the
 // recorded size and the copy holds no file the manifest does not list;

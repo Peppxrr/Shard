@@ -126,8 +126,10 @@ let updater: ReturnType<typeof registerUpdater> | undefined;
 let coreFatal: string | null = null;
 let perfTimeline: PerfTimeline | null = null;
 let recordingPriority: RecordingPriority;
-// Session diagnostics of the running core (state.get / ready → perf.session).
-let coreSession: PerfSession | null = null;
+// Most recent core session, kept after that core exits for the diagnostics
+// bundle's `lastSession` only. Live state (Recording priority) is held by
+// RecordingPriority and cleared when the core disconnects.
+let lastCoreSession: PerfSession | null = null;
 const overlay = new SaveOverlay();
 const devConsole = new DevConsole();
 const editorProbeCache = new Map<string, { identity: string; tracks: Promise<AudioTrackInfo[]> }>();
@@ -252,7 +254,6 @@ async function main(): Promise<void> {
   recordingPriority = new RecordingPriority({
     launchPaths: () => core.launchPaths,
     enabled: () => getSettings().app.recordingPriority,
-    coreSession: () => coreSession && { elevated: coreSession.elevated, gpuPriority: coreSession.gpuPriority, gpuVendor: coreSession.adapter.vendor },
     parentWindow: () => {
       if (!win || win.isDestroyed()) return null;
       const handle = win.getNativeWindowHandle();
@@ -266,6 +267,8 @@ async function main(): Promise<void> {
     devConsole.feed({ t: Date.now(), level: "app", severity: "warn", text: `Recording priority unavailable (${reason}); starting the capture core normally` });
   });
   core.on("event", onCoreEvent);
+  // A gone core's session must not keep Recording priority "Active".
+  core.on("disconnected", () => recordingPriority.noteCoreSession(null));
   core.on("core-exited", (code: number | null, signal?: string | null) => {
     devConsole.feed({ t: Date.now(), level: "app", severity: code === 0 && !signal ? "info" : "error",
       text: `Core exited (code ${code}, signal ${signal ?? "none"})` });
@@ -686,7 +689,8 @@ function onCoreEvent(type: string, params: Record<string, unknown>): void {
   switch (type) {
     case "ready": {
       const perf = (params as Partial<CoreState>).perf;
-      coreSession = perf?.session ?? null;
+      lastCoreSession = perf?.session ?? null;
+      recordingPriority.noteCoreSession(lastCoreSession);
       void recordingPriority.refresh().catch(() => {});
       break;
     }
@@ -828,7 +832,7 @@ async function setRecordingPriority(enabled: boolean): Promise<RecordingPriority
     // Shard's own elevated core runs from the protected copy, which setup
     // cannot replace while it runs: stop it through the normal supervised
     // shutdown (never by killing processes) before reinstalling.
-    const stoppedElevated = core.launchMode === "priority" && coreSession?.elevated === true;
+    const stoppedElevated = core.launchMode === "priority" && recordingPriority.status().coreElevated;
     if (stoppedElevated) await core.shutdown();
     if (!(await recordingPriority.install())) {
       if (current.app.recordingPriority) {
@@ -859,7 +863,10 @@ async function exportDiagnostics(): Promise<string | null> {
   const result = win && !win.isDestroyed() ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
   if (result.canceled || !result.filePath) return null;
   const state = core.ready ? await core.invoke("state.get", {}, 5000).catch(() => null) as CoreState | null : null;
-  if (state?.perf) coreSession = state.perf.session;
+  if (state?.perf) {
+    lastCoreSession = state.perf.session;
+    recordingPriority.noteCoreSession(state.perf.session);
+  }
   // Re-check the task and protected runtime so the bundle shows current facts.
   const priorityStatus = await recordingPriority.refresh().catch(() => recordingPriority.status());
   const cpus = os.cpus();
@@ -877,11 +884,11 @@ async function exportDiagnostics(): Promise<string | null> {
     })),
     settings: { capture: settings.capture, video: settings.video, replay: settings.replay, audioSources: settings.audio.sources.length, app: { recordingPriority: settings.app.recordingPriority, hardwareAcceleration: settings.app.hardwareAcceleration } },
     recordingPriority: priorityStatus,
-    recordingPrioritySummary: recordingPriorityDiagnostics(priorityStatus, core.launchMode, state?.perf.session ?? coreSession,
+    recordingPrioritySummary: recordingPriorityDiagnostics(priorityStatus, core.launchMode, state?.perf.session ?? null,
       state?.perf.latest ?? perfTimeline?.recent().at(-1) ?? null),
     core: state
       ? { version: state.version, capture: state.capture, ring: state.ring, recording: state.recording, launchMode: core.launchMode, perf: state.perf }
-      : { connected: false, launchMode: core.launchMode, lastSession: coreSession, fatal: coreFatal },
+      : { connected: false, launchMode: core.launchMode, lastSession: lastCoreSession, fatal: coreFatal },
   };
   const recentClips = library.list().slice(0, 50).map(clip => ({
     file: path.basename(clip.path), createdAt: new Date(clip.createdAt).toISOString(), durationMs: clip.durationMs,

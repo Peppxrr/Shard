@@ -11,13 +11,16 @@ const Module = require("node:module");
 const ts = require("typescript");
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+// The Recording priority helper is never spawned by these tests.
+const STUBS = { "./bundled-processes": { spawn() { throw new Error("helper processes are not available in tests"); } } };
+
 function loadTs(file) {
   const absolute = path.resolve(appDir, file);
   const loaded = new Module(absolute);
   loaded.filename = absolute;
   loaded.paths = Module._nodeModulePaths(path.dirname(absolute));
   const originalRequire = loaded.require.bind(loaded);
-  loaded.require = id => id === "../shared/dev-console" ? loadTs("src/shared/dev-console.ts") : originalRequire(id);
+  loaded.require = id => id === "../shared/dev-console" ? loadTs("src/shared/dev-console.ts") : STUBS[id] ?? originalRequire(id);
   const source = require("node:fs").readFileSync(absolute, "utf8");
   const compiled = ts.transpileModule(source, {
     compilerOptions: {
@@ -75,6 +78,31 @@ assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, gpu
 assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, gpuPriority: "unknown", gpuVendor: null }), { state: "inactive", problem: null }); // core starting
 assert.equal(recordingPriorityEffect({ ...priority, enabled: false }).state, "off");
 assert.equal(recordingPriorityEffect({ ...priority, busy: true }).state, "busy");
+// A running elevated core that applied GPU priority stays effective even if
+// its task has since become stale (e.g. Shard updated while it runs).
+assert.equal(recordingPriorityEffect({ ...priority, current: false }).state, "active");
+
+// Active only for the connected core: an elevated session followed by the
+// core exiting (crash or restart) is no longer Active, and the change is published.
+if (process.platform === "win32") {
+  const { RecordingPriority } = loadTs("src/main/recording-priority.ts");
+  const live = new RecordingPriority({ launchPaths: () => ({ bin: "", configDir: "", games: "" }), enabled: () => true, parentWindow: () => null });
+  const published = [];
+  live.on("status", status => published.push(recordingPriorityEffect(status).state));
+  const session = (elevated, gpuPriority) => ({ elevated, gpuPriority, adapter: { name: "GPU", vendor: "nvidia", driver: "1" } });
+  live.noteCoreSession(session(true, "set"));
+  assert.equal(recordingPriorityEffect(live.status()).state, "active");
+  live.noteCoreSession(null); // core exited
+  assert.equal(live.status().coreElevated, false);
+  assert.equal(live.status().gpuPriority, "unknown");
+  assert.equal(recordingPriorityEffect(live.status()).state, "inactive");
+  live.noteCoreSession(session(false, "failed")); // restarted normally (task fallback)
+  assert.equal(recordingPriorityEffect(live.status()).state, "inactive");
+  live.noteCoreSession(session(true, "set")); // restarted through the task
+  assert.equal(recordingPriorityEffect(live.status()).state, "active");
+  live.noteCoreSession(session(true, "set")); // same session again: no duplicate publish
+  assert.deepEqual(published, ["active", "inactive", "inactive", "active"]);
+}
 
 // Clip saves stay pending until their own terminal event, however long the
 // save takes; a result that beats the clip.save reply does not re-open it.

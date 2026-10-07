@@ -152,7 +152,7 @@ export class CoreClient extends EventEmitter {
       stderr.finish();
       this.ws?.close();
       this.ws = null;
-      this.ready = false;
+      this.markDisconnected();
       if (this.shuttingDown) return;
       if (priority && code === PRIORITY_FALLBACK_EXIT) {
         // Not a crash: the elevated task is unavailable. Start normally now.
@@ -213,7 +213,7 @@ export class CoreClient extends EventEmitter {
       }
     });
     ws.addEventListener("close", () => {
-      if (this.ws === ws) this.ready = false;
+      if (this.ws === ws) this.markDisconnected();
     });
     ws.addEventListener("error", () => {
       if (this.ws !== ws) return;
@@ -226,6 +226,14 @@ export class CoreClient extends EventEmitter {
         }, 1000);
       }
     });
+  }
+
+  // The running core's state (perf session, elevation) no longer applies once
+  // its socket closes or its process exits; a reconnect delivers a fresh
+  // "ready". Emitted for every loss, including intentional shutdowns.
+  private markDisconnected(): void {
+    this.ready = false;
+    this.emit("disconnected");
   }
 
   invoke(method: string, params: Record<string, unknown> = {}, timeoutMs = 20000): Promise<unknown> {
@@ -310,7 +318,7 @@ export class CoreClient extends EventEmitter {
       }
     } finally {
       if (proc && onClose) proc.removeListener("close", onClose);
-      this.ready = false;
+      this.markDisconnected();
       this.ws?.close();
       this.ws = null;
       for (const pending of this.pending.values()) {

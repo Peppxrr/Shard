@@ -301,8 +301,9 @@ bool ReplayRing::startWithVideoEncoderLocked(const std::string& videoId)
   // the encoders directly (same pattern as the OBS frontend).
   obs_encoder_set_video(videoEncoder_, obs_get_video());
 
-  // A previous stop() (restart) leaves this false; re-arm before the worker.
-  saveThreadRun_.store(true);
+  // The worker waits for requests; they are accepted only once the output
+  // has started (saves_.accept() below).
+  saves_.begin();
   saveThread_ = std::thread([this] { saveWorker(); });
 
   // Encoder plugins initialize inside obs_output_start; capture their
@@ -317,16 +318,17 @@ bool ReplayRing::startWithVideoEncoderLocked(const std::string& videoId)
   if (perf_)
     perf_->outputStarted(inspectVideoEncoderPath("replay", videoEncoder_, startLog.messages()));
   active_.store(true);
+  saves_.accept();
   return true;
 }
 
 void ReplayRing::stopLocked()
 {
-  if (saveThreadRun_.exchange(false)) {
-    saveCv_.notify_all();
-    if (saveThread_.joinable())
-      saveThread_.join();
-  }
+  // Stops acceptance and lets the worker finish every accepted request (with
+  // the ring still intact) before the output is torn down.
+  saves_.close();
+  if (saveThread_.joinable())
+    saveThread_.join();
 
   ring_ = nullptr; // released together with output_ below (ringDestroy frees it)
 
@@ -381,7 +383,6 @@ void ReplayRing::getStats(int& secondsBuffered, double& mbUsed) const
 uint64_t ReplayRing::save(int durationSec)
 {
   SaveRequest request;
-  request.id = nextSaveId_.fetch_add(1);
   request.durationSec = durationSec;
   request.requestSteadyUs = PerfMonitor::nowUs();
   {
@@ -399,22 +400,17 @@ uint64_t ReplayRing::save(int durationSec)
       }
     }
   }
-  const bool accepted = active_.load();
-  {
-    std::lock_guard<std::mutex> lock(saveMtx_);
-    saveQueue_.push_back(request);
-    const size_t depth = saveQueue_.size();
-    logFormat("save: queued %d at %lld (depth %zu)\n", durationSec,
-                 (long long)request.endTimeUs, depth);
-    // Acknowledged before muxing: the save may wait for the encoder to catch
-    // up (up to 30 s after severe GPU starvation), and "clip.saved" follows
-    // only once the file is written. Emitted under the queue lock so the
-    // worker cannot report this request's result first.
-    if (accepted)
-      events_.emit("clip.queued", {{"request", request.id}, {"requestedSec", durationSec}, {"depth", depth}});
-  }
-  saveCv_.notify_one();
-  return accepted ? request.id : 0;
+  // Accepted only while the ring is active and its worker runs; a rejected
+  // request is never queued. "clip.queued" is emitted inside the queue's lock,
+  // before the worker can report this request's result.
+  const uint64_t id = saves_.submit(request, [&](const SaveRequest& queued, size_t depth) {
+    logFormat("save: queued request=%llu %d at %lld (depth %zu)\n", static_cast<unsigned long long>(queued.id),
+              durationSec, (long long)queued.endTimeUs, depth);
+    events_.emit("clip.queued", {{"request", queued.id}, {"requestedSec", durationSec}, {"depth", depth}});
+  });
+  if (!id)
+    logFormat("save: REJECTED %d (replay buffer not running)\n", durationSec);
+  return id;
 }
 
 // ---------------------------------------------------------------------------
@@ -527,26 +523,13 @@ bool ReplayRing::purgeFront(Ring* r)
 void ReplayRing::saveWorker()
 {
   logFormat("save: worker started\n");
-  for (;;) {
-    SaveRequest request;
-    request.durationSec = -1;
-    {
-      std::unique_lock<std::mutex> lock(saveMtx_);
-      saveCv_.wait(lock, [&] { return !saveThreadRun_.load() || !saveQueue_.empty(); });
-      if (!saveThreadRun_.load() && saveQueue_.empty())
-        break;
-      if (!saveQueue_.empty()) {
-        request = saveQueue_.front();
-        saveQueue_.pop_front();
-      }
-    }
-    if (request.durationSec < 0)
-      continue;
+  while (const auto next = saves_.next()) {
+    const SaveRequest& request = *next;
 
     if (!active_.load() || muxing_.load()) {
       logFormat("save: DROPPED request (active=%d muxing=%d)\n", active_.load() ? 1 : 0, muxing_.load() ? 1 : 0);
-      // Ring not running (e.g. stopped after the request was acknowledged):
-      // end any "Saving clip" acknowledgement without a user-facing error.
+      // Defensive: stopLocked() drains accepted requests while the ring is
+      // still active. Still end the request without a user-facing error.
       events_.emit("clip.dropped", {{"request", request.id}});
       continue;
     }

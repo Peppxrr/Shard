@@ -1,6 +1,7 @@
 #include "priority_task.h"
 
 #include "priority_policy.h"
+#include "priority_runtime.h"
 #include "system_info.h"
 
 #include <nlohmann/json.hpp>
@@ -54,7 +55,7 @@ enum PriorityExit : int {
 };
 
 constexpr wchar_t kTaskFolderName[] = L"Shard";
-constexpr const char* kManifestName = "shard-priority-manifest.json";
+// The protected runtime copy itself lives in priority_runtime.* (portable, tested).
 constexpr const char* kPipePrefix = "shard-core-";
 
 std::wstring widen(const std::string& text)
@@ -379,155 +380,6 @@ std::wstring taskXml(const Args& args, const std::wstring& sid, const fs::path& 
 )";
 }
 
-// ------------------------------------------------------ runtime copy ----
-
-bool excludedFromCopy(const fs::path& relative)
-{
-  const std::wstring name = lower(relative.filename().wstring());
-  // The editor's FFmpeg tools are not part of the core runtime.
-  return name == L"ffmpeg.exe" || name == L"ffprobe.exe" || relative.extension() == L".pdb" ||
-         name == widen(kManifestName);
-}
-
-struct RuntimeFile {
-  std::string path;
-  uintmax_t size = 0;
-  int64_t modified = 0;
-};
-
-std::vector<RuntimeFile> listRuntime(const fs::path& root, std::error_code& error)
-{
-  std::vector<RuntimeFile> files;
-  for (fs::recursive_directory_iterator it(root, error), end; !error && it != end; it.increment(error)) {
-    if (!it->is_regular_file(error))
-      continue;
-    const fs::path relative = fs::relative(it->path(), root, error);
-    if (error || excludedFromCopy(relative))
-      continue;
-    RuntimeFile file;
-    file.path = narrow(relative.generic_wstring());
-    file.size = it->file_size(error);
-    file.modified = static_cast<int64_t>(it->last_write_time(error).time_since_epoch().count());
-    files.push_back(std::move(file));
-  }
-  return files;
-}
-
-nlohmann::json manifestJson(const std::vector<RuntimeFile>& files, const fs::path& source)
-{
-  nlohmann::json list = nlohmann::json::array();
-  for (const auto& file : files)
-    list.push_back({{"path", file.path}, {"size", file.size}, {"modified", file.modified}});
-  return {{"source", narrow(source.wstring())}, {"files", list}};
-}
-
-std::vector<RuntimeEntry> runtimeEntries(const std::vector<RuntimeFile>& files)
-{
-  std::vector<RuntimeEntry> entries;
-  entries.reserve(files.size());
-  for (const auto& file : files)
-    entries.push_back({file.path, file.size});
-  return entries;
-}
-
-// Empty when the protected copy matches `sourceCoreBin` file for file and
-// still holds every file its manifest lists, at the recorded size. Sizes, not
-// hashes: the copy is administrators-only, so this catches deletion,
-// truncation and interrupted copies without hashing the runtime per launch.
-std::string runtimeFreshness(const fs::path& sourceCoreBin, const fs::path& copy)
-{
-  std::ifstream manifestFile(copy / kManifestName);
-  if (!manifestFile)
-    return "runtime_copy_missing";
-  const nlohmann::json manifest = nlohmann::json::parse(manifestFile, nullptr, false);
-  if (manifest.is_discarded() || !manifest.contains("files") || !manifest["files"].is_array())
-    return "runtime_copy_invalid";
-  std::vector<RuntimeEntry> listed;
-  for (const auto& file : manifest["files"]) {
-    if (!file.is_object() || !file.contains("path") || !file["path"].is_string() || !file.contains("size") ||
-        !file["size"].is_number_unsigned())
-      return "runtime_copy_invalid";
-    listed.push_back({file["path"].get<std::string>(), file["size"].get<uintmax_t>()});
-  }
-  std::error_code error;
-  const auto copied = listRuntime(copy, error);
-  if (error)
-    return "runtime_copy_invalid";
-  if (std::string problem = runtimeCopyProblem(listed, runtimeEntries(copied)); !problem.empty())
-    return problem;
-  const auto files = listRuntime(sourceCoreBin, error);
-  if (error)
-    return "source_runtime_unreadable";
-  if (manifest["files"] != manifestJson(files, sourceCoreBin)["files"])
-    return "runtime_changed"; // e.g. Shard updated since registration
-  return {};
-}
-
-enum class CopyResult { Ok, Failed, InUse };
-
-// Stages the new copy beside the old one and swaps by rename, so a failure at
-// any step leaves the previous copy intact. Leftovers of an interrupted run
-// (".staging", ".old") are removed first.
-CopyResult copyRuntime(const fs::path& source, const fs::path& destination)
-{
-  std::error_code error;
-  const auto files = listRuntime(source, error);
-  if (error || files.empty()) {
-    diagnostic("cannot read core runtime", narrow(source.wstring()));
-    return CopyResult::Failed;
-  }
-  const fs::path staging = destination.wstring() + L".staging";
-  const fs::path previous = destination.wstring() + L".old";
-  fs::remove_all(staging, error);
-  fs::remove_all(previous, error);
-  if (fs::exists(previous, error)) {
-    diagnostic("cannot remove the previous runtime copy (is an elevated core still running?)",
-               narrow(previous.wstring()));
-    return CopyResult::InUse;
-  }
-  error.clear();
-  for (const auto& file : files) {
-    const fs::path relative = fs::path(widen(file.path));
-    const fs::path target = staging / relative;
-    fs::create_directories(target.parent_path(), error);
-    if (error || !fs::copy_file(source / relative, target, fs::copy_options::overwrite_existing, error) ||
-        fs::file_size(target, error) != file.size) {
-      diagnostic("copy failed", narrow(relative.wstring()) + ": " + error.message());
-      fs::remove_all(staging, error);
-      return CopyResult::Failed;
-    }
-  }
-  {
-    std::ofstream manifest(staging / kManifestName, std::ios::binary | std::ios::trunc);
-    manifest << manifestJson(files, source).dump();
-    if (!manifest.flush()) {
-      manifest.close();
-      fs::remove_all(staging, error);
-      return CopyResult::Failed;
-    }
-  }
-  if (fs::exists(destination, error)) {
-    // Windows refuses to rename a directory while files in it are open, so a
-    // running elevated core keeps its copy and is reported, not half-deleted.
-    fs::rename(destination, previous, error);
-    if (error) {
-      diagnostic("cannot replace the previous runtime copy (is an elevated core still running?)", error.message());
-      fs::remove_all(staging, error);
-      return CopyResult::InUse;
-    }
-  }
-  fs::rename(staging, destination, error);
-  if (error) {
-    diagnostic("cannot activate the new runtime copy", error.message());
-    std::error_code ignored;
-    fs::rename(previous, destination, ignored);
-    fs::remove_all(staging, ignored);
-    return CopyResult::Failed;
-  }
-  fs::remove_all(previous, error); // best effort; retried on the next install
-  return CopyResult::Ok;
-}
-
 // ---------------------------------------------------------- elevation ----
 
 int runElevated(const std::wstring& parameters, uint64_t parentWindow)
@@ -630,23 +482,28 @@ int modeStatus(const Args& args)
   return kOk;
 }
 
+// Deletes this user's task (never another SID's).
+bool removeOwnTask(const std::wstring& sid)
+{
+  ComPtr<ITaskService> service;
+  ComPtr<ITaskFolder> folder;
+  if (FAILED(connect(service)) || FAILED(shardFolder(service.p, folder, false)))
+    return true; // no Shard folder: nothing registered
+  const HRESULT hr = folder->DeleteTask(Bstr(taskName(sid)).value, 0);
+  // Fails (and is kept) while other users still have tasks in it.
+  ComPtr<ITaskFolder> root;
+  if (SUCCEEDED(service->GetFolder(Bstr(L"\\").value, root.put())))
+    root->DeleteFolder(Bstr(kTaskFolderName).value, 0);
+  return SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+}
+
 // Deletes this user's task and protected runtime (never another SID's).
 bool removeOwnInstall(const std::wstring& sid)
 {
-  bool ok = true;
-  ComPtr<ITaskService> service;
-  ComPtr<ITaskFolder> folder;
-  if (SUCCEEDED(connect(service)) && SUCCEEDED(shardFolder(service.p, folder, false))) {
-    const HRESULT hr = folder->DeleteTask(Bstr(taskName(sid)).value, 0);
-    ok = SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
-    // Fails (and is kept) while other users still have tasks in it.
-    ComPtr<ITaskFolder> root;
-    if (SUCCEEDED(service->GetFolder(Bstr(L"\\").value, root.put())))
-      root->DeleteFolder(Bstr(kTaskFolderName).value, 0);
-  }
+  const bool taskRemoved = removeOwnTask(sid);
   std::error_code error;
   fs::remove_all(protectedRoot(sid), error);
-  return ok && !error;
+  return taskRemoved && !error;
 }
 
 // Elevated helpers act only for the account that asked: over-the-shoulder
@@ -679,7 +536,13 @@ int modeInstallElevated(const Args& args)
     case CopyResult::Ok: break;
     // The previous copy is intact (and possibly running): leave it and its task.
     case CopyResult::InUse: return kRuntimeInUse;
-    case CopyResult::Failed: return kCopyFailed;
+    case CopyResult::Failed:
+      // An interrupted earlier swap that could not be restored leaves no
+      // active runtime: never keep a task pointing at a missing core. The
+      // files stay so the next setup can still recover them.
+      if (std::error_code error; !fs::exists(coreBin / L"shardcore.exe", error))
+        removeOwnTask(sid);
+      return kCopyFailed;
   }
   ComPtr<ITaskService> service;
   ComPtr<ITaskFolder> folder;

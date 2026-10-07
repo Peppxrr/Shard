@@ -52,7 +52,7 @@ Important areas in `core/src/`:
 - `audio_isolation_capture.*` — Windows process-loopback OBS source and the controller that keeps isolated App rows and filtered Desktop rows in sync with processes and endpoint sessions.
 - `capture_geometry.h`, `capture_resilience.h` — isolated geometry/recovery decision logic used by native capture code/tests.
 - `encoders.*` — runtime video/audio encoder selection and settings.
-- `replay_ring.*` — encoded RAM ring and clip snapshot/save path.
+- `replay_ring.*`, `save_queue.h` — encoded RAM ring and clip snapshot/save path; save acceptance synchronized with the save worker.
 - `recorder.*` — direct fragmented-MP4 recording.
 - `mux.*` — pipe protocol to OBS's ffmpeg mux helper.
 - `process_monitor.*`, `detector.*`, `launchers.*`, `game_registry.*`, `game_session.*`, `game_system.*` — process evidence, launcher product hints, qualification, persistence, sessions, primary selection, and capture-subject handoff.
@@ -60,7 +60,7 @@ Important areas in `core/src/`:
 - `server.*` — local WebSocket server and port announcement.
 - `log.*` — asynchronous stderr logger (libobs log handler included) and libobs log facts (GPU priority result, hook API/transport).
 - `perf_monitor.*`, `perf_analysis.h`, `gpu_engines.*`, `system_info.*` — frame pacing/GPU engine sampling, lag cause classification, `perf.stats`, clip lag segments, session diagnostics.
-- `priority_task.*` — opt-in Recording priority scheduled task, bridge and elevated entry (see `docs/CAPTURE.md`).
+- `priority_task.*`, `priority_runtime.*`, `priority_policy.h` — opt-in Recording priority scheduled task, bridge and elevated entry; protected runtime copy/manifest/swap; pure setup decisions (see `docs/CAPTURE.md`).
 
 ### Game detection/session model
 
