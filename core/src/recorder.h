@@ -15,10 +15,10 @@ namespace shard {
 
 class PerfMonitor;
 
-// Manual recording: an ffmpeg_muxer output (mkv container — crash-safe) with
-// its own encoder instances identical to the ring's. The app remuxes the mkv
-// to mp4 after `recording.state {active:false}` and imports it into the
-// library; the core never touches the library.
+// Manual recording: an ffmpeg_muxer output (fragmented mp4, crash-safe without
+// a remux) with its own encoder instances identical to the ring's. The app
+// imports the finished file after `recording.state {active:false}`; the core
+// never touches the library.
 class Recorder {
 public:
   Recorder(App& app, Config& config, Events& events, EncoderManager& encoders);

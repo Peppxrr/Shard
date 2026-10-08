@@ -1,5 +1,5 @@
 import { KeyCaps } from "./HotkeyControls";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipRecord, CoreState, PerfSample, Settings } from "../../shared/contracts";
 import { fmtDuration, fmtSize, relativeDate, Viewer } from "./LibraryPage";
 import { Button, Card, EmptyState, Icon, Segmented, StatusDot } from "./ui";
@@ -37,7 +37,8 @@ const CLIP_SAVE_STALL_MS = 5 * 60 * 1000;
 
 interface Subject { kind: "monitor" | "game" | "none"; name: string | null }
 
-export function CapturePage({ settings, clips }: Props) {
+// Memoized: it refreshes from its own core-event subscription, not from App state.
+export const CapturePage = memo(function CapturePage({ settings, clips }: Props) {
   const [ringSeconds, setRingSeconds] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
   const [subject, setSubject] = useState<Subject | null>(null);
@@ -234,4 +235,4 @@ export function CapturePage({ settings, clips }: Props) {
 
     </div>
   );
-}
+});

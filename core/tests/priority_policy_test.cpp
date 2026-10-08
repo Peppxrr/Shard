@@ -43,7 +43,8 @@ void runtimeCopyTests(const fs::path& root)
   writeFile(source / "shardcore.exe", std::string(1000, 'c'));
   writeFile(source / "obs.dll", std::string(5000, 'o'));
   writeFile(source / "obs-plugins" / "64bit" / "win-capture.dll", std::string(70, 'w'));
-  writeFile(source / "ffmpeg.exe", "editor tool");
+  writeFile(source / "ffmpeg" / "ffmpeg.exe", "editor tool");
+  writeFile(source / "ffmpeg" / "avcodec-63.dll", "editor tool library");
   writeFile(source / "shardcore.pdb", "symbols");
   const fs::path dest = root / "protected" / "core-bin";
   fs::path old = dest, staging = dest;
@@ -59,7 +60,7 @@ void runtimeCopyTests(const fs::path& root)
   assert(runtimeFreshness(source, dest) == "runtime_copy_missing");
   assert(copyRuntime(source, dest) == CopyResult::Ok);
   assert(runtimeFreshness(source, dest).empty());
-  assert(!fs::exists(dest / "ffmpeg.exe") && !fs::exists(old) && !fs::exists(staging));
+  assert(!fs::exists(dest / "ffmpeg") && !fs::exists(old) && !fs::exists(staging));
 
   // The same entries in a different order stay current.
   reverseManifest(dest);

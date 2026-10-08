@@ -327,16 +327,6 @@ async function availableOutputPath(directory: string, base: string, extension: s
   throw new Error("Could not allocate a unique export filename");
 }
 
-async function cleanupPassLogs(passLog: string): Promise<void> {
-  await Promise.all([
-    `${passLog}-0.log`,
-    `${passLog}-0.log.mbtree`,
-    `${passLog}-0.log.cutree`,
-    `${passLog}.log`,
-    `${passLog}.cutree`,
-  ].map((file) => fs.unlink(file).catch(() => {})));
-}
-
 function dropRes(width: number, height: number): { w: number; h: number } {
   return pickResolution(height >= 1080 ? "720p" : height >= 720 ? "480p" : "360p", { w: width, h: height });
 }

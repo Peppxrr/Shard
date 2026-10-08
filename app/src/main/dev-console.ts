@@ -8,6 +8,7 @@ import { pipeline } from "node:stream/promises";
 import { randomUUID } from "node:crypto";
 import type { DevConsoleLine } from "../shared/contracts";
 import { classifyDevConsoleSeverity } from "../shared/dev-console";
+import { regionalLocaleArgument } from "./regional-locale";
 
 const MAX_HISTORY_LINES = 20_000;
 const MAX_PRIOR_SESSIONS = 5;
@@ -173,6 +174,7 @@ export class DevConsole {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false,
+        additionalArguments: [regionalLocaleArgument()],
       },
     });
     this.win.once("ready-to-show", () => this.win?.show());

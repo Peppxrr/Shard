@@ -21,6 +21,21 @@ files:
   - dist/main/**/*
   - dist/renderer/**/*
   - package.json
+  # Native modules load only their Windows x64 binary (better-sqlite3:
+  # prebuilds/win32-x64.node; uiohook-napi: build/Release, else its win32-x64
+  # prebuild). Sources, build intermediates and other platforms stay out.
+  - "!**/node_modules/better-sqlite3/{deps,src,build}/**"
+  - "!**/node_modules/better-sqlite3/binding.gyp"
+  - "!**/node_modules/better-sqlite3/prebuilds/{darwin-*,linux-*,linuxmusl-*,win32-arm64.node}"
+  - "!**/node_modules/uiohook-napi/{bin,libuiohook,src}/**"
+  - "!**/node_modules/uiohook-napi/binding.gyp"
+  - "!**/node_modules/uiohook-napi/build/*.vcxproj*"
+  - "!**/node_modules/uiohook-napi/build/Release/{obj/**,*.lib,*.exp,*.iobj,*.ipdb,*.pdb}"
+  - "!**/node_modules/uiohook-napi/prebuilds/{darwin-*,linux-*,win32-arm64}/**"
+  - "!**/node_modules/**/*.map"
+# Shard's UI is English; Chromium's other UI translations are never shown.
+electronLanguages:
+  - en-US
 extraResources:
   - from: ../NOTICE
     to: NOTICE

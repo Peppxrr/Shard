@@ -96,7 +96,7 @@ Theme API compatibility is public behavior. See `docs/THEME-API.md` before chang
 
 ## Build/runtime layout
 
-Release native runtime is staged to `app/resources/core-bin/`; Debug development runtime goes to `app/resources/core-bin-dev/`. `scripts/build.ps1` builds into a fresh staging sibling and only replaces the usable stage after validation, avoiding stale DLL/data leftovers.
+Release native runtime is staged to `app/resources/core-bin/`; Debug development runtime goes to `app/resources/core-bin-dev/`. `scripts/build.ps1` builds into a fresh staging sibling and only replaces the usable stage after validation, avoiding stale DLL/data leftovers. The core-bin root holds `shardcore.exe`, libobs, only the OBS modules the core uses, and OBS's FFmpeg DLLs; the editor/export `ffmpeg.exe`/`ffprobe.exe` live in `core-bin/ffmpeg/` with their own shared FFmpeg DLLs and are spawned only for probing, thumbnails, editor previews and exports. The renderer lazily loads the Editor, Settings, Games and Developer Console views.
 
 Runtime dependency pins live in `runtime-dependencies.json`. OBS source is pinned by the submodule, Shard's OBS changes live in `patches/`, and the official signed Game Capture injection payload is kept separately under `vendor/obs-hook-payload/` and verified during build/package.
 
@@ -104,14 +104,8 @@ For dependency upgrades, follow `docs/DEPENDENCIES.md`. For packaging/version/pu
 
 ## Verification
 
-`scripts/verify.mjs` is the verification router. The supported scopes are currently:
-
-- `app`
-- `editor`
-- `updater`
-- `themes`
-- `core`
-- `capture`
-- `release`
+`scripts/verify.mjs` is the verification router. The supported scopes are currently
+`app`, `editor`, `storage`, `updater`, `themes`, `diagnostics`, `core`, `capture`
+and `release`.
 
 The runner deduplicates shared work, prints a compact summary, and writes full logs under ignored `tmp/verify/`. See `docs/VERIFYING.md`; do not recreate its decision table here.

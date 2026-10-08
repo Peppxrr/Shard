@@ -272,18 +272,18 @@ assert.deepEqual(
 );
 
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "Shard Editor Ω "));
-const stagedFfmpegDir = path.resolve("resources/core-bin");
+const stagedFfmpegDir = path.resolve("resources/core-bin/ffmpeg");
 const vendorFfmpegDir = path.resolve("../vendor/ffmpeg/bin");
 const ffmpegDir = existsSync(path.join(stagedFfmpegDir, "ffmpeg.exe")) ? stagedFfmpegDir : vendorFfmpegDir;
 const ffmpeg = path.join(ffmpegDir, "ffmpeg.exe");
 const ffprobe = path.join(ffmpegDir, "ffprobe.exe");
 assert.ok(existsSync(ffmpeg) && existsSync(ffprobe), `FFmpeg test binaries not found in ${ffmpegDir}`);
-// ffmpeg.ts resolves <resourcesPath>/core-bin like the packaged app. A clean
-// release checkout has no staged core-bin yet, so expose the same binaries
-// the test selected through a temporary junction.
+// ffmpeg.ts resolves <resourcesPath>/core-bin/ffmpeg like the packaged app. A
+// clean release checkout has no staged core-bin yet, so expose the same
+// binaries the test selected through a temporary junction.
 const resourcesDir = await mkdtemp(path.join(os.tmpdir(), "shard-editor-resources-"));
-const resourcesCoreBin = path.join(resourcesDir, "core-bin");
-await symlink(ffmpegDir, resourcesCoreBin, "junction");
+await mkdir(path.join(resourcesDir, "core-bin"));
+await symlink(ffmpegDir, path.join(resourcesDir, "core-bin", "ffmpeg"), "junction");
 process.resourcesPath = resourcesDir;
 const input = path.join(tempDir, "Source clip ü with spaces.mp4");
 const multiOutput = path.join(tempDir, "Edited multi Ω.mp4");
@@ -545,7 +545,8 @@ try {
   await rm(tempDir, { recursive: true, force: true });
   await rm(editorCacheDirectory, { recursive: true, force: true });
   // Remove only the link, never the FFmpeg directory it points to.
-  await unlink(resourcesCoreBin);
+  await unlink(path.join(resourcesDir, "core-bin", "ffmpeg"));
+  await rmdir(path.join(resourcesDir, "core-bin"));
   await rmdir(resourcesDir);
 }
 

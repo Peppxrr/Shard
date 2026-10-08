@@ -53,7 +53,7 @@ New or redesigned themeable regions must expose a meaningful `data-shard-page`, 
 
 ## Code conventions
 
-- C++: C++20, flat `clipforge::` namespace where existing code uses it, RAII, mutexes for shared mutable state, atomics for simple cross-thread flags, style consistent with neighboring files.
+- C++: C++20, flat `shard::` namespace, RAII, mutexes for shared mutable state, atomics for simple cross-thread flags, style consistent with neighboring files.
 - TypeScript/React: follow neighboring style; Electron main remains CommonJS while the renderer is bundled as ESM by Vite.
 - Keep Windows-specific native code behind the existing platform boundaries; avoid spreading platform assumptions into otherwise portable code.
 - Prefer focused fixes over unrelated refactors or formatting churn.
@@ -66,7 +66,7 @@ Run the smallest relevant verification scope once after the final relevant edit:
 npm --prefix app run verify -- <scope>
 ```
 
-Available scopes are `app`, `editor`, `updater`, `themes`, `core`, `capture`, and `release`. Scopes may be combined when the change genuinely spans them. `app` is the default.
+Available scopes are `app`, `editor`, `storage`, `updater`, `themes`, `diagnostics`, `core`, `capture`, and `release`. Scopes may be combined when the change genuinely spans them. `app` is the default.
 
 Use `docs/VERIFYING.md` to choose scopes. Documentation-only changes need diff inspection, not a build. Do not repeat a successful expensive check unless later edits affect what it covered, a check failed, or new evidence requires it. Do not run `release` for ordinary work.
 

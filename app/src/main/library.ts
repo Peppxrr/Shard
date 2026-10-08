@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { ClipLagInfo, ClipRecord, StorageSettings } from "../shared/contracts";
 import { parseClipLag } from "../shared/perf";
-import { ffprobe, ffprobeAsync, makeThumbnail, makeThumbnailAsync, removeEditorMedia } from "./ffmpeg";
+import { ffprobeAsync, makeThumbnailAsync, removeEditorMedia } from "./ffmpeg";
 import type { WaveformStorage } from "./waveform-cache";
 import { getSettings } from "./settings";
 import { planStorageCleanup, type StorageClip } from "../shared/storage-policy";
@@ -444,34 +444,6 @@ export class Library extends EventEmitter {
     return undefined;
   }
 
-  // Sync wrapper kept for legacy callers
-  importMp4(file: string, source: "clip" | "recording" | "edited", game: string | null = null): ClipRecord {
-    const probe = ffprobe(file);
-    const thumb = makeThumbnail(file, this.thumbsDir);
-    const rec: ClipRecord = {
-      id: randomUUID(),
-      path: file,
-      thumb: thumb ?? "",
-      game,
-      createdAt: Date.now(),
-      durationMs: Math.round(probe.durationSec * 1000),
-      sizeBytes: probe.sizeBytes,
-      width: probe.width || null,
-      height: probe.height || null,
-      fps: probe.fps,
-      protected: 0,
-      source,
-    };
-    this.db
-      .prepare(
-        `INSERT INTO clips (id, path, thumb, game, created_at, duration_ms, size_bytes, width, height, fps, protected, source, imported_at)
-         VALUES (@id, @path, @thumb, @game, @createdAt, @durationMs, @sizeBytes, @width, @height, @fps, @protected, @source, @importedAt)`
-      )
-      .run({ ...rec, importedAt: Date.now() });
-    this.emit("added", rec);
-    return rec;
-  }
-
   // Only remove records confirmed missing. Untracked videos may be a recording
   // still being finalized, or files the user copied into storage.
   reconcile(): Promise<void> {
@@ -564,9 +536,6 @@ function storageBaseDir(): string {
 }
 export function clipsDir(): string {
   return path.join(storageBaseDir(), "clips");
-}
-export function recordingsDir(): string {
-  return path.join(storageBaseDir(), "recordings");
 }
 export function editorDir(): string {
   return path.join(storageBaseDir(), "editor");

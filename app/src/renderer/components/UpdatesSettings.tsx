@@ -39,7 +39,7 @@ export function UpdatesSettings({ version, embedded = false }: { version: string
     {canInstall && <p className="updates__hint">Save your editor changes before restarting. Unsaved replay history will be cleared.</p>}
     {state?.mode === "portable" && <p className="updates__hint">Download the new portable EXE, close Shard, then replace the old EXE. Your settings and clips stay in place.</p>}
     {state?.releaseNotes && <details className="updates__notes" open><summary>What’s new in {state.version}<Icon name="chevronDown" size={14}/></summary><div>{state.releaseNotes}</div></details>}
-    {state?.mode !== "disabled" && <div className="updates__foot"><Icon name="refresh" size={12}/><span>Checks at startup and every 12 hours{state?.lastCheckedAt ? ` · Last checked ${new Date(state.lastCheckedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}</span></div>}
+    {state?.mode !== "disabled" && <div className="updates__foot"><Icon name="refresh" size={12}/><span>Checks at startup and every 12 hours{state?.lastCheckedAt ? ` · Last checked ${new Date(state.lastCheckedAt).toLocaleTimeString(window.shard.regionalLocale, { hour: "numeric", minute: "2-digit" })}` : ""}</span></div>}
     {error && <p className="form-error" role="alert">{error}</p>}
   </div>;
   return embedded ? content : <Card title="Updates" sub="Latest improvements. Your choice of when to install.">{content}</Card>;

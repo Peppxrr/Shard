@@ -387,10 +387,6 @@ export function createTimelineGeometry(
     contentXToTime,
   };
 }
-/** Round-trip invariant used by dev assertions and tests. */
-export function geometryRoundTrip(time: number, pxPerSecond: number): number {
-  return pixelToTime(timeToPixel(time, pxPerSecond), pxPerSecond);
-}
 
 export function chooseRulerStep(pxPerSecond: number): number {
   const candidates = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];

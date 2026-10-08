@@ -19,6 +19,15 @@ function useThemeIconUrl(token: string): string | null {
   return url;
 }
 
+// React compares dangerouslySetInnerHTML by object identity. One shared object
+// per glyph keeps every re-render from re-parsing the icon's SVG markup.
+const GLYPH_HTML = new Map<string, { __html: string }>();
+function glyphHtml(markup: string): { __html: string } {
+  let html = GLYPH_HTML.get(markup);
+  if (!html) GLYPH_HTML.set(markup, html = { __html: markup });
+  return html;
+}
+
 export function Icon({ name, size = 16, className }: { name: string; size?: number; className?: string }) {
   const token = String(name)
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
@@ -30,7 +39,7 @@ export function Icon({ name, size = 16, className }: { name: string; size?: numb
   if (customUrl && customUrl !== failedUrl) return <svg className={className} data-icon={token} width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
     <image href={customUrl} onError={() => setFailedUrl(customUrl)} width="24" height="24" preserveAspectRatio="xMidYMid meet" />
   </svg>;
-  return <svg className={className} data-icon={token} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: glyph }} />;
+  return <svg className={className} data-icon={token} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={glyphHtml(glyph)} />;
 }
 
 /* ---------------------------------------------------------------------------
@@ -168,18 +177,6 @@ export function Card({ title, sub, icon, actions, children, foot, className, fla
       {children && <div data-shard-slot="card-body" className="card__body">{children}</div>}
       {foot && <footer data-shard-slot="card-footer" className="card__foot">{foot}</footer>}
     </section>
-  );
-}
-
-export function SectionTitle({ children, hint, actions }: { children: ReactNode; hint?: ReactNode; actions?: ReactNode }) {
-  return (
-    <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "var(--sp-3)", marginBottom: "var(--sp-4)" }}>
-      <div>
-        <h3 className="section-title">{children}</h3>
-        {hint && <p className="section-sub" style={{ marginBottom: 0 }}>{hint}</p>}
-      </div>
-      {actions}
-    </div>
   );
 }
 

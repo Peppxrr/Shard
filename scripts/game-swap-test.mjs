@@ -27,8 +27,8 @@ const fixtureSource = path.resolve(process.env.CF_GC_FIXTURE ?? path.join(root, 
 const mode = process.env.CF_GC_SWAP_MODE ?? "game";
 if (mode !== "game" && mode !== "auto") throw new Error(`unsupported CF_GC_SWAP_MODE: ${mode}`);
 const coreExe = path.join(coreBin, "shardcore.exe");
-const ffmpegExe = path.join(coreBin, "ffmpeg.exe");
-const ffprobeExe = path.join(coreBin, "ffprobe.exe");
+const ffmpegExe = path.join(coreBin, "ffmpeg", "ffmpeg.exe");
+const ffprobeExe = path.join(coreBin, "ffmpeg", "ffprobe.exe");
 for (const required of [coreExe, ffmpegExe, ffprobeExe, fixtureSource]) {
   if (!fs.existsSync(required)) throw new Error(`missing required binary: ${required}`);
 }

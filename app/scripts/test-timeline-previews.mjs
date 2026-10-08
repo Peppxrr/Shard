@@ -12,7 +12,7 @@ registerHooks({ resolve(specifier, context, next) {
 const { TimelinePreviews } = await import("../src/main/timeline-previews.ts");
 const { ownedProcesses } = await import("../src/main/bundled-processes.ts");
 
-const stagedFfmpeg = path.resolve("resources/core-bin/ffmpeg.exe");
+const stagedFfmpeg = path.resolve("resources/core-bin/ffmpeg/ffmpeg.exe");
 const vendorFfmpeg = path.resolve("../vendor/ffmpeg/bin/ffmpeg.exe");
 const executable = existsSync(stagedFfmpeg) ? stagedFfmpeg : vendorFfmpeg;
 assert.ok(existsSync(executable), `FFmpeg test binary not found: ${executable}`);

@@ -5,7 +5,7 @@ import type { NativeImage } from "electron";
 import { join as joinPath } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { cpSync, existsSync, readdirSync, readFileSync, unlinkSync, statSync, promises as fs } from "node:fs";
+import { existsSync, readFileSync, statSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ThemeStore } from "./themes";
@@ -17,10 +17,11 @@ import { clipDragIcon } from "./drag-icon";
 import { medalImportMetadata, scanMp4Tree } from "./library-import";
 import { StorageWatchdog } from "./storage";
 import { ExportManager } from "./export";
-import { ffprobe, listExportEncoders, remuxToMp4, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews, stopEditorPreviews, resumeEditorPreviews } from "./ffmpeg";
+import { listExportEncoders, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews, stopEditorPreviews, resumeEditorPreviews } from "./ffmpeg";
 import { SaveOverlay } from "./overlay";
 import { getDefaultSoundPath, playClipSound, previewClipSound, setSoundWindow } from "./sound";
 import { DevConsole } from "./dev-console";
+import { regionalLocaleArgument } from "./regional-locale";
 import { copyPlaybackReport } from "./playback-diagnostics";
 import { registerUpdater } from "./updater";
 import { ShutdownLifecycle } from "./shutdown-lifecycle";
@@ -198,7 +199,6 @@ async function main(): Promise<void> {
   if (!shutdown.acceptingWork) return;
   app.setAppUserModelId("com.shard.app");
 
-  migrateLegacyUserData();
   await loadSettings();
   if (!shutdown.acceptingWork) return;
   themes = new ThemeStore(path.join(app.getPath("userData"), "Themes"), app.getVersion(), () => {
@@ -241,10 +241,12 @@ async function main(): Promise<void> {
     win?.webContents.send("export:progress", p);
     if (p.done && p.result) {
       // Edited exports land in the library as source "edited" (never auto-deleted).
+      // Probing/thumbnailing runs off the main thread; "added" refreshes the renderer.
       const src = library.get(p.clipId);
-      library.importMp4(p.result.path, "edited", src?.game ?? null);
       toast(`Export ready: ${path.basename(p.result.path)} (${p.result.sizeMb} MB)`);
-      void storage.check();
+      void library.importMp4Async(p.result.path, "edited", src?.game ?? null)
+        .catch((error: unknown) => console.error("[editor][export] library import failed", error))
+        .finally(() => void storage.check());
     }
   });
 
@@ -298,29 +300,6 @@ async function main(): Promise<void> {
   hotkeys.apply(getSettings());
 }
 
-// Import profiles from the former app name on first launch so existing
-// settings and clips remain available after upgrading.
-function migrateLegacyUserData(): void {
-  if (!app.isPackaged && process.env.SHARD_DEV_USER_DATA) return;
-  const userData = app.getPath("userData");
-  if (existsSync(path.join(userData, "settings.json"))) return;
-  const appData = app.getPath("appData");
-  for (const legacy of ["Shard", "ClipForge", "clipforge"]) {
-    if (path.basename(userData).toLowerCase() === legacy.toLowerCase()) continue;
-    const legacyDir = path.join(appData, legacy);
-    if (!existsSync(legacyDir)) continue;
-    try {
-      for (const entry of readdirSync(legacyDir)) {
-        const to = path.join(userData, entry);
-        if (!existsSync(to)) cpSync(path.join(legacyDir, entry), to, { recursive: true });
-      }
-      return;
-    } catch (e) {
-      console.error(`legacy userData migration from ${legacyDir} failed:`, e);
-    }
-  }
-}
-
 // ---------------------------------------------------------------- window ----
 
 function createWindow(): void {
@@ -340,6 +319,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      additionalArguments: [regionalLocaleArgument()],
     },
   });
   win.once("ready-to-show", () => win?.show());
@@ -788,17 +768,9 @@ function notifyClip(label: string): void {
 
 
 async function importClip(file: string, lag: ClipLagInfo | null): Promise<void> {
-  // Core produces mp4 directly (verify with ffprobe; remux if it somehow is
-  // not mp4 — e.g. muxer misbehaved). Async to avoid blocking main thread on ffprobe/thumbnail.
   const game = lastGame;
-  const final = file;
-  if (!file.toLowerCase().endsWith(".mp4")) {
-    const fixed = file.replace(/\.\w+$/, ".mp4");
-    try { remuxToMp4(file, fixed); } catch {}
-    try { existsSync(file) && unlinkSync(file); } catch {}
-  }
   try {
-    const rec = await library.importMp4Async(final, "clip", game, { lag });
+    const rec = await library.importMp4Async(file, "clip", game, { lag });
     win?.webContents.send("library:added", rec);
   } catch (e) {
     console.error("[importClip] failed", e);

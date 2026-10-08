@@ -39,8 +39,8 @@ std::wstring lowerName(const fs::path& path)
 bool excludedFromCopy(const fs::path& relative)
 {
   const std::wstring name = lowerName(relative);
-  // The editor's FFmpeg tools are not part of the core runtime.
-  return name == L"ffmpeg.exe" || name == L"ffprobe.exe" || lowerName(relative.extension()) == L".pdb" ||
+  // The editor's FFmpeg tools (core-bin/ffmpeg) are not part of the core runtime.
+  return lowerName(*relative.begin()) == L"ffmpeg" || lowerName(relative.extension()) == L".pdb" ||
          name == fs::path(kRuntimeManifestName).wstring();
 }
 

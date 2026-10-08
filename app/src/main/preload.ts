@@ -117,6 +117,8 @@ const api: ShardApi = {
   },
   restartApp: () => ipcRenderer.invoke("app:restart") as Promise<void>,
   windowControlsSupported: process.platform === "win32",
+  // Set by regional-locale.ts in the main process.
+  regionalLocale: process.argv.find((arg) => arg.startsWith("--shard-regional-locale="))?.slice("--shard-regional-locale=".length) || "en-US",
   minimizeWindow: () => ipcRenderer.invoke("window:minimize") as Promise<void>,
   toggleMaximizeWindow: () => ipcRenderer.invoke("window:toggleMaximize") as Promise<boolean>,
   closeWindow: () => ipcRenderer.invoke("window:close") as Promise<void>,

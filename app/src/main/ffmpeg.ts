@@ -1,18 +1,19 @@
-// ffmpeg.ts — spawns the bundled ffmpeg/ffprobe; serves remux, thumbnails,
-// probing, and the export pipeline.
-import { spawn, spawnSync } from "./bundled-processes";
+// ffmpeg.ts — spawns the bundled ffmpeg/ffprobe for probing, thumbnails,
+// editor previews/waveforms, and the export pipeline. Never blocks the main thread.
+import { spawn } from "./bundled-processes";
 import path from "node:path";
 import { TimelinePreviews } from "./timeline-previews";
 import { runEditorPreparation } from "./editor-preparation";
 import { decodeWaveform, encodeWaveform, type WaveformStorage } from "./waveform-cache";
 import { app } from "electron";
-import { existsSync, mkdirSync, statSync, promises as fs } from "node:fs";
+import { existsSync, statSync, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { AudioTrackInfo, ExportEncoderInfo, WaveformData } from "../shared/contracts";
 
+// Editor/export tools live in core-bin/ffmpeg with their own FFmpeg DLLs.
 export function ffmpegBin(): string {
   const packaged = path.join(process.resourcesPath ?? "", "core-bin");
-  return existsSync(packaged) ? packaged : path.join(app.getAppPath(), "resources", "core-bin");
+  return path.join(existsSync(packaged) ? packaged : path.join(app.getAppPath(), "resources", "core-bin"), "ffmpeg");
 }
 
 const EXPORT_CPU_ENCODERS: Omit<ExportEncoderInfo, "preferred">[] = [
@@ -105,28 +106,6 @@ export interface ProbeResult {
   sizeBytes: number;
 }
 
-export function ffprobe(file: string): ProbeResult {
-  const exe = path.join(ffmpegBin(), "ffprobe.exe");
-  const out = runSync(exe, [
-    "-v", "error",
-    "-select_streams", "v:0",
-    "-show_entries", "format=duration:stream=width,height,r_frame_rate",
-    "-of", "json",
-    file,
-  ]);
-  const j = JSON.parse(out);
-  const format = j.format ?? {};
-  const stream = (j.streams ?? [])[0] ?? {};
-  const fps = parseRate(stream.r_frame_rate);
-  return {
-    durationSec: Number(format.duration ?? 0),
-    width: Number(stream.width ?? 0),
-    height: Number(stream.height ?? 0),
-    fps,
-    sizeBytes: fileSize(file),
-  };
-}
-
 function parseRate(rate: unknown): number | null {
   if (typeof rate !== "string") return null;
   const [n, d] = rate.split("/");
@@ -141,7 +120,6 @@ function fileSize(p: string): number {
     return 0;
   }
 }
-
 
 export async function ffprobeAsync(file: string): Promise<ProbeResult> {
   const exe = path.join(ffmpegBin(), "ffprobe.exe");
@@ -195,46 +173,6 @@ export async function makeThumbnailAsync(src: string, dir: string): Promise<stri
   });
 }
 
-function runSync(exe: string, args: string[]): string {
-  const r = spawnSync(exe, args, { encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
-  if (r.error) throw r.error;
-  if (r.status !== 0) throw new Error(`${path.basename(exe)} failed: ${r.stderr || r.stdout}`);
-  return r.stdout;
-}
-
-// ffmpeg helpers used by the library importer --------------------------------
-
-// Remux any container to mp4 (H.264+AAC passthrough assumed; stream copy).
-// `-map 0` is required to preserve ALL audio tracks — without it FFmpeg's
-// default stream selection keeps only one stream per type, collapsing 4+
-// track recordings to a single track.
-export function remuxToMp4(src: string, dst: string): void {
-  const exe = path.join(ffmpegBin(), "ffmpeg.exe");
-  const r = spawnSync(exe, ["-y", "-i", src, "-map", "0", "-c", "copy", "-movflags", "+faststart", dst], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (r.status !== 0) throw new Error(`remux failed: ${r.stderr}`);
-}
-
-// Thumbnail at 1 s, width <= 320, into `<dir>/<base>.jpg`.
-export function makeThumbnail(src: string, dir: string): string | null {
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    return null;
-  }
-  const base = path.basename(src, path.extname(src));
-  const out = path.join(dir, `${base}.jpg`);
-  const exe = path.join(ffmpegBin(), "ffmpeg.exe");
-  const r = spawnSync(exe, ["-y", "-ss", "1", "-i", src, "-vframes", "1", "-vf", "scale=320:-2", "-q:v", "4", out], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (r.status !== 0) return null;
-  return existsSync(out) ? out : null;
-}
-
 // List every audio stream with both its absolute stream index and its
 // audio-relative index. Export uses the absolute index to avoid FFmpeg's
 // `a:N` selector ambiguity when video and subtitle streams are present.
@@ -279,6 +217,9 @@ const removingEditorSources = new Set<string>();
 let legacyAudioMigration: Promise<void> | undefined;
 const MAX_AUDIO_PREVIEW_FILES = 32;
 const AUDIO_PREVIEW_PRUNE_TO = 24;
+// Long multi-track recordings produce large per-track files; bound bytes too.
+const MAX_AUDIO_PREVIEW_BYTES = 1024 ** 3;
+const AUDIO_PREVIEW_PRUNE_TO_BYTES = 768 * 1024 ** 2;
 
 // Extract a single source stream to a small seekable file so the renderer can
 // mix individual tracks during preview. Paths are derived and never supplied
@@ -364,23 +305,33 @@ async function pruneAudioPreviewDirectory(directory: string, keepKey: string): P
   const entries = (await fs.readdir(directory, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.endsWith(".m4a") && !entry.name.endsWith(".tmp.m4a")
       && entry.name !== `${keepKey}.m4a` && !editorJobs.has(`audio:${entry.name.slice(0, -4)}`));
-  if (entries.length < MAX_AUDIO_PREVIEW_FILES) return;
   const stats = await Promise.all(entries.map(async (entry) => {
     const candidatePath = path.join(directory, entry.name);
     try {
-      return { path: candidatePath, modified: (await fs.stat(candidatePath)).mtimeMs };
+      const stat = await fs.stat(candidatePath);
+      return { path: candidatePath, modified: stat.mtimeMs, bytes: stat.size };
     } catch {
       return null;
     }
   }));
-  const candidates: Array<{ path: string; modified: number }> = [];
+  const candidates: Array<{ path: string; modified: number; bytes: number }> = [];
   for (const stat of stats) {
     if (stat) candidates.push(stat);
   }
+  let count = candidates.length;
+  let bytes = candidates.reduce((sum, candidate) => sum + candidate.bytes, 0);
+  const overCount = count >= MAX_AUDIO_PREVIEW_FILES;
+  const overBytes = bytes > MAX_AUDIO_PREVIEW_BYTES;
+  if (!overCount && !overBytes) return;
   candidates.sort((a, b) => a.modified - b.modified);
-  await Promise.all(candidates.slice(0, Math.max(0, candidates.length - AUDIO_PREVIEW_PRUNE_TO)).map((candidate) =>
-    fs.unlink(candidate.path).catch(() => {}),
-  ));
+  const removals: Promise<void>[] = [];
+  for (const candidate of candidates) {
+    if ((!overCount || count <= AUDIO_PREVIEW_PRUNE_TO) && (!overBytes || bytes <= AUDIO_PREVIEW_PRUNE_TO_BYTES)) break;
+    removals.push(fs.unlink(candidate.path).catch(() => {}));
+    count--;
+    bytes -= candidate.bytes;
+  }
+  await Promise.all(removals);
 }
 
 
@@ -586,8 +537,6 @@ function audioTrackName(tags: { title?: string; name?: string; handler_name?: st
   const language = tags?.language?.trim();
   return language && language.toLowerCase() !== "und" ? `Audio ${index + 1} · ${language}` : `Audio ${index + 1}`;
 }
-
-export { spawnSync };
 
 export async function stopEditorPreviews(): Promise<void> {
   editorPreviewsStopped = true;

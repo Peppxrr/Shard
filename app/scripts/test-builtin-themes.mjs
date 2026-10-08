@@ -32,6 +32,7 @@ const storage = {totalBytes:3e9,managedBytes:2e9,keptBytes:1e9,limitBytes:1e9,re
 const exportListeners = new Set();
 window.shard = new Proxy({
   windowControlsSupported:true,
+  regionalLocale:'en-US',
   getSettings:async()=>settings,
   listClips:async()=>[clip,{...clip,id:'recording',source:'recording',protected:1}],
   version:async()=> '0.1.9',

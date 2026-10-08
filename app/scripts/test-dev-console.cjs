@@ -73,7 +73,8 @@ function loadTs(file) {
   loaded.require = id => {
     if (id === "electron") return electronStub;
     if (id === "node:fs") return fsProxy;
-    if (id === "../shared/dev-console") return loadTs("src/shared/dev-console.ts");
+    const source = path.resolve(path.dirname(absolute), `${id}.ts`);
+    if (id.startsWith(".") && fs.existsSync(source)) return loadTs(source);
     return originalRequire(id);
   };
   const source = fs.readFileSync(absolute, "utf8");

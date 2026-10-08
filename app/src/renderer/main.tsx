@@ -1,8 +1,9 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { DevConsole } from "./DevConsole";
 import "./styles.css";
+// Static, so theme styles injected later still follow it in the cascade.
+import "./dev-console.css";
 import { initTheme } from "./themeManager";
 
 // Apply saved theme before first paint to avoid flash of default.
@@ -17,7 +18,9 @@ const rootEl = document.getElementById("root")!;
 if (location.hash === "#console") {
   rootEl.dataset.shardPage = "console";
   // Console window does not need theme persistence; still apply for consistency
-  themeReady.catch(() => {}).finally(() => {
+  themeReady.catch(() => {}).finally(async () => {
+    // Code-split on purpose: the main window never parses the console view.
+    const { DevConsole } = await import("./DevConsole");
     const root = createRoot(rootEl);
     root.render(<React.StrictMode><DevConsole /></React.StrictMode>);
   });

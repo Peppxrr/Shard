@@ -19,7 +19,7 @@ Choose the smallest scope that exercises the changed behavior:
 | Developer console, log streams, session export | `-- diagnostics` | App build + diagnostics tests |
 | C++ logic/detection | `-- core` | Debug core build + detection/capture/audio-isolation unit tests |
 | Captured frames/audio, replay/mux/timestamps, core capture settings | `-- capture` | Core scope + one E2E with duration/video/audio checks |
-| Release, packaging/build pipeline, packaged-only regression | `-- release` | Release core, unit/JS tests, app packaging, artifact checks |
+| Release, packaging/build pipeline, packaged-only regression | `-- release` | Release core, unit/JS tests, app packaging, artifact checks, size report |
 
 Scopes combine: `npm --prefix app run verify -- editor updater` builds the app
 once and runs both sets of tests. Add `--plan` to preview the selected steps.
@@ -113,6 +113,12 @@ reacquires hook frames through the existing hook, and that the replay ring
 keeps one decodable history across every swap. `CF_GC_SWAP_MODE=auto` starts on
 the desktop and also checks the return to desktop capture after both games
 close. The test steals focus for about a minute.
+
+For changes to the core's process supervisor (Job Object ownership of the
+capture core), `powershell -File scripts/test-process-supervisor.ps1` builds
+`shard_process_supervisor_fixture` and checks normal exit, forced and
+stdin-EOF termination, and fail-closed setup, including that no descendant
+outlives the supervisor.
 
 The release workflow calls the same `release` scope. Do not also perform a full
 local release run when CI has verified the same changes. Hosted CI does not

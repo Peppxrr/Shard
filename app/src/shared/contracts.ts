@@ -635,6 +635,8 @@ export interface ShardApi {
   onToast(cb: (message: string) => void): () => void;
   // Frameless Windows shell controls. Other platforms retain their native frame.
   windowControlsSupported: boolean;
+  // Windows display language for dates and numbers (Chromium UI strings ship in en-US only).
+  regionalLocale: string;
   minimizeWindow(): Promise<void>;
   toggleMaximizeWindow(): Promise<boolean>;
   closeWindow(): Promise<void>;

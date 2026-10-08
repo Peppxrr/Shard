@@ -49,7 +49,6 @@ export function ProcessCombobox({
     return entries.filter((e) => e.exe.toLowerCase().includes(q) || e.title.toLowerCase().includes(q));
   }, [entries, query]);
 
-  const visibleCount = Math.min(5, filtered.length);
   const wantHeight = Math.min(180, filtered.length * 36 + 8);
 
   useLayoutEffect(() => {

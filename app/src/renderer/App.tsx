@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipRecord, CoreState, ExportProgress, Settings } from "../shared/contracts";
 import { DEFAULT_SETTINGS } from "../shared/contracts";
 import { CapturePage } from "./components/CapturePage";
 import { fmtSize, LibraryPage } from "./components/LibraryPage";
-import { GamesPage } from "./components/GamesPage";
-import { getSavedSettingsSection, SettingsPage, type SettingsSection } from "./components/SettingsPage";
-import { Editor } from "./components/Editor";
+import { getSavedSettingsSection, type SettingsSection } from "./components/settingsSections";
 import { storageMeterStyle, useStorageStatus } from "./components/StorageSummary";
 import { Button, Icon, Modal, Spinner, Toasts, type ToastItem } from "./components/ui";
 import { setTheme } from "./themeManager";
 
 import { UpdateNotice } from "./components/UpdateNotice";
+
+// Capture and Library are the startup surfaces (Capture also opens the clip
+// viewer); the editor and less frequent pages load on first use.
+const GamesPage = lazy(() => import("./components/GamesPage").then((module) => ({ default: module.GamesPage })));
+const SettingsPage = lazy(() => import("./components/SettingsPage").then((module) => ({ default: module.SettingsPage })));
+const Editor = lazy(() => import("./components/Editor").then((module) => ({ default: module.Editor })));
 
 type Tab = "capture" | "library" | "games" | "settings";
 
@@ -99,6 +103,9 @@ export function App() {
   const [clips, setClips] = useState<ClipRecord[]>([]);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [editingClip, setEditingClip] = useState<ClipRecord | null>(null);
+  // Transitions keep the current view until a lazy view's chunk is ready,
+  // instead of committing an empty Suspense fallback (which React reveals late).
+  const openEditor = useCallback((clip: ClipRecord) => startTransition(() => setEditingClip(clip)), []);
   // Path of a finished export to show in the library viewer once listed.
   const [libraryOpenPath, setLibraryOpenPath] = useState<string | null>(null);
   const clearLibraryOpenPath = useCallback(() => setLibraryOpenPath(null), []);
@@ -232,8 +239,10 @@ export function App() {
   const navigateTab = (next: Tab, section = settingsSection) => {
     rememberScroll();
     currentScrollKey.current = scrollKey(next, section);
-    if (next === "settings") setSettingsSection(section);
-    setTab(next);
+    startTransition(() => {
+      if (next === "settings") setSettingsSection(section);
+      setTab(next);
+    });
   };
 
   const requestTab = (next: Tab, section = settingsSection) => {
@@ -315,24 +324,26 @@ export function App() {
             pendingScrollRestore.current?.key === currentScrollKey.current) pendingScrollRestore.current = null;
         }}>
         {tab === "capture" && <CapturePage settings={settings} clips={clips} />}
-        {tab === "library" && <LibraryPage clips={clips} onOpenEditor={setEditingClip} openPath={libraryOpenPath} onOpenedPath={clearLibraryOpenPath} />}
-        {tab === "games" && <GamesPage settings={settings} onChange={(next) => {
-          setSettings(next);
-          setSavedSettings(next);
-          void window.shard.setSettings(next).catch(() => {});
-        }} />}
-        {tab === "settings" && <SettingsPage settings={settings} savedSettings={savedSettings} onChange={setSettings} activeSection={settingsSection}
-          onSectionChange={requestSettingsSection} updatesRequest={updatesRequest}
-          onUpdatesRequestHandled={handleUpdatesRequestHandled}
-          onCommit={(next) => {
+        {tab === "library" && <LibraryPage clips={clips} onOpenEditor={openEditor} openPath={libraryOpenPath} onOpenedPath={clearLibraryOpenPath} />}
+        <Suspense fallback={null}>
+          {tab === "games" && <GamesPage settings={settings} onChange={(next) => {
             setSettings(next);
-            const committed = { ...savedSettings, audio: next.audio };
-            void window.shard.setSettings(committed).then(() => {
-              setSavedSettings((current) => ({ ...current, audio: next.audio }));
-            }).catch((error: unknown) => {
-              pushToast(`Audio source update failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-            });
+            setSavedSettings(next);
+            void window.shard.setSettings(next).catch(() => {});
           }} />}
+          {tab === "settings" && <SettingsPage settings={settings} savedSettings={savedSettings} onChange={setSettings} activeSection={settingsSection}
+            onSectionChange={requestSettingsSection} updatesRequest={updatesRequest}
+            onUpdatesRequestHandled={handleUpdatesRequestHandled}
+            onCommit={(next) => {
+              setSettings(next);
+              const committed = { ...savedSettings, audio: next.audio };
+              void window.shard.setSettings(committed).then(() => {
+                setSavedSettings((current) => ({ ...current, audio: next.audio }));
+              }).catch((error: unknown) => {
+                pushToast(`Audio source update failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+              });
+            }} />}
+        </Suspense>
       </main>
       <footer data-shard-slot="statusbar" className="app__status">
         <LiveStatus />
@@ -346,18 +357,22 @@ export function App() {
         </div>
       </footer>
 
-      {editingClip && (
-        <Editor
-          clip={editingClip}
-          onClose={() => setEditingClip(null)}
-          onOpenExport={(path) => {
-            setEditingClip(null);
-            setLibraryOpenPath(path);
-            requestTab("library");
-          }}
-          onExport={() => setExportProgress({ clipId: editingClip.id, phase: "queued", percent: 0 })}
-        />
-      )}
+      {/* Always mounted: an already-revealed boundary lets the transition wait
+          for the Editor chunk instead of committing a throttled fallback. */}
+      <Suspense fallback={null}>
+        {editingClip && (
+          <Editor
+            clip={editingClip}
+            onClose={() => setEditingClip(null)}
+            onOpenExport={(path) => {
+              setEditingClip(null);
+              setLibraryOpenPath(path);
+              requestTab("library");
+            }}
+            onExport={() => setExportProgress({ clipId: editingClip.id, phase: "queued", percent: 0 })}
+          />
+        )}
+      </Suspense>
 
       {exportProgress && !exportProgress.done && editingClip?.id !== exportProgress.clipId && (
         <div className="exportbar">

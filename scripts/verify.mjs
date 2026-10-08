@@ -70,6 +70,8 @@ if (scopes.includes("capture")) {
 if (release) {
   npm("package", "package");
   npm("release-artifacts", "verify:release");
+  // Prints download/installed sizes by component and writes release/size-report.json.
+  npm("size-report", "size-report");
 }
 console.log(`Verification: ${scopes.join(", ")}${planOnly ? " (plan only)" : ""}`);
 if (planOnly) {
