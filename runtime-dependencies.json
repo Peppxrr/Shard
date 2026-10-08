@@ -3,12 +3,13 @@
     "version": "32.2.1",
     "hookPayload": "vendor/obs-hook-payload/32.2.1",
     "depsDirectory": "obs-deps-2026-07-15-x64",
-    "runtimeDlls": ["avcodec-62.dll", "avformat-62.dll", "avutil-60.dll", "avdevice-62.dll", "avfilter-11.dll", "swscale-9.dll", "swresample-6.dll", "zlib.dll", "libx264-164.dll", "librist.dll", "datachannel.dll", "libcurl.dll", "srt.dll"]
+    "runtimeDlls": ["avcodec-62.dll", "avformat-62.dll", "avutil-60.dll", "avdevice-62.dll", "avfilter-11.dll", "swscale-9.dll", "swresample-6.dll", "zlib.dll", "libx264-164.dll", "librist.dll", "libcurl.dll", "srt.dll"]
   },
   "ffmpeg": {
     "version": "9.0.1",
-    "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build.zip",
-    "sha256": "2e8e28af97c2ae338ccef92e36da9b2a4cd21d0cad9dde093545606cb07f5b00",
-    "archiveDirectory": "ffmpeg-9.0.1-full_build"
+    "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build-shared.zip",
+    "sha256": "6fd54b3b4f49117a307877b570f5e1659090f178973298658b41f5c559b5b5ab",
+    "archiveDirectory": "ffmpeg-9.0.1-full_build-shared",
+    "runtimeDlls": ["avcodec-63.dll", "avdevice-63.dll", "avfilter-12.dll", "avformat-63.dll", "avutil-61.dll", "swresample-7.dll", "swscale-10.dll"]
   }
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AudioDeviceInfo, ExportEncoderInfo, MonitorInfo, Settings, VideoEncoderInfo } from "../../shared/contracts";
-import { Button, Card, Icon, IconButton, ShardSelect } from "./ui";
+import { Card, Icon, IconButton } from "./ui";
 import { VideoSettingsPanel } from "./VideoSettingsPanel";
 import { ClipSoundSettings } from "./ClipSoundSettings";
 import { CaptureSettingsPanel, ExportSettingsPanel, StorageSettingsPanel, AppSettingsPanel } from "./GeneralSettingsPanels";
@@ -9,6 +9,7 @@ import { HotkeysSettings } from "./HotkeysSettings";
 import { AppearancePanel } from "./AppearancePanel";
 import { searchSettings, type SettingsSearchResult } from "./settingsSearch";
 import { FloatingMenu } from "./FloatingMenu";
+import { SETTINGS_SECTIONS as NAV, type SettingsSection } from "./settingsSections";
 
 interface Props {
   settings: Settings;
@@ -21,27 +22,7 @@ interface Props {
   onUpdatesRequestHandled: () => void;
 }
 
-const NAV = [
-  { id: "appearance", label: "Appearance", icon: "paintbrush" },
-  { id: "capture", label: "Capture", icon: "video" },
-  { id: "video", label: "Video", icon: "monitor" },
-  { id: "export", label: "Export", icon: "export" },
-  { id: "audio", label: "Audio", icon: "volume" },
-  { id: "hotkeys", label: "Hotkeys", icon: "key" },
-  { id: "storage", label: "Storage", icon: "hardDrive" },
-  { id: "app", label: "App", icon: "power" },
-] as const;
-
-export type SettingsSection = (typeof NAV)[number]["id"];
 type NavId = SettingsSection;
-
-export function getSavedSettingsSection(): SettingsSection {
-  try {
-    const saved = localStorage.getItem("shard:settingsTab");
-    if (saved && (NAV as readonly { id: string }[]).some((section) => section.id === saved)) return saved as SettingsSection;
-  } catch {}
-  return "appearance";
-}
 
 const SETTINGS_DESCRIPTIONS: Record<NavId, string> = {
   appearance: "Make Shard feel at home on your desktop.",

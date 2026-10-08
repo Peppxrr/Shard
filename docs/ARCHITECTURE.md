@@ -52,7 +52,7 @@ Important areas in `core/src/`:
 - `audio_isolation_capture.*` — Windows process-loopback OBS source and the controller that keeps isolated App rows and filtered Desktop rows in sync with processes and endpoint sessions.
 - `capture_geometry.h`, `capture_resilience.h` — isolated geometry/recovery decision logic used by native capture code/tests.
 - `encoders.*` — runtime video/audio encoder selection and settings.
-- `replay_ring.*` — encoded RAM ring and clip snapshot/save path.
+- `replay_ring.*`, `save_queue.h` — encoded RAM ring and clip snapshot/save path; save acceptance synchronized with the save worker.
 - `recorder.*` — direct fragmented-MP4 recording.
 - `mux.*` — pipe protocol to OBS's ffmpeg mux helper.
 - `process_monitor.*`, `detector.*`, `launchers.*`, `game_registry.*`, `game_session.*`, `game_system.*` — process evidence, launcher product hints, qualification, persistence, sessions, primary selection, and capture-subject handoff.
@@ -60,7 +60,7 @@ Important areas in `core/src/`:
 - `server.*` — local WebSocket server and port announcement.
 - `log.*` — asynchronous stderr logger (libobs log handler included) and libobs log facts (GPU priority result, hook API/transport).
 - `perf_monitor.*`, `perf_analysis.h`, `gpu_engines.*`, `system_info.*` — frame pacing/GPU engine sampling, lag cause classification, `perf.stats`, clip lag segments, session diagnostics.
-- `priority_task.*` — opt-in Recording priority scheduled task, bridge and elevated entry (see `docs/CAPTURE.md`).
+- `priority_task.*`, `priority_runtime.*`, `priority_policy.h` — opt-in Recording priority scheduled task, bridge and elevated entry; protected runtime copy/manifest/swap; pure setup decisions (see `docs/CAPTURE.md`).
 
 ### Game detection/session model
 
@@ -96,7 +96,7 @@ Theme API compatibility is public behavior. See `docs/THEME-API.md` before chang
 
 ## Build/runtime layout
 
-Release native runtime is staged to `app/resources/core-bin/`; Debug development runtime goes to `app/resources/core-bin-dev/`. `scripts/build.ps1` builds into a fresh staging sibling and only replaces the usable stage after validation, avoiding stale DLL/data leftovers.
+Release native runtime is staged to `app/resources/core-bin/`; Debug development runtime goes to `app/resources/core-bin-dev/`. `scripts/build.ps1` builds into a fresh staging sibling and only replaces the usable stage after validation, avoiding stale DLL/data leftovers. The core-bin root holds `shardcore.exe`, libobs, only the OBS modules the core uses, and OBS's FFmpeg DLLs; the editor/export `ffmpeg.exe`/`ffprobe.exe` live in `core-bin/ffmpeg/` with their own shared FFmpeg DLLs and are spawned only for probing, thumbnails, editor previews and exports. The renderer lazily loads the Editor, Settings, Games and Developer Console views.
 
 Runtime dependency pins live in `runtime-dependencies.json`. OBS source is pinned by the submodule, Shard's OBS changes live in `patches/`, and the official signed Game Capture injection payload is kept separately under `vendor/obs-hook-payload/` and verified during build/package.
 
@@ -104,14 +104,8 @@ For dependency upgrades, follow `docs/DEPENDENCIES.md`. For packaging/version/pu
 
 ## Verification
 
-`scripts/verify.mjs` is the verification router. The supported scopes are currently:
-
-- `app`
-- `editor`
-- `updater`
-- `themes`
-- `core`
-- `capture`
-- `release`
+`scripts/verify.mjs` is the verification router. The supported scopes are currently
+`app`, `editor`, `storage`, `updater`, `themes`, `diagnostics`, `core`, `capture`
+and `release`.
 
 The runner deduplicates shared work, prints a compact summary, and writes full logs under ignored `tmp/verify/`. See `docs/VERIFYING.md`; do not recreate its decision table here.

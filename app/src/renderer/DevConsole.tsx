@@ -10,7 +10,6 @@ import {
 } from "../shared/dev-console";
 import type { DevConsoleLine } from "../shared/contracts";
 import { Button, Icon, ShardSelect } from "./components/ui";
-import "./dev-console.css";
 
 const HISTORY_LIMIT = 20_000;
 const PAGE_SIZE = 500;
@@ -78,7 +77,7 @@ function mergeLines(lines: DevConsoleLine[], additions: DevConsoleLine[]): DevCo
 }
 
 function countLabel(value: number): string {
-  return new Intl.NumberFormat().format(value);
+  return new Intl.NumberFormat(window.shard.regionalLocale).format(value);
 }
 
 function countWithNoun(value: number, singular: string, plural = `${singular}s`): string {
@@ -450,7 +449,7 @@ export function DevConsole() {
             {pageState !== "loading" && pageLines.map(line => {
               const severity = devConsoleSeverity(line);
               const source = devConsoleSource(line);
-              const timestamp = new Date(line.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, fractionalSecondDigits: 3 });
+              const timestamp = new Date(line.t).toLocaleTimeString(window.shard.regionalLocale, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, fractionalSecondDigits: 3 });
               return <article
                 className="dc__row"
                 key={line.id!}

@@ -51,7 +51,7 @@ const assert = (cond, label) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function ffprobe(file) {
-  const r = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-show_entries", "format=duration", "-of", "json", file], { encoding: "utf8" });
+  const r = spawnSync(path.join(coreBin, "ffmpeg", "ffprobe.exe"), ["-v", "error", "-show_entries", "format=duration", "-of", "json", file], { encoding: "utf8" });
   if (r.status !== 0) throw new Error("ffprobe failed: " + r.stderr);
   return JSON.parse(r.stdout).format;
 }
@@ -109,7 +109,7 @@ async function main() {
 
   // Duration alone hid duplicate decode timestamps and discarded B-frame
   // composition offsets. Inspect the complete video packet cadence as well.
-  const timing = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
+  const timing = spawnSync(path.join(coreBin, "ffmpeg", "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
     "-show_packets", "-show_entries", "packet=pts_time,dts_time:stream=r_frame_rate", "-show_streams",
     "-of", "json", clip.path], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
   assert(timing.status === 0, "video packet timing probe succeeds");
@@ -121,15 +121,15 @@ async function main() {
   const pts = packets.map(p => Number(p.pts_time)).filter(t => t >= 0).sort((a, b) => a - b);
   assert(pts.length >= Math.floor(want / frameSeconds) - 3, "saved replay retains the expected frame count");
   assert(pts.every((t, i) => !i || Math.abs(t - pts[i - 1] - frameSeconds) < 0.00001), "uniform presentation cadence without duplicate or missing frames");
-  const tail = spawnSync(path.join(coreBin, "ffmpeg.exe"), ["-v", "error", "-xerror", "-ss", String(want - 1),
+  const tail = spawnSync(path.join(coreBin, "ffmpeg", "ffmpeg.exe"), ["-v", "error", "-xerror", "-ss", String(want - 1),
     "-i", clip.path, "-map", "0:v:0", "-an", "-f", "null", "-"], { encoding: "utf8" });
   assert(tail.status === 0 && !tail.stderr.trim(), "final reference group decodes without missing-frame errors");
 
   // Cover the old playable-but-black/silent regression in this same capture
   // run, so callers do not need a separate selftest + manual content probe.
-  const streams = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-show_entries", "stream=codec_type", "-of", "json", clip.path], { encoding: "utf8" });
+  const streams = spawnSync(path.join(coreBin, "ffmpeg", "ffprobe.exe"), ["-v", "error", "-show_entries", "stream=codec_type", "-of", "json", clip.path], { encoding: "utf8" });
   assert(streams.status === 0 && JSON.parse(streams.stdout).streams.some(s => s.codec_type === "audio"), "clip has an audio track");
-  const content = spawnSync(path.join(coreBin, "ffmpeg.exe"), ["-hide_banner", "-ss", "1", "-i", clip.path,
+  const content = spawnSync(path.join(coreBin, "ffmpeg", "ffmpeg.exe"), ["-hide_banner", "-ss", "1", "-i", clip.path,
     "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-frames:v", "3", "-an", "-f", "null", "-"], { encoding: "utf8" });
   const luma = [...content.stderr.matchAll(/lavfi\.signalstats\.YAVG=([\d.]+)/g)].map(m => Number(m[1]));
   assert(content.status === 0 && luma.some(value => value > 16), "clip contains nonblack video (keep the test display visible)");

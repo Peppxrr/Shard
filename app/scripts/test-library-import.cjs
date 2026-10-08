@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs/promises');
-const { readFileSync } = require('node:fs');
+const { existsSync, readFileSync } = require('node:fs');
 const Module = require('node:module');
 const ts = require('typescript');
 const root = process.argv[2];
@@ -31,9 +31,11 @@ function loadTs(file) {
   mod.filename = absolute;
   mod.paths = Module._nodeModulePaths(path.dirname(absolute));
   const original = mod.require.bind(mod);
-  mod.require = id => id in stubs ? stubs[id] : id === './library-import' ? loadTs('src/main/library-import.ts')
-    : id === '../shared/storage-policy' ? loadTs('src/shared/storage-policy.ts')
-    : id === '../shared/perf' ? loadTs('src/shared/perf.ts') : original(id);
+  mod.require = id => {
+    if (id in stubs) return stubs[id];
+    const source = path.resolve(path.dirname(absolute), `${id}.ts`);
+    return id.startsWith('.') && existsSync(source) ? loadTs(source) : original(id);
+  };
   mod._compile(ts.transpileModule(readFileSync(absolute, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, absolute);
   return mod.exports;
 }

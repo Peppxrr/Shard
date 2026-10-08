@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipRecord } from "../../shared/contracts";
 import { PERF_CAUSE_LABEL } from "../../shared/perf";
 import { Icon, IconButton, Button, EmptyState, Modal, ShardSelect } from "./ui";
@@ -33,7 +33,8 @@ const SORTS: { value: SortKey; label: string }[] = [
   { value: "game", label: "By game" },
 ];
 
-export function LibraryPage({ clips, onOpenEditor, openPath, onOpenedPath }: Props) {
+// Memoized: App state such as export progress must not re-render every card.
+export const LibraryPage = memo(function LibraryPage({ clips, onOpenEditor, openPath, onOpenedPath }: Props) {
   const [gameFilter, setGameFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [search, setSearch] = useState("");
@@ -163,7 +164,7 @@ export function LibraryPage({ clips, onOpenEditor, openPath, onOpenedPath }: Pro
       {selected && <Viewer clip={selected} onClose={() => setSelectedId(null)} onEdit={(clip) => { setSelectedId(null); onOpenEditor(clip); }} />}
     </div>
   );
-}
+});
 
 function pathBase(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
@@ -195,7 +196,7 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
           window.shard.startDrag(clip.path, clip.thumb || undefined);
         }}
       >
-        {clip.thumb ? <img data-shard-slot="clip-image" className="clip__img" src={mediaFileUrl(clip.thumb)} alt="" draggable={false} /> : <span data-shard-slot="clip-placeholder" className="clip__nothumb"><Icon name="film" size={26} /></span>}
+        {clip.thumb ? <img data-shard-slot="clip-image" className="clip__img" src={mediaFileUrl(clip.thumb)} alt="" draggable={false} loading="lazy" decoding="async" /> : <span data-shard-slot="clip-placeholder" className="clip__nothumb"><Icon name="film" size={26} /></span>}
         <span data-shard-slot="clip-play" className="clip__play" aria-hidden="true"><Icon name="play" size={24} /></span>
         <span data-shard-slot="clip-source" className="clip__source">{SOURCE_NAMES[clip.source]}</span>
         <span data-shard-slot="clip-duration" className="badge badge--dur num">{fmtDuration(clip.durationMs)}</span>
@@ -337,7 +338,7 @@ export function relativeDate(ts: number): string {
 function fmtDate(ts: number): string {
   const d = new Date(ts);
   const withYear = d.getFullYear() !== new Date().getFullYear();
-  return d.toLocaleDateString(undefined, {
+  return d.toLocaleDateString(window.shard.regionalLocale, {
     year: withYear ? "numeric" : undefined,
     month: "short",
     day: "numeric",
@@ -347,7 +348,7 @@ function fmtDate(ts: number): string {
 // Full date + time used for the per-clip tag (auto-tagged with the game).
 export function fmtDateTime(ts: number): string {
   const d = new Date(ts);
-  return d.toLocaleString(undefined, {
+  return d.toLocaleString(window.shard.regionalLocale, {
     year: "numeric",
     month: "short",
     day: "numeric",

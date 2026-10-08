@@ -26,15 +26,16 @@ const coreBin = process.argv[2]
 const pins = JSON.parse(readFileSync(join(repoRoot, "runtime-dependencies.json"), "utf8"));
 const ROOT_FILES = [
   "shardcore.exe", "obs.dll", "libobs-d3d11.dll", "libobs-winrt.dll", "w32-pthreads.dll",
-  "obs-ffmpeg-mux.exe", "obs-nvenc-test.exe", "ffmpeg.exe", "ffprobe.exe",
+  "obs-ffmpeg-mux.exe", "obs-nvenc-test.exe",
   // obs-deps runtime (FFmpeg, curl, x264, ...)
   ...pins.obs.runtimeDlls,
 ];
 
-const PLUGINS = [
-  "win-capture", "win-wasapi", "obs-x264", "obs-nvenc",
-  "obs-ffmpeg", "obs-outputs", "obs-filters", "image-source", "text-freetype2",
-];
+// libobs loads every module in obs-plugins/64bit, so this is also an allowlist.
+const PLUGINS = ["win-capture", "win-wasapi", "obs-x264", "obs-nvenc", "obs-ffmpeg"];
+
+// Editor/export tools: a shared FFmpeg build kept apart from OBS's FFmpeg DLLs.
+const FFMPEG_FILES = ["ffmpeg.exe", "ffprobe.exe", "LICENSE.txt", "README.txt", "pins.json", ...pins.ffmpeg.runtimeDlls];
 
 const WIN_CAPTURE_DATA = [
   // Official signed OBS payload (hash-checked below) + Shard's vulkan layer
@@ -81,6 +82,13 @@ if (!existsSync(coreBin)) {
     const data = join(coreBin, "data/obs-plugins", p);
     if (!existsSync(data)) fail(`missing plugin data dir data/obs-plugins/${p}`);
   }
+  const pluginDir = join(coreBin, "obs-plugins/64bit");
+  for (const name of existsSync(pluginDir) ? readdirSync(pluginDir) : []) {
+    if (!PLUGINS.includes(name.replace(/\.dll$/i, ""))) fail(`unexpected OBS module obs-plugins/64bit/${name} (libobs would load it)`);
+  }
+  for (const f of FFMPEG_FILES) {
+    if (!existsSync(join(coreBin, "ffmpeg", f))) fail(`missing ffmpeg/${f}`);
+  }
   for (const f of WIN_CAPTURE_DATA) {
     if (!existsSync(join(coreBin, "data/obs-plugins/win-capture", f))) fail(`missing data/obs-plugins/win-capture/${f}`);
   }
@@ -91,9 +99,22 @@ if (!existsSync(coreBin)) {
   const stagedPins = join(coreBin, "runtime-dependencies.json");
   if (!existsSync(stagedPins) || JSON.stringify(JSON.parse(readFileSync(stagedPins, "utf8"))) !== JSON.stringify(pins))
     fail("staged runtime dependency versions differ from the selected pins — rebuild the core");
-  const ffmpegPins = join(coreBin, "ffmpeg-pins.json");
-  if (!existsSync(ffmpegPins) || JSON.stringify(JSON.parse(readFileSync(ffmpegPins, "utf8"))) !== JSON.stringify(pins.ffmpeg))
+  const ffmpegPins = join(coreBin, "ffmpeg/pins.json");
+  if (existsSync(ffmpegPins) && JSON.stringify(JSON.parse(readFileSync(ffmpegPins, "utf8"))) !== JSON.stringify(pins.ffmpeg))
     fail("FFmpeg provenance does not match the selected version — fetch FFmpeg and rebuild");
+  // A missing DLL only shows up when Windows loads the executable.
+  if (process.platform === "win32") {
+    for (const tool of ["ffmpeg.exe", "ffprobe.exe"]) {
+      const executable = join(coreBin, "ffmpeg", tool);
+      if (!existsSync(executable)) continue;
+      try {
+        const version = execFileSync(executable, ["-hide_banner", "-version"], { encoding: "utf8", windowsHide: true, timeout: 15000 });
+        if (!version.includes(`version ${pins.ffmpeg.version}`)) fail(`ffmpeg/${tool} does not report FFmpeg ${pins.ffmpeg.version}`);
+      } catch (error) {
+        fail(`ffmpeg/${tool} cannot start (${error.status ?? error.code}); its DLLs are incomplete`);
+      }
+    }
+  }
 
   // Hook payload integrity: the staged bytes must be the pinned, officially
   // signed OBS release binaries — a rebuilt or modified hook breaks the
@@ -124,9 +145,6 @@ if (!existsSync(coreBin)) {
     if (existsSync(join(coreBin, "data/obs-plugins", name))) {
       fail(`stale pre-patch layout file data/obs-plugins/${name} (belongs under win-capture/ or must not exist)`);
     }
-  }
-  if (existsSync(join(coreBin, "clipcore.exe"))) {
-    fail("stale clipcore.exe staged beside shardcore.exe");
   }
 
   // Staleness: a fresh installer wrapping an old core reproduces bugs that

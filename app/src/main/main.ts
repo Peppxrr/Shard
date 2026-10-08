@@ -5,7 +5,7 @@ import type { NativeImage } from "electron";
 import { join as joinPath } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { cpSync, existsSync, readdirSync, readFileSync, unlinkSync, statSync, promises as fs } from "node:fs";
+import { existsSync, readFileSync, statSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ThemeStore } from "./themes";
@@ -17,16 +17,19 @@ import { clipDragIcon } from "./drag-icon";
 import { medalImportMetadata, scanMp4Tree } from "./library-import";
 import { StorageWatchdog } from "./storage";
 import { ExportManager } from "./export";
-import { ffprobe, listExportEncoders, remuxToMp4, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews, stopEditorPreviews, resumeEditorPreviews } from "./ffmpeg";
+import { listExportEncoders, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews, stopEditorPreviews, resumeEditorPreviews } from "./ffmpeg";
 import { SaveOverlay } from "./overlay";
 import { getDefaultSoundPath, playClipSound, previewClipSound, setSoundWindow } from "./sound";
 import { DevConsole } from "./dev-console";
+import { regionalLocaleArgument } from "./regional-locale";
 import { copyPlaybackReport } from "./playback-diagnostics";
 import { registerUpdater } from "./updater";
 import { ShutdownLifecycle } from "./shutdown-lifecycle";
 import { bounded, ownedProcesses } from "./bundled-processes";
 import { PerfTimeline } from "./perf-timeline";
 import { RecordingPriority, priorityFallbackMessage } from "./recording-priority";
+import { recordingPriorityDiagnostics } from "../shared/recording-priority";
+import { ClipSaveTracker } from "../shared/clip-saves";
 import { collectBundleMembers, writeBundle } from "./diagnostics-bundle";
 import { parseClipLag } from "../shared/perf";
 import type { AudioSourceConfig, AudioTrackInfo, ClipLagInfo, ClipRecord, CoreState, DevConsoleLine, EditorExportProject, ExportProgress, PerfSample, PerfSession, RecordingPriorityStatus, Settings, StorageSettings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
@@ -124,8 +127,10 @@ let updater: ReturnType<typeof registerUpdater> | undefined;
 let coreFatal: string | null = null;
 let perfTimeline: PerfTimeline | null = null;
 let recordingPriority: RecordingPriority;
-// Session diagnostics of the running core (state.get / ready → perf.session).
-let coreSession: PerfSession | null = null;
+// Most recent core session, kept after that core exits for the diagnostics
+// bundle's `lastSession` only. Live state (Recording priority) is held by
+// RecordingPriority and cleared when the core disconnects.
+let lastCoreSession: PerfSession | null = null;
 const overlay = new SaveOverlay();
 const devConsole = new DevConsole();
 const editorProbeCache = new Map<string, { identity: string; tracks: Promise<AudioTrackInfo[]> }>();
@@ -194,7 +199,6 @@ async function main(): Promise<void> {
   if (!shutdown.acceptingWork) return;
   app.setAppUserModelId("com.shard.app");
 
-  migrateLegacyUserData();
   await loadSettings();
   if (!shutdown.acceptingWork) return;
   themes = new ThemeStore(path.join(app.getPath("userData"), "Themes"), app.getVersion(), () => {
@@ -237,10 +241,12 @@ async function main(): Promise<void> {
     win?.webContents.send("export:progress", p);
     if (p.done && p.result) {
       // Edited exports land in the library as source "edited" (never auto-deleted).
+      // Probing/thumbnailing runs off the main thread; "added" refreshes the renderer.
       const src = library.get(p.clipId);
-      library.importMp4(p.result.path, "edited", src?.game ?? null);
       toast(`Export ready: ${path.basename(p.result.path)} (${p.result.sizeMb} MB)`);
-      void storage.check();
+      void library.importMp4Async(p.result.path, "edited", src?.game ?? null)
+        .catch((error: unknown) => console.error("[editor][export] library import failed", error))
+        .finally(() => void storage.check());
     }
   });
 
@@ -250,7 +256,6 @@ async function main(): Promise<void> {
   recordingPriority = new RecordingPriority({
     launchPaths: () => core.launchPaths,
     enabled: () => getSettings().app.recordingPriority,
-    coreSession: () => coreSession && { elevated: coreSession.elevated, gpuPriority: coreSession.gpuPriority },
     parentWindow: () => {
       if (!win || win.isDestroyed()) return null;
       const handle = win.getNativeWindowHandle();
@@ -264,6 +269,8 @@ async function main(): Promise<void> {
     devConsole.feed({ t: Date.now(), level: "app", severity: "warn", text: `Recording priority unavailable (${reason}); starting the capture core normally` });
   });
   core.on("event", onCoreEvent);
+  // A gone core's session must not keep Recording priority "Active".
+  core.on("disconnected", () => recordingPriority.noteCoreSession(null));
   core.on("core-exited", (code: number | null, signal?: string | null) => {
     devConsole.feed({ t: Date.now(), level: "app", severity: code === 0 && !signal ? "info" : "error",
       text: `Core exited (code ${code}, signal ${signal ?? "none"})` });
@@ -293,29 +300,6 @@ async function main(): Promise<void> {
   hotkeys.apply(getSettings());
 }
 
-// Import profiles from the former app name on first launch so existing
-// settings and clips remain available after upgrading.
-function migrateLegacyUserData(): void {
-  if (!app.isPackaged && process.env.SHARD_DEV_USER_DATA) return;
-  const userData = app.getPath("userData");
-  if (existsSync(path.join(userData, "settings.json"))) return;
-  const appData = app.getPath("appData");
-  for (const legacy of ["Shard", "ClipForge", "clipforge"]) {
-    if (path.basename(userData).toLowerCase() === legacy.toLowerCase()) continue;
-    const legacyDir = path.join(appData, legacy);
-    if (!existsSync(legacyDir)) continue;
-    try {
-      for (const entry of readdirSync(legacyDir)) {
-        const to = path.join(userData, entry);
-        if (!existsSync(to)) cpSync(path.join(legacyDir, entry), to, { recursive: true });
-      }
-      return;
-    } catch (e) {
-      console.error(`legacy userData migration from ${legacyDir} failed:`, e);
-    }
-  }
-}
-
 // ---------------------------------------------------------------- window ----
 
 function createWindow(): void {
@@ -335,6 +319,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      additionalArguments: [regionalLocaleArgument()],
     },
   });
   win.once("ready-to-show", () => win?.show());
@@ -680,27 +665,19 @@ function onCoreEvent(type: string, params: Record<string, unknown>): void {
   }
   devConsole.feed({ t: Date.now(), level: "event", text: `${type} ${JSON.stringify(params)}` });
 
+  if (clipSaves.apply(type, params)) updateClipAck(type === "clip.queued");
   switch (type) {
     case "ready": {
       const perf = (params as Partial<CoreState>).perf;
-      coreSession = perf?.session ?? null;
+      lastCoreSession = perf?.session ?? null;
+      recordingPriority.noteCoreSession(lastCoreSession);
       void recordingPriority.refresh().catch(() => {});
       break;
     }
     case "clip.saved": {
       const p = params as { path: string; requestedSec: number; actualSec: number; lag?: unknown };
       void trackJob(importClip(p.path, parseClipLag(p.lag)));
-      const label = savedLabel(p.requestedSec);
-      const style = getSettings().app.notificationStyle;
-      if (style === "overlay") {
-        // On-screen popup (top-left, slides in/out) — visible even over games.
-        overlay.show(label);
-      } else if (style === "windows") {
-        const windowHidden = !win || win.isMinimized() || !win.isFocused();
-        if (windowHidden) new Notification({ title: "Shard", body: label }).show();
-        else toast(label);
-      }
-      // "off": no feedback.
+      notifyClip(savedLabel(p.requestedSec));
       // Clip sound is now handled in renderer (App.tsx onCoreEvent) for low latency + volume/custom support.
       // Main fallback only if window not available — renderer will play via preloaded Audio.
       if (getSettings().app.clipSound && (!win || win.isDestroyed())) playClipSound();
@@ -750,19 +727,50 @@ let lastGame: string | null = null;
 let lastCaptureGame: string | null = null;
 let lastCaptureAt = 0;
 
+// Clip saves normally finish within a second. After severe GPU starvation the
+// core may wait up to 30 s for the encoder to catch up so the clip still ends
+// where it was requested; a short "Saving clip…" acknowledgement then shows
+// the hotkey worked, without claiming the file exists. Once per batch of
+// overlapping saves, and never for saves that finish quickly.
+const CLIP_ACK_DELAY_MS = 1000;
+const clipSaves = new ClipSaveTracker();
+let clipAckTimer: NodeJS.Timeout | undefined;
+let clipAckShown = false;
+
+function updateClipAck(queued: boolean): void {
+  if (!clipSaves.size) {
+    clearTimeout(clipAckTimer);
+    clipAckTimer = undefined;
+    clipAckShown = false;
+    return;
+  }
+  if (!queued || clipAckShown || clipAckTimer) return;
+  clipAckTimer = setTimeout(() => {
+    clipAckTimer = undefined;
+    if (!clipSaves.size) return;
+    clipAckShown = true;
+    notifyClip(clipSaves.size > 1 ? `Saving ${clipSaves.size} clips…` : "Saving clip…");
+  }, CLIP_ACK_DELAY_MS);
+}
+
+// Clip feedback in the user's notification style ("off": none).
+function notifyClip(label: string): void {
+  const style = getSettings().app.notificationStyle;
+  if (style === "overlay") {
+    // On-screen popup (top-left, slides in/out) — visible even over games.
+    overlay.show(label);
+  } else if (style === "windows") {
+    const windowHidden = !win || win.isMinimized() || !win.isFocused();
+    if (windowHidden) new Notification({ title: "Shard", body: label }).show();
+    else toast(label);
+  }
+}
+
 
 async function importClip(file: string, lag: ClipLagInfo | null): Promise<void> {
-  // Core produces mp4 directly (verify with ffprobe; remux if it somehow is
-  // not mp4 — e.g. muxer misbehaved). Async to avoid blocking main thread on ffprobe/thumbnail.
   const game = lastGame;
-  const final = file;
-  if (!file.toLowerCase().endsWith(".mp4")) {
-    const fixed = file.replace(/\.\w+$/, ".mp4");
-    try { remuxToMp4(file, fixed); } catch {}
-    try { existsSync(file) && unlinkSync(file); } catch {}
-  }
   try {
-    const rec = await library.importMp4Async(final, "clip", game, { lag });
+    const rec = await library.importMp4Async(file, "clip", game, { lag });
     win?.webContents.send("library:added", rec);
   } catch (e) {
     console.error("[importClip] failed", e);
@@ -784,15 +792,27 @@ async function finalizeRecording(mp4: string, lag: ClipLagInfo | null): Promise<
   }
 }
 
-// Enabling registers the scheduled task (one UAC prompt) before the core is
+// Enabling registers the scheduled task (UAC prompt) before the core is
 // restarted through it; disabling restarts the core normally first, then
-// removes the task (UAC only if something remains to remove).
+// removes the task (UAC only if something remains to remove). A failed
+// install never leaves the setting on, even when re-enabling a stale task.
 async function setRecordingPriority(enabled: boolean): Promise<RecordingPriorityStatus> {
   if (typeof enabled !== "boolean") throw new Error("Invalid Recording priority request");
   if (process.platform !== "win32") return recordingPriority.status();
   const current = getSettings();
   if (enabled) {
-    if (!(await recordingPriority.install())) return recordingPriority.status();
+    // Shard's own elevated core runs from the protected copy, which setup
+    // cannot replace while it runs: stop it through the normal supervised
+    // shutdown (never by killing processes) before reinstalling.
+    const stoppedElevated = core.launchMode === "priority" && recordingPriority.status().coreElevated;
+    if (stoppedElevated) await core.shutdown();
+    if (!(await recordingPriority.install())) {
+      if (current.app.recordingPriority) {
+        await saveSettings({ ...current, app: { ...current.app, recordingPriority: false } });
+      }
+      if (stoppedElevated || core.launchMode === "priority") await core.restart();
+      return recordingPriority.refresh();
+    }
     await saveSettings({ ...current, app: { ...current.app, recordingPriority: true } });
     recordingPriority.noteMessage(null);
     await core.restart();
@@ -815,7 +835,12 @@ async function exportDiagnostics(): Promise<string | null> {
   const result = win && !win.isDestroyed() ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
   if (result.canceled || !result.filePath) return null;
   const state = core.ready ? await core.invoke("state.get", {}, 5000).catch(() => null) as CoreState | null : null;
-  if (state?.perf) coreSession = state.perf.session;
+  if (state?.perf) {
+    lastCoreSession = state.perf.session;
+    recordingPriority.noteCoreSession(state.perf.session);
+  }
+  // Re-check the task and protected runtime so the bundle shows current facts.
+  const priorityStatus = await recordingPriority.refresh().catch(() => recordingPriority.status());
   const cpus = os.cpus();
   const settings = getSettings();
   const systemInfo = {
@@ -830,10 +855,12 @@ async function exportDiagnostics(): Promise<string | null> {
       refreshHz: display.displayFrequency, internal: display.internal,
     })),
     settings: { capture: settings.capture, video: settings.video, replay: settings.replay, audioSources: settings.audio.sources.length, app: { recordingPriority: settings.app.recordingPriority, hardwareAcceleration: settings.app.hardwareAcceleration } },
-    recordingPriority: recordingPriority.status(),
+    recordingPriority: priorityStatus,
+    recordingPrioritySummary: recordingPriorityDiagnostics(priorityStatus, core.launchMode, state?.perf.session ?? null,
+      state?.perf.latest ?? perfTimeline?.recent().at(-1) ?? null),
     core: state
       ? { version: state.version, capture: state.capture, ring: state.ring, recording: state.recording, launchMode: core.launchMode, perf: state.perf }
-      : { connected: false, launchMode: core.launchMode, lastSession: coreSession, fatal: coreFatal },
+      : { connected: false, launchMode: core.launchMode, lastSession: lastCoreSession, fatal: coreFatal },
   };
   const recentClips = library.list().slice(0, 50).map(clip => ({
     file: path.basename(clip.path), createdAt: new Date(clip.createdAt).toISOString(), durationMs: clip.durationMs,

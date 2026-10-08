@@ -75,9 +75,16 @@ Install dependencies with `npm ci --prefix app` when setting up the checkout
 or after dependency changes; do not reinstall them for every verification run.
 The artifact gate checks SHA-512 against `latest.yml`, inspects `app.asar` and
 the embedded `app-update.yml`, and reruns the core payload gate on the packaged
-runtime, including the core's Windows version resource. The FFmpeg fetch uses a versioned upstream full-build archive and a
-fixed SHA-256; update both together when changing dependencies. It never
-trusts a moving `latest` download or bypasses a checksum mismatch.
+runtime, including the core's Windows version resource. The FFmpeg fetch uses a
+versioned upstream shared-build archive and a fixed SHA-256; update both together
+when changing dependencies. It never trusts a moving `latest` download or
+bypasses a checksum mismatch.
+
+The release scope finishes with `npm run size-report`, which prints download size,
+installed size by component group (Electron/Chromium, Shard app, native npm
+modules, FFmpeg, OBS/core) and the largest files, and writes
+`release/size-report.json` (also uploaded with the CI build artifacts). Compare
+two builds with `node scripts/size-report.mjs <releaseDir> --compare <old.json>`.
 
 Updater tests include isolated state/lifecycle tests and the actual NSIS
 updater against a localhost YAML feed: version precedence, download opt-in,

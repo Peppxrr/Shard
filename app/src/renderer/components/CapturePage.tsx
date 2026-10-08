@@ -1,10 +1,11 @@
 import { KeyCaps } from "./HotkeyControls";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipRecord, CoreState, PerfSample, Settings } from "../../shared/contracts";
 import { fmtDuration, fmtSize, relativeDate, Viewer } from "./LibraryPage";
 import { Button, Card, EmptyState, Icon, Segmented, StatusDot } from "./ui";
 import { mediaFileUrl } from "../editor/VideoPreview";
 import { StorageSummary } from "./StorageSummary";
+import { ClipSaveTracker } from "../../shared/clip-saves";
 
 interface Props {
   settings: Settings;
@@ -31,18 +32,37 @@ const PRESET_LABEL: Record<string, string> = {
   custom: "Custom",
 };
 type Dur = "30" | "60" | "120" | "300";
+// Spinner failsafe only: no clip-save event at all for this long, far beyond any normal save.
+const CLIP_SAVE_STALL_MS = 5 * 60 * 1000;
 
 interface Subject { kind: "monitor" | "game" | "none"; name: string | null }
 
-export function CapturePage({ settings, clips }: Props) {
+// Memoized: it refreshes from its own core-event subscription, not from App state.
+export const CapturePage = memo(function CapturePage({ settings, clips }: Props) {
   const [ringSeconds, setRingSeconds] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
   const [subject, setSubject] = useState<Subject | null>(null);
-  const [saving, setSaving] = useState(false);
+  // Accepted saves stay pending until their terminal core event; a save can
+  // take well over 30 s (encoder catch-up, then muxing and disk I/O).
+  const [clipSaves] = useState(() => new ClipSaveTracker());
+  const [pendingSaves, setPendingSaves] = useState(0);
+  const [requesting, setRequesting] = useState(0); // clip.save calls awaiting their reply
+  const stallTimer = useRef<number | undefined>(undefined);
+  const saving = requesting > 0 || pendingSaves > 0;
   const [dur, setDur] = useState<Dur>("60");
   const [recent, setRecent] = useState<ClipRecord | null>(null);
   const [perf, setPerf] = useState<PerfSample | null>(null);
   const recentGrid = useRef<HTMLDivElement>(null);
+  // Failsafe only, for a lost core connection that never reports a result or
+  // restarts: no clip-save event for this long ends the spinner.
+  const syncSaves = () => {
+    setPendingSaves(clipSaves.size);
+    window.clearTimeout(stallTimer.current);
+    stallTimer.current = clipSaves.size
+      ? window.setTimeout(() => { clipSaves.clear(); setPendingSaves(0); }, CLIP_SAVE_STALL_MS)
+      : undefined;
+  };
+  useEffect(() => () => window.clearTimeout(stallTimer.current), []);
   const [recentCapacity, setRecentCapacity] = useState(0);
   const hasClips = clips.length > 0;
 
@@ -75,8 +95,9 @@ export function CapturePage({ settings, clips }: Props) {
       else if (type === "ring.stats") setRingSeconds((params as { secondsBuffered: number }).secondsBuffered);
       else if (type === "recording.state") setRecording((params as { active: boolean }).active);
       else if (type === "capture.subject") setSubject(params as unknown as Subject);
-      else if (type === "clip.saved") setSaving(false);
       else if (type === "perf.stats") setPerf(params as unknown as PerfSample); // core contract shape
+      // Hotkey saves show the spinner too.
+      if (clipSaves.apply(type, params)) syncSaves();
     });
   }, []);
 
@@ -91,9 +112,11 @@ export function CapturePage({ settings, clips }: Props) {
   const resLabel = v.width && v.height ? `${v.width}×${v.height}` : "—";
 
   const saveClip = () => {
-    setSaving(true);
-    window.setTimeout(() => setSaving(false), 6000);
-    void window.shard.invoke("clip.save", { durationSec: Number(dur) }).catch(() => setSaving(false));
+    setRequesting(count => count + 1);
+    void window.shard.invoke("clip.save", { durationSec: Number(dur) })
+      .then(result => { clipSaves.queued((result as { request?: number } | null)?.request); syncSaves(); })
+      .catch(() => {})
+      .finally(() => setRequesting(count => count - 1));
   };
   const toggleRecord = () => {
     void window.shard.invoke(recording ? "recording.stop" : "recording.start").catch(() => {});
@@ -212,4 +235,4 @@ export function CapturePage({ settings, clips }: Props) {
 
     </div>
   );
-}
+});

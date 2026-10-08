@@ -11,13 +11,16 @@ const Module = require("node:module");
 const ts = require("typescript");
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+// The Recording priority helper is never spawned by these tests.
+const STUBS = { "./bundled-processes": { spawn() { throw new Error("helper processes are not available in tests"); } } };
+
 function loadTs(file) {
   const absolute = path.resolve(appDir, file);
   const loaded = new Module(absolute);
   loaded.filename = absolute;
   loaded.paths = Module._nodeModulePaths(path.dirname(absolute));
   const originalRequire = loaded.require.bind(loaded);
-  loaded.require = id => id === "../shared/dev-console" ? loadTs("src/shared/dev-console.ts") : originalRequire(id);
+  loaded.require = id => id === "../shared/dev-console" ? loadTs("src/shared/dev-console.ts") : STUBS[id] ?? originalRequire(id);
   const source = require("node:fs").readFileSync(absolute, "utf8");
   const compiled = ts.transpileModule(source, {
     compilerOptions: {
@@ -61,6 +64,66 @@ assert.deepEqual(filterDevConsoleLines(records, { source: "all", severity: "info
 assert.deepEqual(filterDevConsoleLines(records, { source: "all", severity: "warn", query: "marker" }).map(line => line.id), [3]);
 assert.match(serializeDevConsoleLines(records.slice(1, 2)), /\[core\.stdout\] \[info\] PORT 4521/);
 
+// Recording priority is active only when the elevated core applied libobs
+// GPU priority; anything else enabled is inactive with a stated reason.
+const { recordingPriorityEffect } = loadTs("src/shared/recording-priority.ts");
+const priority = { enabled: true, supported: true, installed: true, current: true, coreElevated: true, gpuPriority: "set", gpuVendor: "nvidia", busy: false, message: null };
+assert.deepEqual(recordingPriorityEffect(priority), { state: "active", problem: null });
+assert.deepEqual(recordingPriorityEffect({ ...priority, gpuPriority: "failed" }), { state: "inactive", problem: "gpu_priority_failed" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, gpuPriority: "unknown", gpuVendor: "intel" }), { state: "inactive", problem: "gpu_priority_unsupported" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, gpuPriority: "unknown" }), { state: "inactive", problem: "gpu_priority_unknown" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, current: false }), { state: "inactive", problem: "task_stale" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, installed: false, current: false }), { state: "inactive", problem: "not_installed" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, gpuPriority: "unknown" }), { state: "inactive", problem: "core_not_elevated" });
+assert.deepEqual(recordingPriorityEffect({ ...priority, coreElevated: false, gpuPriority: "unknown", gpuVendor: null }), { state: "inactive", problem: null }); // core starting
+assert.equal(recordingPriorityEffect({ ...priority, enabled: false }).state, "off");
+assert.equal(recordingPriorityEffect({ ...priority, busy: true }).state, "busy");
+// A running elevated core that applied GPU priority stays effective even if
+// its task has since become stale (e.g. Shard updated while it runs).
+assert.equal(recordingPriorityEffect({ ...priority, current: false }).state, "active");
+
+// Active only for the connected core: an elevated session followed by the
+// core exiting (crash or restart) is no longer Active, and the change is published.
+if (process.platform === "win32") {
+  const { RecordingPriority } = loadTs("src/main/recording-priority.ts");
+  const live = new RecordingPriority({ launchPaths: () => ({ bin: "", configDir: "", games: "" }), enabled: () => true, parentWindow: () => null });
+  const published = [];
+  live.on("status", status => published.push(recordingPriorityEffect(status).state));
+  const session = (elevated, gpuPriority) => ({ elevated, gpuPriority, adapter: { name: "GPU", vendor: "nvidia", driver: "1" } });
+  live.noteCoreSession(session(true, "set"));
+  assert.equal(recordingPriorityEffect(live.status()).state, "active");
+  live.noteCoreSession(null); // core exited
+  assert.equal(live.status().coreElevated, false);
+  assert.equal(live.status().gpuPriority, "unknown");
+  assert.equal(recordingPriorityEffect(live.status()).state, "inactive");
+  live.noteCoreSession(session(false, "failed")); // restarted normally (task fallback)
+  assert.equal(recordingPriorityEffect(live.status()).state, "inactive");
+  live.noteCoreSession(session(true, "set")); // restarted through the task
+  assert.equal(recordingPriorityEffect(live.status()).state, "active");
+  live.noteCoreSession(session(true, "set")); // same session again: no duplicate publish
+  assert.deepEqual(published, ["active", "inactive", "inactive", "active"]);
+}
+
+// Clip saves stay pending until their own terminal event, however long the
+// save takes; a result that beats the clip.save reply does not re-open it.
+const { ClipSaveTracker } = loadTs("src/shared/clip-saves.ts");
+const saves = new ClipSaveTracker();
+saves.apply("clip.queued", { request: 1 });
+saves.apply("clip.queued", { request: 2 });
+assert.equal(saves.apply("error", { message: "unrelated" }), false);
+saves.apply("clip.saved", { request: 1 });
+assert.equal(saves.size, 1);
+saves.apply("error", { request: 2, message: "Save failed" });
+assert.equal(saves.size, 0);
+saves.apply("clip.dropped", { request: 3 });
+saves.queued(3); // late clip.save reply for an already-finished request
+assert.equal(saves.size, 0);
+saves.apply("clip.queued", { request: 4 });
+saves.apply("ready", {}); // restarted core: nothing queued, ids restart
+assert.equal(saves.size, 0);
+saves.queued(1);
+assert.equal(saves.size, 1);
+
 const root = await mkdtemp(path.join(tmpdir(), "shard-dev-console-"));
 try {
   const child = spawn(electron, [path.join(appDir, "scripts/test-dev-console.cjs"), root], {
@@ -74,7 +137,7 @@ try {
     child.once("exit", (exitCode, signal) => signal ? reject(new Error("Developer console test helper exited from " + signal)) : resolve(exitCode));
   });
   assert.equal(code, 0, "developer console main-process filesystem harness");
-  console.log("PASS developer console line decoding, classification, filtering, serialization, and session logging");
+  console.log("PASS developer console line decoding, classification, filtering, serialization, session logging, and Recording priority state");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

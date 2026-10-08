@@ -8,7 +8,7 @@ User settings, libraries, recordings, and clips live outside the installation.
 ## Choosing a new runtime
 
 `runtime-dependencies.json` selects the OBS version, official hook payload directory,
-OBS dependency bundle/DLL list, and the static FFmpeg archive URL and SHA-256.
+OBS dependency bundle/DLL list, and the shared FFmpeg archive URL, SHA-256 and DLL list.
 The OBS submodule and its official payload's `manifest.json` pin the exact OBS commit.
 Both must match; changing a version string alone is intentionally insufficient.
 The packaged runtime includes its selected pins for diagnosis.
@@ -24,11 +24,18 @@ The packaged runtime includes its selected pins for diagnosis.
 3. Update `runtime-dependencies.json` to the selected version and payload directory.
    Match its OBS dependency directory and DLL list to that OBS release's pinned
    `buildspec.json`. Review staging targets/plugin data and required-file gates
-   if upstream renames or adds runtime components.
-4. To change standalone FFmpeg, update its version, versioned URL, archive
-   directory and SHA-256 together, then run `scripts/fetch-ffmpeg.ps1`.
-   The fetch verifies the archive before writing a provenance record; stale or
-   missing provenance blocks packaging. No moving `latest` URLs are used.
+   if upstream renames or adds runtime components. libobs loads every module in
+   `obs-plugins/64bit`, so `scripts/build.ps1` stages only the modules the core
+   uses and `app/scripts/verify-core-bin.mjs` rejects any other module.
+4. To change the editor/export FFmpeg, update its version, versioned URL, archive
+   directory, SHA-256 and `runtimeDlls` together, then run `scripts/fetch-ffmpeg.ps1`.
+   Use a *shared* build: `ffmpeg.exe` and `ffprobe.exe` then share one copy of the
+   codec libraries. It is staged in `core-bin/ffmpeg`, apart from OBS's FFmpeg
+   DLLs, and must provide the encoders the editor offers (`app/src/main/ffmpeg.ts`)
+   plus dav1d for AV1 previews. The fetch verifies the archive before writing a
+   provenance record; stale or missing provenance blocks packaging. No moving
+   `latest` URLs are used. OBS's own FFmpeg CLI was evaluated as a replacement
+   and rejected: it lacks dav1d, x265 and Quick Sync.
 5. Run `scripts/build.ps1 -Clean` for an OBS/dependency upgrade to discard upstream
    incremental build data, then `npm --prefix app run verify -- release capture`.
    Exercise game hooks, subject switching and minimized capture when OBS changes.

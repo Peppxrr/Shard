@@ -55,11 +55,13 @@ if (release || scopes.includes("storage")) {
 
 if (release || scopes.some(scope => scope === "core" || scope === "capture")) {
   ps("core-build", "scripts/build.ps1", "-Config", config);
-  add("core-test-build", "cmake", ["--build", "build_x64", "--config", config, "--target", "shard_tests", "shard_capture_resilience_tests", "shard_audio_isolation_tests", "shard_perf_tests", "--parallel"]);
+  add("core-test-build", "cmake", ["--build", "build_x64", "--config", config, "--target", "shard_tests", "shard_capture_resilience_tests", "shard_audio_isolation_tests", "shard_perf_tests", "shard_priority_tests", "shard_save_queue_tests", "--parallel"]);
   add("detection-tests", path.join(root, "build_x64", config, "shard_tests.exe"), []);
   add("capture-unit-tests", path.join(root, "build_x64", config, "shard_capture_resilience_tests.exe"), []);
   add("audio-isolation-tests", path.join(root, "build_x64", config, "shard_audio_isolation_tests.exe"), []);
   add("perf-tests", path.join(root, "build_x64", config, "shard_perf_tests.exe"), []);
+  add("priority-tests", path.join(root, "build_x64", config, "shard_priority_tests.exe"), []);
+  add("save-queue-tests", path.join(root, "build_x64", config, "shard_save_queue_tests.exe"), []);
 }
 if (scopes.includes("capture")) {
   const bin = path.join(root, "app/resources", release ? "core-bin" : "core-bin-dev");
@@ -68,6 +70,8 @@ if (scopes.includes("capture")) {
 if (release) {
   npm("package", "package");
   npm("release-artifacts", "verify:release");
+  // Prints download/installed sizes by component and writes release/size-report.json.
+  npm("size-report", "size-report");
 }
 console.log(`Verification: ${scopes.join(", ")}${planOnly ? " (plan only)" : ""}`);
 if (planOnly) {

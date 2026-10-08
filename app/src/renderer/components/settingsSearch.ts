@@ -1,4 +1,4 @@
-import type { SettingsSection } from "./SettingsPage";
+import type { SettingsSection } from "./settingsSections";
 
 export interface SettingsSearchResult {
   section: SettingsSection;

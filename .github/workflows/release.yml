@@ -55,6 +55,7 @@ jobs:
             app/release/latest.yml
             app/release/SHA256SUMS.txt
             app/release/release-notes.md
+            app/release/size-report.json
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')

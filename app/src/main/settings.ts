@@ -9,10 +9,6 @@ import { DEFAULT_SETTINGS, type Settings } from "../shared/contracts";
 let settings: Settings = structuredClone(DEFAULT_SETTINGS);
 let settingsPath = "";
 
-export function settingsFile(): string {
-  return settingsPath;
-}
-
 export async function loadSettings(): Promise<Settings> {
   settingsPath = path.join(app.getPath("userData"), "settings.json");
   try {
@@ -35,24 +31,9 @@ export async function saveSettings(next: Settings): Promise<void> {
   await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
 }
 
-// Core-facing slices (config.set payloads).
-export function coreAudioPayload(s: Settings) {
-  return { audio: { sources: s.audio.sources } };
-}
-export function coreCapturePayload(s: Settings) {
-  return { capture: s.capture };
-}
-export function coreVideoPayload(s: Settings) {
-  return { video: s.video };
-}
-export function coreReplayPayload(s: Settings) {
-  return { replay: s.replay };
-}
+// The core's game slice also carries the games.json path (config.set payload).
 export function coreGamePayload(s: Settings) {
   return { game: { ...s.game, gamesPath: gamesJsonPath() } };
-}
-export function coreStoragePayload(s: Settings) {
-  return { storage: { limitGb: s.storage.limitGb, clipsDir: s.storage.clipsDir } };
 }
 
 function normalizeSettings(next: Settings): Settings {

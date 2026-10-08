@@ -54,7 +54,7 @@ const continuityOutputSize = [960, 540];
 const recordingTest = continuityTest || process.env.CF_GC_RECORDING === "1";
 const recordingPaths = new Set();
 const coreExe = path.join(coreBin, "shardcore.exe");
-const ffmpegExe = path.join(coreBin, "ffmpeg.exe");
+const ffmpegExe = path.join(coreBin, "ffmpeg", "ffmpeg.exe");
 const privateHookDir = path.join(coreBin, "data/obs-plugins/win-capture");
 const runtimePins = JSON.parse(fs.readFileSync(path.join(root, "runtime-dependencies.json"), "utf8"));
 const payloadManifestPath = path.join(root, runtimePins.obs.hookPayload, "manifest.json");
@@ -507,7 +507,7 @@ try {
     if (continuityTest) {
       if ((saved.actualSec ?? 0) < 2.5)
         throw new Error(`continuity clip contains too little buffered history: ${saved.actualSec ?? 0}s`);
-      const probe = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
+      const probe = spawnSync(path.join(coreBin, "ffmpeg", "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=width,height", "-of", "json", saved.path], {encoding:"utf8"});
       if (probe.status !== 0) throw new Error(`continuity clip probe failed: ${probe.stderr}`);
       const stream = JSON.parse(probe.stdout).streams[0];
@@ -516,7 +516,7 @@ try {
       log(`continuity clip ${stream.width}x${stream.height}, ${saved.actualSec.toFixed(2)}s`);
     }
     if (geometryTest) {
-      const probe = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
+      const probe = spawnSync(path.join(coreBin, "ffmpeg", "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=width,height", "-of", "json", saved.path], {encoding:"utf8"});
       const stream = JSON.parse(probe.stdout).streams[0];
       if (stream.width !== expectedSize[0] || stream.height !== expectedSize[1])
@@ -552,7 +552,7 @@ try {
     await stopped;
     const sizes = [];
     for (const recording of recordingPaths) {
-      const info = spawnSync(path.join(coreBin, "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
+      const info = spawnSync(path.join(coreBin, "ffmpeg", "ffprobe.exe"), ["-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=width,height", "-of", "json", recording], {encoding:"utf8"});
       if (info.status !== 0) throw new Error(`recording probe failed: ${info.stderr}`);
       const stream = JSON.parse(info.stdout).streams[0];

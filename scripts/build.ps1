@@ -169,10 +169,11 @@ if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
 
 Write-Host "==> Building core + OBS plugins =="
 # obs-studio's own targets; shardcore links libobs, the rest are shipped plugins.
+# Only modules whose sources/encoders/outputs the core creates are built and
+# staged: libobs loads every DLL in obs-plugins at startup.
 $targets = @(
   "shardcore", "libobs-d3d11", "libobs-winrt", "obs-ffmpeg-mux", "obs-nvenc-test",
-  "win-capture", "win-wasapi", "obs-x264", "obs-nvenc",
-  "obs-ffmpeg", "obs-outputs", "obs-filters", "image-source", "text-freetype2"
+  "win-capture", "win-wasapi", "obs-x264", "obs-nvenc", "obs-ffmpeg"
 )
 cmake --build $buildDir --config $config --target $targets --parallel
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed ($LASTEXITCODE)" }
@@ -193,7 +194,6 @@ if (-not (Test-Path $shardcoreExe)) {
     Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $shardcoreExe -or -not (Test-Path $shardcoreExe)) { throw "shardcore.exe not found for config $config" }
-Remove-Item (Join-Path $stageDir "clipcore.exe") -Force -ErrorAction SilentlyContinue
 Copy-Item $shardcoreExe (Join-Path $stageDir "shardcore.exe") -Force
 
 # 2. runtime DLLs + ffmpeg-mux helper next to the exe
@@ -230,11 +230,9 @@ foreach ($dll in $pins.obs.runtimeDlls) {
   if (Test-Path $src) { Copy-Item $src (Join-Path $stageDir $dll) -Force }
 }
 
-# 3. plugins
-$shipPlugins = @(
-  "win-capture", "win-wasapi", "obs-x264", "obs-nvenc",
-  "obs-ffmpeg", "obs-outputs", "obs-filters", "image-source", "text-freetype2"
-)
+# 3. plugins: capture sources (win-capture, win-wasapi), encoders (obs-x264,
+# obs-nvenc, obs-ffmpeg AMF/AAC) and the ffmpeg_muxer recording output.
+$shipPlugins = @("win-capture", "win-wasapi", "obs-x264", "obs-nvenc", "obs-ffmpeg")
 $pluginDest = Join-Path $stageDir "obs-plugins/64bit"
 New-Item -ItemType Directory -Force $pluginDest | Out-Null
 foreach ($p in $shipPlugins) {
@@ -294,17 +292,24 @@ if (Test-Path $libobsDataSrc) {
   Copy-Item $libobsDataSrc (Join-Path $stageDir "data") -Recurse -Force
 }
 
-# 5. ffmpeg binaries (static win64 build) if fetched
+# The core starts libobs with the en-US locale; other translations are never read.
+Get-ChildItem (Join-Path $stageDir "data") -Recurse -File -Filter *.ini |
+  Where-Object { $_.Directory.Name -eq "locale" -and $_.Name -ne "en-US.ini" } |
+  Remove-Item -Force
+
+# 6. Editor/export FFmpeg tools (pinned shared build) in their own directory:
+# its DLLs never mix with OBS's FFmpeg DLLs in the core-bin root.
 $ffmpegBin = Join-Path $root "vendor/ffmpeg/bin"
 $ffmpegPinsPath = Join-Path $root "vendor/ffmpeg/pins.json"
 if (-not (Test-Path $ffmpegPinsPath) -or
     ((Get-Content $ffmpegPinsPath -Raw | ConvertFrom-Json | ConvertTo-Json -Compress) -ne ($pins.ffmpeg | ConvertTo-Json -Compress))) {
   throw "FFmpeg pins changed or provenance missing. Run scripts/fetch-ffmpeg.ps1 first."
 }
-Copy-Item $ffmpegPinsPath (Join-Path $stageDir "ffmpeg-pins.json") -Force
-if (Test-Path (Join-Path $ffmpegBin "ffmpeg.exe")) {
-  Copy-Item (Join-Path $ffmpegBin "ffmpeg.exe") (Join-Path $stageDir "ffmpeg.exe") -Force
-  Copy-Item (Join-Path $ffmpegBin "ffprobe.exe") (Join-Path $stageDir "ffprobe.exe") -Force
+$ffmpegStage = Join-Path $stageDir "ffmpeg"
+New-Item -ItemType Directory -Force $ffmpegStage | Out-Null
+Copy-Item $ffmpegPinsPath (Join-Path $ffmpegStage "pins.json") -Force
+foreach ($name in @("ffmpeg.exe", "ffprobe.exe", "LICENSE.txt", "README.txt") + @($pins.ffmpeg.runtimeDlls)) {
+  Copy-Item -LiteralPath (Join-Path $ffmpegBin $name) (Join-Path $ffmpegStage $name) -Force
 }
 
 Copy-Item $pinsPath (Join-Path $stageDir "runtime-dependencies.json") -Force

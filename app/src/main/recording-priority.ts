@@ -5,7 +5,7 @@
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import { spawn } from "./bundled-processes";
-import type { RecordingPriorityStatus } from "../shared/contracts";
+import type { PerfSession, RecordingPriorityStatus } from "../shared/contracts";
 
 interface HelperResult {
   code: number | null;
@@ -31,8 +31,14 @@ export interface RecordingPriorityOptions {
   // Identical to the core launch (CoreClient.launchPaths).
   launchPaths: () => { bin: string; configDir: string; games: string };
   enabled: () => boolean;
-  coreSession: () => { elevated: boolean; gpuPriority: RecordingPriorityStatus["gpuPriority"] } | null;
   parentWindow: () => string | null;
+}
+
+// What the connected core reported about itself.
+interface LiveSession {
+  elevated: boolean;
+  gpuPriority: RecordingPriorityStatus["gpuPriority"];
+  gpuVendor: string;
 }
 
 export class RecordingPriority extends EventEmitter {
@@ -40,13 +46,16 @@ export class RecordingPriority extends EventEmitter {
   private installed = false;
   private current = false;
   private message: string | null = null;
+  // Only the currently connected core's session: cleared when it exits or
+  // disconnects, so a crashed or restarting elevated core never reads Active.
+  private session: LiveSession | null = null;
 
   constructor(private readonly options: RecordingPriorityOptions) {
     super();
   }
 
   status(): RecordingPriorityStatus {
-    const session = this.options.coreSession();
+    const session = this.session;
     return {
       enabled: this.options.enabled(),
       supported: process.platform === "win32",
@@ -54,9 +63,22 @@ export class RecordingPriority extends EventEmitter {
       current: this.current,
       coreElevated: session?.elevated ?? false,
       gpuPriority: session?.gpuPriority ?? "unknown",
+      gpuVendor: session?.gpuVendor ?? null,
       busy: this.busy,
       message: this.message,
     };
+  }
+
+  // A core became ready (`session`) or went away (null). Publishes on change.
+  noteCoreSession(session: PerfSession | null): void {
+    const next: LiveSession | null = session
+      ? { elevated: session.elevated, gpuPriority: session.gpuPriority, gpuVendor: session.adapter.vendor }
+      : null;
+    const previous = this.session;
+    if (previous === next || (previous && next && previous.elevated === next.elevated &&
+      previous.gpuPriority === next.gpuPriority && previous.gpuVendor === next.gpuVendor)) return;
+    this.session = next;
+    this.publish();
   }
 
   async refresh(): Promise<RecordingPriorityStatus> {
@@ -80,7 +102,7 @@ export class RecordingPriority extends EventEmitter {
     this.publish();
   }
 
-  // Registers the task (one UAC prompt). Resolves false when declined/failed.
+  // Registers the task (UAC prompt). Resolves false when declined/failed.
   async install(): Promise<boolean> {
     return this.change("install");
   }

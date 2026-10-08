@@ -49,7 +49,7 @@ try {
   const preload = require("typescript").transpileModule(readFileSync(new URL("../src/main/preload.ts", import.meta.url), "utf8"), {
     compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS },
   }).outputText;
-  vm.runInNewContext(preload, { exports: {}, process: { platform: "win32" }, require: name => {
+  vm.runInNewContext(preload, { exports: {}, process: { platform: "win32", argv: [] }, require: name => {
     assert.equal(name, "electron");
     return { contextBridge: { exposeInMainWorld: (name, api) => { bridges[name] = api; } }, ipcRenderer: ipc };
   } });
@@ -193,7 +193,7 @@ try {
   const owned = new OwnedProcesses(), media = new EventEmitter();
   media.exitCode = null; media.signalCode = null; media.pid = 123; let signalled = 0;
   media.kill = () => { signalled++; return true; };
-  owned.track(media, "resources/core-bin/ffmpeg.exe");
+  owned.track(media, "resources/core-bin/ffmpeg/ffmpeg.exe");
   let updateCleanups = 0, recovered = 0;
   const updateLife = new ShutdownLifecycle({ guard: async () => null,
     cleanup: async update => { assert.equal(update, true); updateCleanups++; await owned.stop(); },
@@ -218,7 +218,7 @@ try {
   // A timeout refuses handoff without losing the tracked handle; retry can
   // complete once that exact process closes. Spawn failures close too.
   const stubborn = new EventEmitter(); stubborn.pid = 456; stubborn.exitCode = null; stubborn.signalCode = null;
-  stubborn.kill = () => true; owned.track(stubborn, "resources/core-bin/ffprobe.exe");
+  stubborn.kill = () => true; owned.track(stubborn, "resources/core-bin/ffmpeg/ffprobe.exe");
   await assert.rejects(owned.stop(10), /timed out/); assert.equal(owned.size, 1);
   stubborn.emit("close", 1); await owned.stop(); assert.equal(owned.size, 0);
   owned.resume();
@@ -296,7 +296,7 @@ try {
   const resourceChild = new EventEmitter();
   resourceChild.pid = 777; resourceChild.exitCode = null; resourceChild.signalCode = null;
   let resourceKilled = false; resourceChild.kill = () => { resourceKilled = true; return true; };
-  resourceOwned.track(resourceChild, "resources/core-bin/ffmpeg.exe");
+  resourceOwned.track(resourceChild, "resources/core-bin/ffmpeg/ffmpeg.exe");
   class ResourceLibrary extends EventEmitter {
     constructor() { super(); resourceCounts.dbOpened++; }
     async stopWatching() { await libraryWatchDrain.promise; resourceCounts.libraryWatchStopped++; }

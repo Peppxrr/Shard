@@ -116,6 +116,7 @@ add_executable(shardcore
   src/gpu_engines.cpp
   src/perf_monitor.cpp
   src/priority_task.cpp
+  src/priority_runtime.cpp
   src/app.cpp
   src/config.cpp
   src/audio_isolation.cpp
@@ -223,3 +224,14 @@ if(WIN32)
   target_compile_definitions(shard_perf_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(shard_perf_tests PRIVATE pdh.lib)
 endif()
+
+# Recording priority identity decisions, plus the protected runtime copy,
+# manifest and swap recovery against temporary directories; no COM or UAC.
+add_executable(shard_priority_tests tests/priority_policy_test.cpp src/priority_runtime.cpp)
+target_include_directories(shard_priority_tests PRIVATE src)
+target_link_libraries(shard_priority_tests PRIVATE nlohmann_json::nlohmann_json)
+
+# Replay-save acceptance/worker lifecycle (clip.queued -> exactly one terminal
+# event, also across concurrent stop/restart); no OBS.
+add_executable(shard_save_queue_tests tests/save_queue_test.cpp)
+target_include_directories(shard_save_queue_tests PRIVATE src)

@@ -97,6 +97,32 @@ int main()
   drainWindow.backlog = 5;
   assert(classifyWithBacklog(drainWindow, PerfCause::GpuStarved, true) == PerfCause::EncoderOverloaded);
 
+  // Mostly GPU-starved loss: render lag and texture-queue stalls at 98 % 3D.
+  assert(classifyFrameLoss(totals({slice(0, 15, 4, 3, 98, 10), slice(250, 15, 5, 4, 99, 10),
+                                   slice(500, 15, 1, 0, 60, 10)})) == PerfCause::GpuStarved);
+  // One brief GPU-starved slice, then most frames lost to render stalls with
+  // headroom: the window follows where the frames were lost.
+  WindowTotals briefSpike = totals({slice(0, 15, 2, 0, 99), slice(250, 15, 6, 0, 45), slice(500, 15, 7, 0, 40),
+                                    slice(750, 15, 5, 0, 50)});
+  assert(briefSpike.lostGpu == 2 && briefSpike.lostRender == 18);
+  assert(classifyFrameLoss(briefSpike) == PerfCause::RenderStall);
+  // Encoder saturation: stalls with the video encode engine pinned, even
+  // while the game also loads the 3D engine.
+  WindowTotals encoderBound = totals({slice(0, 15, 0, 6, 95, 99), slice(250, 15, 0, 8, 92, 97), slice(500, 15, 1, 0, 95, 40)});
+  assert(encoderBound.lostEncoder == 14 && encoderBound.lostGpu == 1);
+  assert(classifyFrameLoss(encoderBound) == PerfCause::EncoderOverloaded);
+  // GPU starvation fills the queue; once the 3D engine drops, the stalls that
+  // drain that same queue stay GPU starvation...
+  WindowTotals drainAfterSpike = totals({slice(0, 15, 3, 10, 99, 20), slice(250, 15, 0, 12, 40, 60),
+                                         slice(500, 15, 0, 12, 35, 60), slice(750, 15, 0, 9, 30, 60)});
+  assert(drainAfterSpike.lostGpu == 46 && drainAfterSpike.lostEncoder == 0);
+  assert(classifyFrameLoss(drainAfterSpike) == PerfCause::GpuStarved);
+  // ...until a slice without loss shows the queue had room again.
+  WindowTotals drainedThenEncoder = totals({slice(0, 15, 0, 10, 99, 20), slice(250, 15, 0, 0, 40, 20),
+                                            slice(500, 15, 0, 12, 35, 20), slice(750, 15, 0, 12, 35, 20)});
+  assert(drainedThenEncoder.lostGpu == 10 && drainedThenEncoder.lostEncoder == 24);
+  assert(classifyFrameLoss(drainedThenEncoder) == PerfCause::EncoderOverloaded);
+
   assert(perfCauseHint(PerfCause::GpuStarved, false).find("Recording priority") != std::string::npos);
   assert(perfCauseHint(PerfCause::GpuStarved, true).find("Recording priority") == std::string::npos);
   assert(perfCauseHint(PerfCause::GpuStarved, false, true).find("catching up") != std::string::npos);

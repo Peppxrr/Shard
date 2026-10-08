@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs/promises');
-const { readFileSync } = require('node:fs');
+const { existsSync, readFileSync } = require('node:fs');
 const Module = require('node:module');
 const Database = require('better-sqlite3');
 const ts = require('typescript');
@@ -14,14 +14,12 @@ const stubs = {
   './settings': { getSettings: () => ({ storage: storageSettings }) },
   './ffmpeg': {
     ffprobeAsync: async file => ({ durationSec: 5, sizeBytes: (await fs.stat(file)).size, width: 640, height: 360, fps: 60 }),
-    ffprobe: () => ({ durationSec: 5, sizeBytes: 1, width: 640, height: 360, fps: 60 }),
     makeThumbnailAsync: async (_file, directory) => {
       await fs.mkdir(directory, { recursive: true });
       const thumbnail = path.join(directory, `thumb-${thumbNumber++}.jpg`);
       await fs.writeFile(thumbnail, 'thumbnail');
       return thumbnail;
     },
-    makeThumbnail: () => null,
     removeEditorMedia: async () => {},
     editorTimelinePreviews: () => ({ warm() {}, remove: async () => {} }),
   },
@@ -35,9 +33,8 @@ function loadTs(file) {
   const original = mod.require.bind(mod);
   mod.require = id => {
     if (id in stubs) return stubs[id];
-    if (id === '../shared/storage-policy') return loadTs('src/shared/storage-policy.ts');
-    if (id === '../shared/contracts') return loadTs('src/shared/contracts.ts');
-    if (id === './library-import') return loadTs('src/main/library-import.ts');
+    const source = path.resolve(path.dirname(absolute), `${id}.ts`);
+    if (id.startsWith('.') && existsSync(source)) return loadTs(source);
     return original(id);
   };
   mod._compile(ts.transpileModule(readFileSync(absolute, 'utf8'), {
