@@ -189,7 +189,7 @@ interface ModalProps {
   title?: ReactNode;
   sub?: ReactNode;
   size?: "sm" | "md" | "lg" | "full";
-  variant?: "clip-viewer" | "medal-import";
+  variant?: "clip-viewer" | "medal-import" | "export-result";
   children: ReactNode;
   foot?: ReactNode;
   closeOnBackdrop?: boolean;

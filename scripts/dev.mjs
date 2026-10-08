@@ -21,7 +21,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const appDir = path.join(root, "app");
 const coreBinDev = path.join(appDir, "resources", "core-bin-dev");
 const mainOut = path.join(appDir, "dist", "main", "main", "main.js");
-const viteUrl = "http://localhost:5173";
+const viteUrl = "http://127.0.0.1:5173";
 
 const isWin = process.platform === "win32";
 
@@ -77,16 +77,36 @@ process.on("exit", () => {
 });
 
 function startVite() {
-  if (vite) return;
-  log("starting vite dev server…");
-  // node_modules/vite/bin/vite.js — spawn directly, no shell indirection.
-  vite = spawn(process.execPath, [bin("vite/bin/vite.js")], { cwd: appDir, stdio: "inherit" });
-  vite.on("exit", (code) => {
-    vite = null;
-    if (!stopping) {
-      log(`vite exited (${code}) — restarting in 1s`);
-      setTimeout(startVite, 1000);
-    }
+  log(`starting vite dev server for ${appDir}…`);
+  // Wait for our server to bind. An occupied port must never send Electron
+  // to a renderer from a different checkout.
+  return new Promise((resolve, reject) => {
+    let ready = false;
+    let output = "";
+    const timeout = setTimeout(() => reject(new Error("Vite startup timed out")), 90000);
+    vite = spawn(process.execPath, [bin("vite/bin/vite.js"), "--host", "127.0.0.1", "--strictPort"], {
+      cwd: appDir, stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, NO_COLOR: "1" },
+    });
+    vite.stdout.on("data", (chunk) => {
+      process.stdout.write(chunk);
+      output = (output + chunk.toString()).slice(-4096);
+      if (!ready && output.includes(viteUrl)) {
+        ready = true;
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+    vite.on("error", (error) => { clearTimeout(timeout); reject(error); });
+    vite.on("exit", (code) => {
+      clearTimeout(timeout);
+      vite = null;
+      if (stopping) return;
+      if (!ready) reject(new Error(`Vite could not start (${code}). If port 5173 is occupied, stop the other dev runner first.`));
+      else {
+        log(`vite exited (${code}) — stopping this dev runner`);
+        stopAll(1);
+      }
+    });
   });
 }
 
@@ -164,8 +184,9 @@ async function main() {
     process.exit(1);
   }
 
+  log(`checkout: ${root}`);
   startTscWatch();
-  startVite();
+  await startVite();
   watchMainOutput();
 
   // Wait for the first main-process build, then launch Electron. tsc --watch

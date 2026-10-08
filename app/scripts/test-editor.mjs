@@ -5,7 +5,21 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { registerHooks } from "node:module";
-import {
+
+import { buildVideoEncoderArgs, pickExportResolution } from "../src/main/export-video.ts";
+import { existsSync, statSync } from "node:fs";
+import "./test-playback-diagnostics.mjs";
+
+const editorCacheDirectory = await mkdtemp(path.join(os.tmpdir(), "shard-editor-cache-test-"));
+registerHooks({ resolve(specifier, context, next) {
+  if (["./bundled-processes", "./timeline-previews", "./editor-preparation", "./waveform-cache", "../shared/timeline-export", "../../shared/timeline-export"].includes(specifier)) specifier += ".ts";
+  if (specifier === "electron") return {
+    url: `data:text/javascript,${encodeURIComponent(`export const app = { getPath: () => ${JSON.stringify(editorCacheDirectory)}, getAppPath: () => process.cwd() };`)}`,
+    shortCircuit: true,
+  };
+  return next(specifier, context);
+} });
+const {
   clipAt,
   clipEnd,
   commitHistory,
@@ -17,8 +31,11 @@ import {
   createEditorState,
   createHistory,
   deleteClip,
+  exportRange,
+  linkedClips,
   linkAudio,
   moveClip,
+  moveLinkedClips,
   outputDuration,
   pixelToTime,
   redoHistory,
@@ -27,25 +44,14 @@ import {
   snapTargets,
   splitAllTracks,
   splitClip,
+  splitLinkedClips,
   timeToPixel,
   trackClips,
   trimClip,
+  trimClipToPlayhead,
   undoHistory,
-} from "../src/renderer/editor/model.ts";
-import { buildExportGraph, exportTimelineDuration, resolveExportAudioTracks, validateTimelineClips } from "../src/main/export-graph.ts";
-import { buildVideoEncoderArgs, pickExportResolution } from "../src/main/export-video.ts";
-import { existsSync, statSync } from "node:fs";
-import "./test-playback-diagnostics.mjs";
-
-const editorCacheDirectory = await mkdtemp(path.join(os.tmpdir(), "shard-editor-cache-test-"));
-registerHooks({ resolve(specifier, context, next) {
-  if (["./bundled-processes", "./timeline-previews", "./editor-preparation", "./waveform-cache"].includes(specifier)) specifier += ".ts";
-  if (specifier === "electron") return {
-    url: `data:text/javascript,${encodeURIComponent(`export const app = { getPath: () => ${JSON.stringify(editorCacheDirectory)}, getAppPath: () => process.cwd() };`)}`,
-    shortCircuit: true,
-  };
-  return next(specifier, context);
-} });
+} = await import("../src/renderer/editor/model.ts");
+const { buildExportGraph, exportTimelineDuration, resolveExportAudioTracks, validateTimelineClips } = await import("../src/main/export-graph.ts");
 const { generateWaveform, prepareAudioPreview, removeEditorMedia } = await import("../src/main/ffmpeg.ts");
 const { encodeWaveform, decodeWaveform } = await import("../src/main/waveform-cache.ts");
 const { runEditorPreparation } = await import("../src/main/editor-preparation.ts");
@@ -150,10 +156,10 @@ assert.equal(clipEnd(state.videoClips[0]), 25, "an end cannot overlap the next c
 state = trimClip(state, "video", state.videoClips[1].id, "end", 80);
 assert.equal(state.videoClips[1].sourceEnd, 60, "an end cannot pass the source end");
 
-// Separated audio keeps its own clips; video edits no longer touch it.
+// Alt video trims leave separated audio alone; audio trims always leave video alone.
 let separated = separateAudio(createEditorState(30, audioTracks));
 const gameClip = separated.audioTracks[0].clips[0];
-separated = trimClip(separated, "video", separated.videoClips[0].id, "end", 20);
+separated = trimClip(separated, "video", separated.videoClips[0].id, "end", 20, true);
 assert.deepEqual(placement(separated.audioTracks[0].clips), [[0, 0, 30]], "trimming video leaves separated audio untrimmed");
 separated = trimClip(separated, 1, gameClip.id, "start", 4);
 assert.deepEqual(placement(separated.audioTracks[0].clips), [[4, 4, 30]]);
@@ -162,6 +168,52 @@ separated = moveClip(separated, 1, gameClip.id, 10);
 assert.equal(outputDuration(separated), 36, "an audio clip past the last video clip extends the output");
 assert.equal(trackClips(linkAudio(separated), 1), linkAudio(separated).videoClips, "linking makes audio follow the video clips");
 assert.deepEqual(placement(trackClips(createEditorState(30, audioTracks), 2)), [[0, 0, 30]]);
+
+// Video edges catch up to manual audio edges, crop reversibly, and respect manual audio edits.
+let soft = separateAudio(createEditorState(30, audioTracks));
+const softAudio = soft.audioTracks[0].clips[0].id;
+soft = trimClip(soft, 1, softAudio, "start", 5);
+soft = trimClip(soft, 1, softAudio, "end", 25);
+soft = trimClip(soft, "video", "clip-0", "start", 3);
+assert.deepEqual(placement(trackClips(soft, 1)), [[5, 5, 25]], "video edge waits until it catches the manual audio edge");
+soft = trimClip(soft, "video", "clip-0", "start", 8);
+soft = trimClip(soft, "video", "clip-0", "end", 20);
+assert.deepEqual(placement(trackClips(soft, 1)), [[8, 8, 20]], "video trims separated audio at both edges");
+soft = trimClip(soft, "video", "clip-0", "start", 2);
+soft = trimClip(soft, "video", "clip-0", "end", 29);
+assert.deepEqual(placement(trackClips(soft, 1)), [[5, 5, 25]], "reversing video trims restores only the audio's manual limits");
+soft = trimClip(soft, "video", "clip-0", "end", 18);
+soft = trimClip(soft, 1, softAudio, "start", 7);
+soft = trimClip(soft, "video", "clip-0", "end", 28);
+assert.deepEqual(placement(trackClips(soft, 1)), [[7, 7, 25]], "manual edits during a video crop preserve the opposite manual audio edge");
+const softBeforeAlt = placement(trackClips(soft, 1));
+soft = trimClip(soft, "video", "clip-0", "start", 12, true);
+assert.deepEqual(placement(trackClips(soft, 1)), softBeforeAlt, "Alt skips inherited audio trims");
+let hidden = separateAudio(createEditorState(30, audioTracks));
+hidden = trimClip(hidden, 1, hidden.audioTracks[0].clips[0].id, "end", 5);
+hidden = trimClip(hidden, "video", "clip-0", "start", 10);
+assert.equal(trackClips(hidden, 1).length, 0, "fully cropped audio is absent from playback and export");
+assert.equal(hidden.audioTracks[0].clips.length, 1, "hidden audio retains its restore range internally");
+hidden = trimClip(hidden, "video", "clip-0", "start", 0);
+assert.deepEqual(placement(trackClips(hidden, 1)), [[0, 0, 5]], "fully cropped audio restores when video is extended");
+let inherited = trimClip(createEditorState(30, audioTracks), "video", "clip-0", "end", 20);
+inherited = separateAudio(inherited);
+inherited = trimClip(inherited, "video", "clip-0", "end", 28);
+assert.deepEqual(placement(trackClips(inherited, 1)), [[0, 0, 28]], "separating rows retains reversible trims from linked mode");
+inherited = moveLinkedClips(inherited, "video", "clip-0", 5);
+inherited = trimClip(inherited, "video", "clip-0", "end", 35);
+assert.deepEqual(placement(trackClips(inherited, 1)), [[5, 0, 30]], "group moves also move remembered trim limits");
+const audioOnlyTrim = trimClip(createEditorState(30, audioTracks), 1, "clip-0", "start", 5);
+assert.deepEqual(placement(audioOnlyTrim.videoClips), [[0, 0, 30]], "editing audio from linked mode never trims video");
+assert.deepEqual(placement(trackClips(audioOnlyTrim, 1)), [[5, 5, 30]]);
+const altPlayheadTrim = trimClipToPlayhead(createEditorState(30, audioTracks), "video", "clip-0", 25, true);
+assert.deepEqual(placement(trackClips(altPlayheadTrim, 1)), [[0, 0, 30]], "Alt trim-to-playhead also leaves audio untouched");
+let splitAudioTrim = separateAudio(createEditorState(30, audioTracks));
+splitAudioTrim = splitClip(splitAudioTrim, 1, 10);
+splitAudioTrim = trimClip(splitAudioTrim, "video", "clip-0", "start", 12);
+assert.deepEqual(placement(trackClips(splitAudioTrim, 1)), [[12, 12, 30]], "independently split audio still follows video trimming");
+splitAudioTrim = trimClip(splitAudioTrim, "video", "clip-0", "start", 0);
+assert.deepEqual(placement(trackClips(splitAudioTrim, 1)), [[0, 0, 10], [10, 10, 30]], "restoring video retains manual audio split points");
 
 // S razors through every track under the playhead; tracks with nothing there are untouched.
 let razored = splitAllTracks(separated, 15);
@@ -179,6 +231,60 @@ assert.deepEqual(snapOffset([12], [0, 10, 25], 0.2), { offset: 0, target: null }
 const targets = snapTargets(separated, "video", separated.videoClips[0].id, 7);
 assert(targets.includes(7) && targets.includes(10) && targets.includes(36), "playhead and other tracks' edges are targets");
 assert(!targets.includes(20), "the dragged clip's own edges are not targets");
+
+// Group movement preserves independently edited offsets, bounded by every member's neighbours.
+let grouped = separateAudio(createEditorState(30, audioTracks));
+const videoId = grouped.videoClips[0].id;
+const gameId = grouped.audioTracks[0].clips[0].id;
+const micId = grouped.audioTracks[1].clips[0].id;
+grouped = moveLinkedClips(grouped, 1, gameId, 3, true);
+grouped = moveLinkedClips(grouped, 2, micId, 5, true);
+grouped = moveLinkedClips(grouped, "video", videoId, 10);
+assert.deepEqual([grouped.videoClips[0].timelineStart, ...grouped.audioTracks.map(track => track.clips[0].timelineStart)], [10, 13, 15]);
+assert.deepEqual(grouped.audioTracks.map(track => [track.clips[0].sourceStart, track.clips[0].sourceEnd]), [[0, 30], [0, 30]]);
+grouped = moveLinkedClips(grouped, 1, gameId, -5);
+assert.deepEqual([grouped.videoClips[0].timelineStart, ...grouped.audioTracks.map(track => track.clips[0].timelineStart)], [0, 3, 5], "zero clamps the group delta without changing offsets");
+assert.equal(linkedClips(grouped, 1, gameId).length, 3);
+const groupTargets = snapTargets(grouped, "video", videoId, 7, true);
+assert(groupTargets.includes(0) && groupTargets.includes(7));
+assert(!groupTargets.includes(3) && !groupTargets.includes(35), "moving members do not magnetize to their own old edges");
+assert(snapTargets(grouped, "video", videoId, 7).includes(3), "individual moves can snap to linked peers");
+
+const implicit = createEditorState(20, audioTracks);
+const independent = moveLinkedClips(implicit, "video", implicit.videoClips[0].id, 10, true);
+assert.equal(independent.audioLinked, false, "Alt drag materializes audio without discarding it");
+assert.deepEqual(placement(independent.videoClips), [[10, 0, 20]]);
+assert.deepEqual(placement(independent.audioTracks[0].clips), [[0, 0, 20]]);
+assert.deepEqual(exportRange(independent), { start: 0, end: 30, duration: 30 }, "audio before video preserves black lead-in");
+const movedAgain = moveLinkedClips(independent, "video", implicit.videoClips[0].id, 12);
+assert.deepEqual(placement(movedAgain.audioTracks[0].clips), [[2, 0, 20]], "ordinary dragging keeps an intentional desync");
+assert.equal(moveLinkedClips(implicit, "video", implicit.videoClips[0].id, 0, true), implicit, "an Alt click makes no history change");
+const independentTrim = trimClip(implicit, "video", implicit.videoClips[0].id, "start", 4, true);
+assert.deepEqual(placement(independentTrim.audioTracks[0].clips), [[0, 0, 20]], "Alt trim preserves untrimmed audio");
+
+let cutGroup = splitLinkedClips(separateAudio(implicit), 10);
+assert(cutGroup.audioTracks.every(track => track.clips.length === 2), "normal split cuts all linked tracks");
+const rightId = cutGroup.videoClips[1].id;
+cutGroup = moveLinkedClips(cutGroup, "video", rightId, 15);
+cutGroup = moveLinkedClips(cutGroup, 1, cutGroup.audioTracks[0].clips[1].id, 17, true);
+cutGroup = moveLinkedClips(cutGroup, "video", rightId, 5);
+assert.deepEqual(placement(cutGroup.videoClips), [[0, 0, 10], [10, 10, 20]]);
+assert.deepEqual(placement(cutGroup.audioTracks[0].clips), [[0, 0, 10], [12, 10, 20]], "neighbour collision keeps right group offsets");
+assert.equal(linkedClips(cutGroup, "video", rightId).length, 3, "the left side is a separate editing group");
+const loneCut = splitLinkedClips(implicit, 10, true);
+assert.equal(loneCut.videoClips.length, 2);
+assert(loneCut.audioTracks.every(track => track.clips.length === 1), "Alt split leaves other tracks whole");
+assert.equal(splitLinkedClips(cutGroup, 15, true, { track: "video", clipId: cutGroup.videoClips[0].id }), cutGroup, "selected-only split does not cut an unselected neighbour");
+const groupHistory = commitHistory(createHistory(implicit), independent);
+assert.equal(undoHistory(groupHistory).present, implicit, "independent move and audio materialization undo together");
+const cutOffsets = splitLinkedClips(grouped, 15);
+assert.deepEqual(placement(cutOffsets.audioTracks[0].clips), [[3, 0, 12], [15, 12, 30]], "group splits use timeline time while preserving source offsets");
+
+let shifted = moveLinkedClips(createEditorState(20, audioTracks), "video", "clip-0", 10);
+assert.deepEqual(exportRange(shifted), { start: 10, end: 30, duration: 20 });
+assert.equal(shifted.videoClips[0].timelineStart, 10, "export bounds do not move timeline clips");
+shifted = deleteClip(shifted, "video", "clip-0");
+assert.deepEqual(exportRange(shifted), { start: 0, end: 0, duration: 0 });
 
 const px = timeToPixel(12.5, 20, 40);
 assert.equal(px, 210);
@@ -243,16 +349,25 @@ assert.deepEqual(graph.audioOutputs.map((output) => output.name), ["Audio Mix"])
 // Gaps become black video and silent audio; output runs to the latest clip end.
 const gapAudio = { streamIndex: 1, audioIndex: 0, name: "Game", included: true, muted: false, volume: 1,
   clips: [{ timelineStart: 2, sourceStart: 1, sourceEnd: 2 }] };
-assert.equal(exportTimelineDuration([{ timelineStart: 0.5, sourceStart: 0, sourceEnd: 1 }], [gapAudio]), 3);
-assert.equal(exportTimelineDuration([{ timelineStart: 0.5, sourceStart: 0, sourceEnd: 1 }], [{ ...gapAudio, included: false }]), 1.5);
+assert.equal(exportTimelineDuration([{ timelineStart: 0.5, sourceStart: 0, sourceEnd: 1 }], [gapAudio]), 2.5);
+assert.equal(exportTimelineDuration([{ timelineStart: 0.5, sourceStart: 0, sourceEnd: 1 }], [{ ...gapAudio, included: false }]), 1);
 const gapGraph = buildExportGraph([{ timelineStart: 0.5, sourceStart: 0, sourceEnd: 1 }], [gapAudio], 320, 180, 60);
-assert.match(gapGraph.filter, /^color=c=black:s=320x180:r=60:d=0\.5,setsar=1\[vp0\]/);
-assert.match(gapGraph.filter, /color=c=black:s=320x180:r=60:d=1\.5,setsar=1\[vp2\]/);
-assert.match(gapGraph.filter, /anullsrc=r=48000:cl=stereo,atrim=duration=2,/);
+assert.match(gapGraph.filter, /^\[0:v:0\]trim=start=0:end=1/);
+assert.match(gapGraph.filter, /color=c=black:s=320x180:r=60:d=1\.5,setsar=1\[vp1\]/);
+assert.match(gapGraph.filter, /anullsrc=r=48000:cl=stereo,atrim=duration=1\.5,/);
 const audioOnlyGraph = buildExportGraph([], [gapAudio], 320, 180, 60);
-assert.match(audioOnlyGraph.filter, /^color=c=black:s=320x180:r=60:d=3,setsar=1\[vp0\];\[vp0\]concat=n=1:v=1:a=0\[v\]/);
+assert.match(audioOnlyGraph.filter, /^color=c=black:s=320x180:r=60:d=1,setsar=1\[vp0\];\[vp0\]concat=n=1:v=1:a=0\[v\]/);
 assert.throws(() => buildExportGraph([], [], 320, 180, 60), /no clips/);
 assert.throws(() => buildExportGraph([], [{ ...gapAudio, included: false }], 320, 180, 60), /no clips/);
+const lateVideo = [{ timelineStart: 10, sourceStart: 1, sourceEnd: 2 }];
+const earlyAudio = { ...gapAudio, clips: [{ timelineStart: 0, sourceStart: 0, sourceEnd: 1 }] };
+const earlyGraph = buildExportGraph(lateVideo, [earlyAudio], 320, 180, 60);
+assert.equal(exportTimelineDuration(lateVideo, [earlyAudio]), 11, "audio-only lead-in and middle empty space are preserved");
+assert.match(earlyGraph.filter, /^color=c=black:s=320x180:r=60:d=10/);
+assert.equal(exportTimelineDuration(lateVideo, [{ ...earlyAudio, muted: true, volume: 0 }]), 11, "muted included clips still occupy time");
+assert.equal(exportTimelineDuration(lateVideo, [{ ...earlyAudio, included: false }]), 1, "excluded audio does not extend export bounds");
+const shiftedGraph = buildExportGraph(lateVideo, [{ ...gapAudio, clips: lateVideo }], 320, 180, 60);
+assert(!shiftedGraph.filter.includes("color=") && !shiftedGraph.filter.includes("anullsrc"), "linked clips shifted later export without outer fillers");
 
 assert.throws(() => validateTimelineClips([{ timelineStart: 0, sourceStart: 4, sourceEnd: 2 }], 5, "Video"), /too short/);
 assert.throws(() => validateTimelineClips([{ timelineStart: 0, sourceStart: 0, sourceEnd: 6 }], 5, "Video"), /outside the source clip/);
@@ -436,7 +551,7 @@ try {
     { timelineStart: 3.5, sourceStart: 1, sourceEnd: 1.5 },
   ]), 4);
   const gapDuration = exportTimelineDuration(gapVideoClips, gapTracks);
-  assert.equal(gapDuration, 4);
+  assert.equal(gapDuration, 3.5);
   const gapExportGraph = buildExportGraph(gapVideoClips, gapTracks, 320, 180, 60);
   run(ffmpeg, [
     "-y", "-i", gapInput,
@@ -465,13 +580,12 @@ try {
     assert(match, decoded.stderr);
     return match[1] === "-inf" ? -Infinity : Number(match[1]);
   };
-  assert(meanLuma(0.25) < 24, "leading gap is black");
-  assert(meanLuma(1.75) < 24, "middle gap is black");
-  assert(meanLuma(3.5) < 24, "trailing video gap is black");
-  assert(meanLuma(1) > 48, "video clip content is visible");
-  assert(meanLuma(2.5) > 48, "second video clip content is visible");
-  assert(maxVolume(0, 3.3) < -60, "audio is silent before its clip, even under video clips");
-  assert(maxVolume(3.6, 0.35) > -30, "audio clip plays at its own timeline position");
+  assert(meanLuma(0.25) > 48, "empty leading time is omitted and export starts with media");
+  assert(meanLuma(1.25) < 24, "middle gap stays black");
+  assert(meanLuma(3.1) < 24, "audio-only tail stays black");
+  assert(meanLuma(2) > 48, "second video clip content keeps its relative position");
+  assert(maxVolume(0, 2.8) < -60, "audio is silent before its clip, even under video clips");
+  assert(maxVolume(3.1, 0.35) > -30, "audio clip preserves its offset after leading trim");
 
   const audioCache = path.join(editorCacheDirectory, "shard-editor-audio");
   await mkdir(audioCache, { recursive: true });

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.11
+
+- Video and separated audio now move, trim, and split together when linked. Hold Alt to edit a clip independently; trims keep the source material available so they can be adjusted again.
+- Playback and exports skip unused space before and after the edited content while preserving intentional gaps inside the timeline. Preview timing, seeking, and export progress now follow the same output bounds.
+- Clip previews use more of large windows while staying below the window controls. Playback speed controls are more compact and have a visible hover highlight.
+- Redesigned the export result dialog with a larger rectangular layout, a draggable video thumbnail, a Library button, and clearer open, folder, delete, and error actions.
+- Added optional Windows Recording priority with clearer setup, active-state feedback, and recovery after capture-core changes. Improved recording stability and diagnostics under heavy GPU load.
+- Fixed clip-save feedback so accepted saves remain pending until they finish or fail, with clearer busy and error states.
+- Trimmed packaged runtime files, shared FFmpeg libraries, and included only required OBS and native modules to reduce download and installed size. Added detailed package-size reporting to release builds.
+
 ## 0.1.10
 
 - Rebuilt the editor timeline around movable clips. Drag a clip to move it, drag its white edges to trim it, and leave gaps on purpose: empty time plays and exports as black video and silence.

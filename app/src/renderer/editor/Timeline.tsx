@@ -10,8 +10,10 @@ import {
   createRulerTicks,
   createTimelineGeometry,
   deleteClip,
+  exportRange,
+  linkedClips,
   linkAudio,
-  moveClip,
+  moveLinkedClips,
   outputDuration,
   owningTrack,
   pixelsPerSecond,
@@ -19,8 +21,7 @@ import {
   separateAudio,
   snapOffset,
   snapTargets,
-  splitAllTracks,
-  splitClip,
+  splitLinkedClips,
   timeToPixel,
   trackClips,
   trimClip,
@@ -82,10 +83,11 @@ interface ClipGesture {
   lastClientX: number;
   /** Last requested clip start (move) or edge time (trim). */
   value: number | null;
+  selectedOnly: boolean;
 }
 
 export const LABEL_WIDTH = 128;
-/** Edges within this many pixels lock together; Shift bypasses snapping. */
+/** Edges within this many pixels lock together; Alt (or legacy Shift) bypasses snapping. */
 const SNAP_PX = 8;
 /** Pointer travel before a press on a clip becomes a move instead of a click. */
 const DRAG_START_PX = 3;
@@ -299,14 +301,16 @@ export function Timeline({
   // ------------------------------------------------------------------
   // Clip gestures: press-drag on a clip body slides it; dragging a white
   // edge handle trims it. Edges snap to every other clip edge, the
-  // playhead, and 0 unless Shift is held.
+  // playhead, and export start unless Alt or Shift is held.
   // ------------------------------------------------------------------
   const clipGestureRef = useRef<ClipGesture | null>(null);
-  const updateClipGesture = useCallback((clientX: number, bypassSnap: boolean) => {
+  const updateClipGesture = useCallback((clientX: number, bypassSnap: boolean, selectedOnly: boolean) => {
     const gesture = clipGestureRef.current;
     if (!gesture) return;
     gesture.lastClientX = clientX;
     const { state: base, geometry: geo, viewLength: length } = latest.current;
+    gesture.selectedOnly = selectedOnly;
+    gesture.targets = snapTargets(base, gesture.track, gesture.clipId, latest.current.playhead, gesture.edge === "move" && !selectedOnly);
     const time = geo.clientXToTime(clientX);
     const threshold = SNAP_PX / geo.pxPerSecond;
     const near = (a: number, b: number) => Math.abs(a - b) < 0.0005;
@@ -317,20 +321,23 @@ export function Timeline({
       }
       const clipLength = gesture.origin.sourceEnd - gesture.origin.sourceStart;
       let start = gesture.origin.timelineStart + time - gesture.originTime;
-      const snap = bypassSnap ? null : snapOffset([start, start + clipLength], gesture.targets, threshold);
+      const members = selectedOnly ? [{ clip: gesture.origin }] : linkedClips(base, gesture.track, gesture.clipId);
+      const delta = start - gesture.origin.timelineStart;
+      const edges = members.flatMap(({ clip }) => [clip.timelineStart + delta, clipEnd(clip) + delta]);
+      const snap = bypassSnap ? null : snapOffset(edges, gesture.targets, threshold);
       if (snap?.target != null) start += snap.offset;
       start = Math.max(0, Math.min(length - clipLength, start));
       gesture.value = start;
-      const next = moveClip(base, gesture.track, gesture.clipId, start);
-      const placed = trackClips(next, gesture.track).find((clip) => clip.id === gesture.clipId);
-      const guide = snap?.target != null && placed && (near(placed.timelineStart, snap.target) || near(clipEnd(placed), snap.target)) ? snap.target : null;
+      const next = moveLinkedClips(base, gesture.track, gesture.clipId, start, selectedOnly);
+      const placed = selectedOnly ? trackClips(next, gesture.track).filter(clip => clip.id === gesture.clipId) : linkedClips(next, gesture.track, gesture.clipId).map(member => member.clip);
+      const guide = snap?.target != null && placed.some(clip => near(clip.timelineStart, snap.target!) || near(clipEnd(clip), snap.target!)) ? snap.target : null;
       setDraft({ state: next, clipId: gesture.clipId, moving: true, guide });
     } else {
       let edgeTime = time - gesture.grab;
       const snap = bypassSnap ? null : snapOffset([edgeTime], gesture.targets, threshold);
       if (snap?.target != null) edgeTime = snap.target;
       gesture.value = edgeTime;
-      const next = trimClip(base, gesture.track, gesture.clipId, gesture.edge, edgeTime);
+      const next = trimClip(base, gesture.track, gesture.clipId, gesture.edge, edgeTime, selectedOnly);
       const placed = trackClips(next, gesture.track).find((clip) => clip.id === gesture.clipId);
       const landed = placed ? (gesture.edge === "start" ? placed.timelineStart : clipEnd(placed)) : NaN;
       setDraft({ state: next, clipId: gesture.clipId, moving: false, guide: snap?.target != null && near(landed, snap.target) ? snap.target : null });
@@ -347,10 +354,10 @@ export function Timeline({
     const { onCommit: commitEdit, onScrubEnd: seek } = latest.current;
     const value = gesture.value;
     if (gesture.edge === "move" && !gesture.moved) seek(gesture.originTime);
-    else if (value !== null && gesture.edge === "move") commitEdit((current) => moveClip(current, gesture.track, gesture.clipId, value));
+    else if (value !== null && gesture.edge === "move") commitEdit((current) => moveLinkedClips(current, gesture.track, gesture.clipId, value, gesture.selectedOnly));
     else if (value !== null && gesture.edge !== "move") {
       const edge = gesture.edge;
-      commitEdit((current) => trimClip(current, gesture.track, gesture.clipId, edge, value));
+      commitEdit((current) => trimClip(current, gesture.track, gesture.clipId, edge, value, gesture.selectedOnly));
     }
   }, []);
 
@@ -385,9 +392,10 @@ export function Timeline({
         targets: snapTargets(current, track, clipId, head),
         lastClientX: event.clientX,
         value: null,
+        selectedOnly: event.altKey,
       };
       try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Window listeners remain a fallback. */ }
-      if (edge !== "move") updateClipGesture(event.clientX, event.shiftKey);
+      if (edge !== "move") updateClipGesture(event.clientX, event.altKey || event.shiftKey, event.altKey);
       return;
     }
     const playheadHandle = target.closest(".timeline__playhead-handle");
@@ -407,14 +415,14 @@ export function Timeline({
       const gesture = clipGestureRef.current;
       if (gesture?.pointerId === event.pointerId) {
         if (!(event.buttons & 1)) finishClipGesture(true);
-        else updateClipGesture(event.clientX, event.shiftKey);
+        else updateClipGesture(event.clientX, event.altKey || event.shiftKey, event.altKey);
         return;
       }
       moveScrub(event);
     };
     const end = (event: PointerEvent) => {
       if (clipGestureRef.current?.pointerId === event.pointerId) {
-        if (event.type === "pointerup") updateClipGesture(event.clientX, event.shiftKey);
+        if (event.type === "pointerup") updateClipGesture(event.clientX, event.altKey || event.shiftKey, event.altKey);
         finishClipGesture(event.type === "pointerup");
         return;
       }
@@ -423,10 +431,10 @@ export function Timeline({
       if (event.type === "pointerup") moveScrub({ pointerId: event.pointerId, clientX: event.clientX, buttons: 1 });
       finishScrub();
     };
-    // Pressing or releasing Shift mid-drag re-evaluates snapping in place.
+    // Modifier changes re-evaluate the original gesture, preserving a single undo step.
     const shift = (event: KeyboardEvent) => {
       const gesture = clipGestureRef.current;
-      if (gesture && event.key === "Shift") updateClipGesture(gesture.lastClientX, event.type === "keydown");
+      if (gesture && (event.key === "Shift" || event.key === "Alt")) updateClipGesture(gesture.lastClientX, event.altKey || event.shiftKey, event.altKey);
     };
     const blur = () => { finishScrub(); finishClipGesture(false); };
     const hidden = () => { if (document.hidden) blur(); };
@@ -461,7 +469,9 @@ export function Timeline({
   const showMix = hasAudio && !showAudioRows;
   const selection = view.selection;
   const selectedClip = selection ? trackClips(view, selection.track).find((clip) => clip.id === selection.clipId) ?? null : null;
-  const canSplit = !!clipAt(view.videoClips, playhead) || (separated && view.audioTracks.some((track) => !!clipAt(track.clips, playhead)));
+  const selectedGroup = selection ? linkedClips(view, selection.track, selection.clipId) : [];
+  const range = exportRange(view);
+  const canSplit = !!clipAt(trackClips(view, selection?.track ?? "video"), playhead);
 
   // Collapsed audio draws one mixed waveform at the clips' real timeline
   // positions; expanded tracks draw their own.
@@ -605,14 +615,14 @@ export function Timeline({
         </div>
         <span className="timeline__divider" />
         <div className="timeline__toolbar-group">
-          <Button size="sm" variant="ghost" icon={<Icon name="scissor" size={14} />} onClick={() => onCommit((current) => splitAllTracks(current, playhead))} disabled={!canSplit} title={separated ? "Split every track at the playhead (S) · Shift+S splits only the selected clip" : "Split at the playhead (S)"}>Split</Button>
-          <Button size="sm" variant="ghost" icon={<Icon name="crosshair" size={14} />} onClick={() => selection && onCommit((current) => trimClipToPlayhead(current, selection.track, selection.clipId, playhead))} disabled={!selectedClip} title="Move the nearest edge of the selected clip to the playhead">Trim to playhead</Button>
+          <Button size="sm" variant="ghost" icon={<Icon name="scissor" size={14} />} onClick={(event) => onCommit((current) => splitLinkedClips(current, playhead, event.altKey))} disabled={!canSplit} title="Split linked clips at the playhead (S) · Alt+S splits only the selected clip">Split</Button>
+          <Button size="sm" variant="ghost" icon={<Icon name="crosshair" size={14} />} onClick={(event) => selection && onCommit((current) => trimClipToPlayhead(current, selection.track, selection.clipId, playhead, event.altKey))} disabled={!selectedClip} title="Move the nearest edge to the playhead · Alt trims only video">Trim to playhead</Button>
           <Button size="sm" variant="ghost" className="timeline__delete" icon={<Icon name="trash" size={14} />} onClick={() => selection && onCommit((current) => deleteClip(current, selection.track, selection.clipId))} disabled={!selectedClip} title="Delete the selected clip (Del)">Delete</Button>
         </div>
         <span className="timeline__divider" />
         <Button size="sm" variant="ghost" icon={<Icon name="refresh" size={14} />} onClick={() => onCommit(resetEditorState)} disabled={!canUndo} title="Restore the full clip">Reset</Button>
         <span className="spacer" />
-        <span className="timeline__hint">Drag clips to move · Shift disables snapping</span>
+        <span className="timeline__hint">Drag linked clips · Alt: one clip, no snapping</span>
         <div className="timeline__toolbar-group timeline__zoom-group">
           <IconButton size="sm" label="Zoom out" onClick={() => handleZoom(zoom / 1.4)} disabled={zoom <= 1}><Icon name="zoomOut" size={15} /></IconButton>
           <span className="timeline__zoom num">{Math.round(zoom * 100)}%</span>
@@ -634,8 +644,9 @@ export function Timeline({
       >
         <div className="timeline__content" style={{ width: LABEL_WIDTH + timelineWidth }}>
           <div className="timeline__row timeline__row--ruler">
-            <div className="timeline__label timeline__label--ruler">Timeline</div>
+            <div className="timeline__label timeline__label--ruler" title={`Export ${formatEditorTime(range.start, true)}–${formatEditorTime(range.end, true)} · empty ends are trimmed`}>Export range</div>
             <div className="timeline__surface timeline__ruler" style={{ width: timelineWidth }}>
+              {range.duration > 0 && <span data-shard-slot="timeline-export-range" className="timeline__export-range" aria-label={`Export from ${formatEditorTime(range.start, true)} to ${formatEditorTime(range.end, true)}`} style={{ left: range.start * pxPerSecond, width: range.duration * pxPerSecond }} />}
               {rulerTicks.map(({ time, label }) => (
                 <span key={time} className={`timeline__tick${label === null ? " is-minor" : ""}`} style={{ left: timeToPixel(time, pxPerSecond) }}>
                   <i />
@@ -688,6 +699,7 @@ export function Timeline({
                     data-clip-track="video"
                     data-shard-component="timeline-segment"
                     data-selected={selected}
+                    data-linked-selected={!selected && selectedGroup.some(member => member.track === "video" && member.clipId === clip.id)}
                     className={`timeline-segment${selected ? " is-selected" : ""}${draft?.clipId === clip.id ? " is-dragging" : ""}${menu?.clipId === clip.id ? " is-target" : ""}`}
                     style={clipStyle(clip)}
                     onContextMenu={(event) => openClipMenu(event, "video", clip.id)}
@@ -742,7 +754,7 @@ export function Timeline({
                   <span className="timeline__track-name"><strong title={track.name}>{track.name}</strong><small>{track.included ? AUDIO_KIND_LABEL[track.kind] : "Not exported"}</small></span>
                 </div>
                 <div className="timeline__surface timeline__audio-track" style={{ width: timelineWidth }} data-stream-index={track.streamIndex} onContextMenu={openTrackMenu}>
-                  {track.clips.map((clip) => {
+                  {trackClips(view, track.streamIndex).map((clip) => {
                     const selected = selection?.track === track.streamIndex && selection.clipId === clip.id;
                     return (
                       <div
@@ -751,6 +763,7 @@ export function Timeline({
                         data-clip-track={track.streamIndex}
                         data-shard-component="audio-clip"
                         data-selected={selected}
+                        data-linked-selected={!selected && selectedGroup.some(member => member.track === track.streamIndex && member.clipId === clip.id)}
                         className={`timeline__audio-clip${selected ? " is-selected" : ""}${draft?.clipId === clip.id ? " is-dragging" : ""}${menu?.clipId === clip.id ? " is-target" : ""}`}
                         style={clipStyle(clip)}
                         onContextMenu={(event) => openClipMenu(event, track.streamIndex, clip.id)}
@@ -807,15 +820,9 @@ export function Timeline({
           )}
           {menu.kind === "clip" && menuClip && (
             <>
-              {separated ? (
-                <>
-                  <button role="menuitem" disabled={!canSplit} onClick={closeMenuThen(() => onCommit((current) => splitAllTracks(current, playhead)))}><Icon name="scissor" size={14} />Split all tracks at playhead <kbd>S</kbd></button>
-                  <button role="menuitem" disabled={playhead <= menuClip.timelineStart || playhead >= clipEnd(menuClip)} onClick={closeMenuThen(() => onCommit((current) => splitClip(current, menu.track, playhead)))}><Icon name="scissor" size={14} />Split only this clip <kbd>Shift+S</kbd></button>
-                </>
-              ) : (
-                <button role="menuitem" disabled={playhead <= menuClip.timelineStart || playhead >= clipEnd(menuClip)} onClick={closeMenuThen(() => onCommit((current) => splitAllTracks(current, playhead)))}><Icon name="scissor" size={14} />Split at playhead <kbd>S</kbd></button>
-              )}
-              <button role="menuitem" onClick={closeMenuThen(() => onCommit((current) => trimClipToPlayhead(current, menu.track, menuClip.id, playhead)))}>Trim nearest edge to playhead</button>
+              <button role="menuitem" disabled={playhead <= menuClip.timelineStart || playhead >= clipEnd(menuClip)} onClick={closeMenuThen(() => onCommit((current) => splitLinkedClips(current, playhead, false, { track: menu.track, clipId: menuClip.id })))}><Icon name="scissor" size={14} />Split linked clips <kbd>S</kbd></button>
+              <button role="menuitem" disabled={playhead <= menuClip.timelineStart || playhead >= clipEnd(menuClip)} onClick={closeMenuThen(() => onCommit((current) => splitLinkedClips(current, playhead, true, { track: menu.track, clipId: menuClip.id })))}><Icon name="scissor" size={14} />Split only this clip <kbd>Alt+S</kbd></button>
+              <button role="menuitem" onClick={(event) => { onCommit((current) => trimClipToPlayhead(current, menu.track, menuClip.id, playhead, event.altKey)); setMenu(null); }}>Trim nearest edge to playhead</button>
               <button role="menuitem" className="is-danger" onClick={closeMenuThen(() => onCommit((current) => deleteClip(current, menu.track, menuClip.id)))}><Icon name="trash" size={14} />Delete clip <kbd>Del</kbd></button>
               <span className="editor-context__rule" />
             </>

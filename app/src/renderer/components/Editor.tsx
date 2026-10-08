@@ -4,6 +4,7 @@ import type { ExportProgress, WaveformData } from "../../shared/contracts";
 import type { ClipRecord } from "../../shared/contracts";
 import { Button, Icon, IconButton, Modal, Toggle } from "./ui";
 import { ClipRename } from "./ClipRename";
+import { ExportResultDialog } from "./ExportResultDialog";
 import { AUDIO_KIND_LABEL, Timeline, audioTrackColorStyle, volumeSliderStyle } from "../editor/Timeline";
 import { VideoPreview, formatEditorTime, mediaFileUrl } from "../editor/VideoPreview";
 import { usePlayerAudio } from "../editor/usePlayerAudio";
@@ -15,10 +16,10 @@ import {
   createHistory,
   deleteAudioTrack,
   deleteClip,
+  exportRange,
   outputDuration,
   redoHistory,
-  splitAllTracks,
-  splitClip,
+  splitLinkedClips,
   trackClips,
   undoHistory,
   updateAudioTrack,
@@ -35,10 +36,10 @@ const MIN_STAGE_HEIGHT = 220;
 
 const SHORTCUTS: [string, string][] = [
   ["Space", "Play / pause"],
-  ["S", "Split every track at the playhead"],
-  ["Shift+S", "Split only the selected clip"],
+  ["S", "Split linked clips at the playhead"],
+  ["Alt+S", "Split only the selected clip"],
   ["Del", "Delete the selected clip"],
-  ["Shift (while dragging)", "Turn off snapping"],
+  ["Alt", "Move one clip, turn off snapping"],
   ["Ctrl+Z / Ctrl+Y", "Undo / redo"],
   ["← / →", "Back / forward 5 s"],
   ["Shift+← / →", "One frame"],
@@ -97,6 +98,7 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
   const stateRef = useRef(state);
   stateRef.current = state;
   const totalDuration = outputDuration(state);
+  const effectiveRange = exportRange(state);
   const clipName = clip.path.split(/[\\/]/).pop() ?? "Clip";
   const externalAudioReady = state.audioTracks.length > 0
     && state.audioTracks.every((track) => audioPreviewPaths.has(track.streamIndex));
@@ -322,6 +324,11 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
     syncAudio(timelineTime, playingRef.current, true);
   }, [placeVideo, publishTime, syncAudio]);
 
+  const seekExportTime = useCallback((requested: number) => {
+    const range = exportRange(stateRef.current);
+    seekTimeline(range.start + Math.min(range.duration, Math.max(0, requested)));
+  }, [seekTimeline]);
+
   const pausePlayback = useCallback(() => {
     playingRef.current = false;
     setPlaying(false);
@@ -330,9 +337,10 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
   }, [syncAudio]);
 
   const startPlayback = useCallback(() => {
-    const end = outputDuration(stateRef.current);
-    if (end <= 0) return;
-    const from = timeRef.current >= end - 0.01 ? 0 : timeRef.current;
+    const range = exportRange(stateRef.current);
+    if (range.duration <= 0) return;
+    const from = timeRef.current < range.start || timeRef.current >= range.end - 0.01
+      ? range.start : timeRef.current;
     playingRef.current = true;
     setPlaying(true);
     publishTime(from);
@@ -354,7 +362,8 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
   useEffect(() => {
     if (!exporting || !exportProgress || exportProgress.done || exportProgress.elapsedSec === undefined) return;
     if (playingRef.current) pausePlayback();
-    seekTimeline(Math.min(exportProgress.elapsedSec, outputDuration(stateRef.current)));
+    const range = exportRange(stateRef.current);
+    seekTimeline(Math.min(range.start + exportProgress.elapsedSec, range.end));
   }, [exporting, exportProgress, pausePlayback, seekTimeline]);
 
   useEffect(() => {
@@ -375,7 +384,7 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
       } else {
         timelineTime += elapsed;
       }
-      const end = outputDuration(current);
+      const end = exportRange(current).end;
       if (timelineTime >= end) {
         publishTime(end);
         pausePlayback();
@@ -394,6 +403,15 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
   }, [pausePlayback, placeVideo, playing, publishTime, syncAudio]);
+
+  // Keep playback inside the exported bounds when edits move those bounds.
+  // Timeline scrubbing can still inspect free space outside them.
+  useEffect(() => {
+    if (scrubbingRef.current) return;
+    if (timeRef.current < effectiveRange.start || timeRef.current > effectiveRange.end) {
+      seekTimeline(effectiveRange.start);
+    }
+  }, [effectiveRange.start, effectiveRange.end, seekTimeline]);
 
   // Edits change what sits under the playhead; volume/mute changes apply now.
   useEffect(() => {
@@ -458,11 +476,9 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
     }
   }, []);
 
-  /** S razors through every track; Shift+S splits only the selected clip's track. */
+  /** S splits the linked group; Alt+S (or legacy Shift+S) splits the selected clip. */
   const splitAtPlayhead = useCallback((selectedOnly: boolean) => {
-    commit((current) => selectedOnly && current.selection
-      ? splitClip(current, current.selection.track, timeRef.current)
-      : splitAllTracks(current, timeRef.current));
+    commit((current) => splitLinkedClips(current, timeRef.current, selectedOnly));
   }, [commit]);
 
   const deleteSelected = useCallback(() => {
@@ -475,6 +491,7 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      if (target?.closest('[data-shard-modal="export-result"]')) return;
       if (target?.matches("input, textarea, select, [contenteditable=true]") || target?.closest('[role="listbox"]')) return;
       const key = event.key.toLowerCase();
       if (event.ctrlKey && key === "z") {
@@ -491,10 +508,11 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
         event.preventDefault();
         const frameStep = 1 / Math.max(1, clip.fps ?? 30);
         const delta = (event.shiftKey ? frameStep : 5) * (event.key === "ArrowLeft" ? -1 : 1);
-        seekTimeline(Math.min(outputDuration(stateRef.current), timeRef.current + delta));
+        const range = exportRange(stateRef.current);
+        seekTimeline(Math.max(range.start, Math.min(range.end, timeRef.current + delta)));
       } else if (key === "s") {
         event.preventDefault();
-        splitAtPlayhead(event.shiftKey);
+        splitAtPlayhead(event.altKey || event.shiftKey);
       } else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         deleteSelected();
@@ -505,9 +523,9 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
   }, [clip.fps, deleteSelected, redo, seekTimeline, splitAtPlayhead, togglePlayback, undo]);
 
   const startExport = () => {
-    if (totalDuration <= 0 || exporting) return;
+    if (effectiveRange.duration <= 0 || exporting) return;
     setExporting(true);
-    setExportProgress({ clipId: clip.id, phase: "Queued", percent: 0, elapsedSec: 0, totalSec: totalDuration });
+    setExportProgress({ clipId: clip.id, phase: "Queued", percent: 0, elapsedSec: 0, totalSec: effectiveRange.duration });
     onExport();
     void window.shard.startExport(clip.id, {
       videoClips: state.videoClips.map(exportClip),
@@ -598,40 +616,7 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
     : undefined;
   // Only a finished export opens the dialog; cancelling just ends quietly.
   const finishedExport = exportProgress?.done && exportProgress.error !== "Export cancelled" ? exportProgress : null;
-  const [exportActionError, setExportActionError] = useState<string | null>(null);
-  const dismissExport = useCallback(() => {
-    setExportProgress(null);
-    setExportActionError(null);
-  }, []);
-  // Escape closes the dialog without reaching the editor's own Escape-to-close.
-  useEffect(() => {
-    if (!finishedExport) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.stopImmediatePropagation();
-      dismissExport();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [dismissExport, finishedExport]);
-  /** The export is indexed by the library's folder watcher; find it by path, then delete it like any clip. */
-  const deleteExport = async (filePath: string) => {
-    const normalize = (value: string) => value.replace(/\\/g, "/").toLowerCase();
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const record = (await window.shard.listClips()).find((candidate) => normalize(candidate.path) === normalize(filePath));
-      if (record) {
-        try {
-          await window.shard.deleteClip(record.id);
-          dismissExport();
-        } catch (error) {
-          setExportActionError(`Could not delete the export: ${errorMessage(error)}`);
-        }
-        return;
-      }
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 300));
-    }
-    setExportActionError("The export is not in the library yet. Try again in a moment.");
-  };
+  const dismissExport = useCallback(() => setExportProgress(null), []);
 
   return (
     <Modal open onClose={onClose} closeOnBackdrop={false} size="full">
@@ -667,10 +652,11 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
               muted={muted}
               nativeMuted={externalAudioReady || !state.audioLinked}
               volume={volume}
-              resultTime={time}
-              resultDuration={totalDuration}
+              resultTime={Math.max(0, Math.min(effectiveRange.duration, time - effectiveRange.start))}
+              resultDuration={effectiveRange.duration}
+              timelineTime={time}
               onTogglePlayback={togglePlayback}
-              onSeekResult={seekTimeline}
+              onSeekResult={seekExportTime}
               onMutedChange={changePlayerMuted}
               onVolumeChange={changePlayerVolume}
               onTimeUpdate={NOOP}
@@ -688,7 +674,7 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
             <section data-shard-slot="editor-output" className="editor-panel">
               <h3 className="editor-panel__title">Output</h3>
               <div className="editor-output">
-                <strong className="num">{formatEditorTime(totalDuration, true)}</strong>
+                <strong className="num" title={`Timeline ${formatEditorTime(effectiveRange.start, true)}–${formatEditorTime(effectiveRange.end, true)}`}>{formatEditorTime(effectiveRange.duration, true)}</strong>
               </div>
               <dl className="editor-facts">
                 {clip.width && clip.height ? <div><dt>Resolution</dt><dd className="num">{clip.width}×{clip.height}</dd></div> : null}
@@ -733,7 +719,6 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
                   </label>
                 </div>
               )) : <p className="editor-panel__empty">{loadingMedia ? "Inspecting audio streams…" : "This clip has no audio. Exports are video only."}</p>}
-              {state.audioTracks.length > 0 && <p className="editor-panel__hint">{state.audioLinked ? "Right-click the video track and choose Separate audio tracks to trim, move, or remove audio on its own." : "Audio tracks have their own clips. Collapsing them only hides the rows; Relink audio to video makes audio follow the video clips again."}</p>}
             </section>
 
             <details data-shard-slot="editor-shortcuts" className="editor-panel editor-shortcuts">
@@ -788,25 +773,7 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
           </div>
         </div>
 
-        {finishedExport && (
-          <div className="editor-export-dialog" onMouseDown={dismissExport}>
-            <div data-shard-slot="editor-export" className={`editor-export-dialog__panel${finishedExport.error ? " is-error" : ""}`}
-              role="dialog" aria-modal="true" aria-label={finishedExport.error ? "Export failed" : "Export complete"} onMouseDown={(event) => event.stopPropagation()}>
-              <IconButton size="sm" className="editor-export-dialog__close" label="Close" onClick={dismissExport}><Icon name="x" size={15} /></IconButton>
-              <div className="editor-export-dialog__copy">
-                <strong>{finishedExport.error ? "Export failed" : "Export complete"}</strong>
-                <span className="num">{exportActionError ?? finishedExport.error ?? `${finishedExport.result?.sizeMb} MB${finishedExport.result?.overTarget ? " · over target" : ""}`}</span>
-              </div>
-              <div className="editor-export-dialog__actions">
-                {finishedExport.result && <>
-                  <Button size="sm" variant="primary" onClick={() => onOpenExport(finishedExport.result!.path)}>Open</Button>
-                  <IconButton size="sm" label="Show in folder" onClick={() => window.shard.revealInExplorer(finishedExport.result!.path)}><Icon name="folderOpen" size={15} /></IconButton>
-                  <IconButton size="sm" variant="danger" label="Delete export" onClick={() => void deleteExport(finishedExport.result!.path)}><Icon name="trash" size={15} /></IconButton>
-                </>}
-              </div>
-            </div>
-          </div>
-        )}
+        {finishedExport && <ExportResultDialog progress={finishedExport} onClose={dismissExport} onLibrary={onClose} onOpen={onOpenExport} />}
       </div>
     </Modal>
   );

@@ -1,4 +1,5 @@
 import type { AudioTrackInfo, EditorExportProject, EditorTimelineClip } from "../shared/contracts";
+import { timelineExportRange } from "../shared/timeline-export";
 
 // Clip edges closer than this are float noise from the renderer, not overlap.
 const OVERLAP_TOLERANCE_SEC = 0.0005;
@@ -107,18 +108,12 @@ export function validateTimelineClips(
   return normalized;
 }
 
-// Output length: the latest clip end across the video track and every
-// included audio track. Gaps before it render as black/silence.
+// Completely empty outer space is omitted; gaps inside occupied bounds remain.
 export function exportTimelineDuration(
   videoClips: readonly EditorTimelineClip[],
   audioTracks: readonly { included: boolean; clips: readonly EditorTimelineClip[] }[],
 ): number {
-  let duration = 0;
-  for (const clip of videoClips) duration = Math.max(duration, clipEnd(clip));
-  for (const track of audioTracks) {
-    if (!track.included) continue;
-    for (const clip of track.clips) duration = Math.max(duration, clipEnd(clip));
-  }
+  const { duration } = timelineExportRange(videoClips, audioTracks);
   if (!(duration > 0)) throw new Error("The edited timeline has no clips to export");
   return duration;
 }
@@ -144,13 +139,17 @@ export function buildExportGraph(
 
   const audioTracks = tracks.filter((track) => track.included);
   const duration = exportTimelineDuration(videoClips, audioTracks);
+  const { start } = timelineExportRange(videoClips, audioTracks);
+  const relativeClips = (clips: readonly EditorTimelineClip[]) => clips.map((clip) => ({
+    ...clip, timelineStart: clip.timelineStart - start,
+  }));
   const audioOutputs = buildExportAudioOutputs(audioTracks);
   const filters: string[] = [];
 
   // The dimensions already follow the source ratio. Scale each piece directly
   // to the codec-aligned size; padding would bake rounding slivers into the file.
   const size = `${width}x${height}`;
-  const videoPieces = timelinePieces(videoClips, duration);
+  const videoPieces = timelinePieces(relativeClips(videoClips), duration);
   videoPieces.forEach((piece, index) => {
     filters.push(piece.kind === "gap"
       ? `color=c=black:s=${size}:r=${ffmpegNumber(fps)}:d=${ffmpegNumber(piece.duration)},setsar=1[vp${index}]`
@@ -161,7 +160,7 @@ export function buildExportGraph(
 
   const audioFormat = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
   audioTracks.forEach((track, audioIndex) => {
-    const pieces = timelinePieces(track.clips, duration);
+    const pieces = timelinePieces(relativeClips(track.clips), duration);
     pieces.forEach((piece, index) => {
       const label = `[a${audioIndex}_${index}]`;
       if (piece.kind === "gap") {

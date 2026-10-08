@@ -18,6 +18,8 @@ interface VideoPreviewProps {
   volume: number;
   resultTime: number;
   resultDuration: number;
+  /** Editor's actual cursor, including inspection of space outside the export. */
+  timelineTime?: number;
   className?: string;
   /** One-row transport with the seek bar inline (editor monitor). */
   compact?: boolean;
@@ -47,6 +49,7 @@ export function VideoPreview({
   volume,
   resultTime,
   resultDuration,
+  timelineTime,
   className,
   compact = false,
   autoPlay = false,
@@ -249,7 +252,7 @@ export function VideoPreview({
           <IconButton label={playing ? "Pause (Space)" : "Play (Space)"} disabled={mediaState === "error"} onClick={onTogglePlayback}>
             <Icon name={playing ? "pause" : "play"} size={18} />
           </IconButton>
-          <span data-shard-slot="player-time" className="editor-player__time num">
+          <span data-shard-slot="player-time" className="editor-player__time num" title={timelineTime === undefined ? undefined : `Export elapsed time · Timeline ${formatEditorTime(timelineTime, true)}`}>
             {formatEditorTime(resultTime, true)} <span>/</span> {formatEditorTime(resultDuration)}
           </span>
           {compact ? seekBar : <span className="spacer" />}
