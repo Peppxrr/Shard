@@ -7,20 +7,34 @@ app.setPath("userData", path.join(fixture, "profile"));
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const viewportWidth = 1100;
+const viewportHeight = 600;
 let win;
 app.whenReady().then(async () => {
-  win = new BrowserWindow({ show: false, width: 1100, height: 600,
+  win = new BrowserWindow({ show: false, frame: false, width: viewportWidth, height: viewportHeight,
     webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true } });
+  win.setContentSize(viewportWidth, viewportHeight);
   await win.loadFile(path.join(fixture, "dist/index.html"));
   const js = source => win.webContents.executeJavaScript(source);
   const until = async source => {
     for (let n = 0; n < 100; n++) { if (await js(source)) return; await wait(20); }
-    throw new Error("Timed out: " + source);
+    throw new Error("Timed out: " + source + " " + JSON.stringify(await js("({width:innerWidth,height:innerHeight,scale:devicePixelRatio})")));
   };
   await until("!!window.fixture && !!document.querySelector('[data-shard-slot=timeline-export-range]')");
+  await until(`innerWidth===${viewportWidth} && innerHeight===${viewportHeight}`);
+  await js("document.fonts.ready.then(() => true)");
+  // ResizeObserver replaces the timeline's initial fallback width after mount.
+  // Pointer coordinates must be measured from the settled scale, including on
+  // hosted desktops whose native window dimensions differ from local ones.
+  const readyGeometry = async () => {
+    await until("(()=>{const host=document.querySelector('.timeline__scroll');const ruler=document.querySelector('.timeline__ruler');return host && ruler && Math.abs(ruler.getBoundingClientRect().width-(host.clientWidth-128))<0.5})()");
+    await js("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))");
+  };
+  await readyGeometry();
   const starts = () => js("[window.fixture.state.videoClips[0].timelineStart,...window.fixture.state.audioTracks.map(t=>t.clips[0].timelineStart)]");
   const near = (actual, expected) => actual.forEach((value, i) => assert(Math.abs(value - expected[i]) < 0.09, `${actual} expected ${expected}`));
   const drag = async (seconds, modifiers = [], track = "video", modifierChange = null) => {
+    await readyGeometry();
     const box = await js(`(()=>{const clip=document.querySelector('[data-clip-track="${track}"]'); const ruler=document.querySelector('.timeline__ruler').getBoundingClientRect(); const r=clip.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2,px:ruler.width/66}})()`);
     const from = {x:Math.round(box.x), y:Math.round(box.y)};
     const to = {x:Math.round(box.x + seconds * box.px), y:from.y};
@@ -64,6 +78,7 @@ app.whenReady().then(async () => {
   assert(Math.abs(range.left / range.px - 10) < 0.05);
   assert(Math.abs(range.width / range.px - 24.7) < 0.09);
   const trim = async (edge, seconds, modifiers=[]) => {
+    await readyGeometry();
     const box = await js(`(()=>{const handle=document.querySelector('[data-clip-track=video] [data-trim-edge=${edge}]').getBoundingClientRect(); return {x:handle.x+handle.width/2,y:handle.y+handle.height/2,px:document.querySelector('.timeline__ruler').getBoundingClientRect().width/66}})()`);
     const from = {x:Math.round(box.x),y:Math.round(box.y)};
     const to = {x:Math.round(box.x + seconds*box.px),y:from.y};
