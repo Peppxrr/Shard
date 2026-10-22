@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.12
 
 - **Very early Linux preview.** An experimental Linux AppImage (Wayland, tested on Fedora with KDE Plasma) is now built alongside Windows. Expect bugs and missing features; see [Linux](docs/LINUX.md).
 - Durations are now typed in one box: enter `30s`, `5m`, `1h 30m` or `1:30` and press Enter. Replay length, stop delay and shortcut clip lengths all use it, and the Capture page and status bar show buffered time as minutes and seconds.

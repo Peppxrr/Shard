@@ -3,7 +3,7 @@
   "productName": "Shard",
   "desktopName": "com.shard.app.desktop",
   "author": "Peppxrr",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Medal-style game clipper — RAM replay buffer, hotkeys, library, editor, Discord-size exports.",
   "license": "GPL-2.0",
   "private": true,

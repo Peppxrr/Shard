@@ -69,7 +69,7 @@ npm --prefix app run verify -- release
 ```
 
 `npm run package` always passes `--publish never`; CI publishes only after
-verification. `node scripts/release.mjs validate v0.1.3` checks the proposed tag.
+verification. `node app/scripts/release.mjs validate v0.1.3` checks the proposed tag.
 The wrapper runs each build/test once and saves full logs under `tmp/verify/`.
 Install dependencies with `npm ci --prefix app` when setting up the checkout
 or after dependency changes; do not reinstall them for every verification run.
