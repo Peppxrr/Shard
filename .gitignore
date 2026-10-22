@@ -44,10 +44,10 @@ Thumbs.db
 # Local toolchains
 vs_buildtools.exe
 
-# Directory junctions into vendor/obs-studio (content comes from the submodule)
-core/deps/
-core/shared/
-core/cmake/
+# Junctions (Windows) or symlinks (Linux) into vendor/obs-studio
+/core/deps
+/core/shared
+/core/cmake
 
 # Fetched by scripts/fetch-ffmpeg.ps1 (pinned SHA-256)
 vendor/ffmpeg/

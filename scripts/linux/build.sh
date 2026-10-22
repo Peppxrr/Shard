@@ -35,6 +35,19 @@ for sub in plugins/obs-browser plugins/obs-websocket; do
   [[ -f "$obs_src/$sub/CMakeLists.txt" ]] || { echo "missing OBS submodule $sub (git submodule update --init --recursive)" >&2; exit 1; }
 done
 
+# OBS resolves deps/, shared/ and cmake/ against the root CMake project, which
+# is core/ when embedded in Shard. Same links as scripts/setup-obs-links.ps1.
+for name in deps shared cmake; do
+  link="$root/core/$name"
+  if [[ -L "$link" ]]; then
+    [[ "$(readlink -f "$link")" == "$(readlink -f "$obs_src/$name")" ]] || { echo "unexpected link $link; expected it to point to $obs_src/$name" >&2; exit 1; }
+  elif [[ -e "$link" ]]; then
+    echo "unexpected directory at $link; expected a link to $obs_src/$name" >&2; exit 1
+  else
+    ln -s "../vendor/obs-studio/$name" "$link"
+  fi
+done
+
 if [[ $clean == 1 ]]; then
   case "$build_dir" in "$root"/*) rm -rf -- "$build_dir" ;; *) echo "refusing to clean $build_dir" >&2; exit 1 ;; esac
 fi
