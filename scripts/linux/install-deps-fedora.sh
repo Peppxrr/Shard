@@ -12,8 +12,10 @@ fi
 
 # qt6-qtbase-devel is only needed because OBS configures frontend-tools on
 # Linux even with the frontend disabled; Shard never builds or ships it.
+# extra-cmake-modules (ECM) is required by OBS's Linux CMake defaults; KDE
+# desktops usually have it already, clean containers do not.
 dnf install -y --allowerasing \
-  cmake ninja-build gcc gcc-c++ git nasm patchelf pkgconf-pkg-config \
+  cmake extra-cmake-modules ninja-build gcc gcc-c++ git nasm patchelf pkgconf-pkg-config \
   ffmpeg-devel x264-devel \
   jansson-devel libcurl-devel mbedtls-devel zlib-ng-compat-devel simde-devel uthash-devel \
   libuuid-devel glib2-devel pciutils-devel speexdsp-devel \
