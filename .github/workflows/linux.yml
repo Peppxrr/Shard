@@ -1,11 +1,15 @@
 name: Linux build
 
-# Test build of the Linux (Wayland) port: compiles libobs, the Linux plugins
-# and shardcore from the platform/linux sources, runs the native unit tests and
-# packages an unsigned AppImage artifact. Nothing is published.
+# Build of the Linux (Wayland) preview: compiles libobs, the Linux plugins and
+# shardcore from the platform/linux sources, runs the native unit tests and
+# packages an unsigned AppImage artifact. Version tags (or a manual run naming
+# one) also attach that AppImage to the tag's GitHub release once the Release
+# Windows workflow has published it.
 on:
   push:
     branches: ["**"]
+    # Path filters are not evaluated for tag pushes, so every v* tag builds.
+    tags: ["v*"]
     paths:
       - "core/**"
       - "scripts/linux/**"
@@ -20,12 +24,17 @@ on:
       - "runtime-dependencies.json"
       - ".github/workflows/linux.yml"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag (vX.Y.Z) to build and attach the AppImage to. Leave empty to only build the selected branch."
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: linux-${{ github.ref }}
+  group: linux-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -41,6 +50,8 @@ jobs:
           dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
       - uses: actions/checkout@v4
         with:
+          # A manual release run builds the tagged source, not the branch.
+          ref: ${{ inputs.release_tag || github.ref }}
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
@@ -72,3 +83,48 @@ jobs:
           if-no-files-found: error
           path: |
             app/release/*.AppImage
+
+  attach:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: shard-linux
+          path: release
+      - name: Attach AppImage to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Not a release tag: $RELEASE_TAG"; exit 1; }
+          shopt -s nullglob
+          images=(release/Shard-"${RELEASE_TAG#v}"-*.AppImage)
+          [[ ${#images[@]} -eq 1 ]] || { echo "Expected one AppImage for ${RELEASE_TAG#v}; found: ${images[*]:-none}"; exit 1; }
+          image="${images[0]}"
+          (cd release && sha256sum "$(basename "$image")" > "$(basename "$image").sha256")
+          # Release Windows creates the release as a draft and publishes it
+          # after uploading; wait for that instead of racing its draft.
+          for attempt in $(seq 1 90); do
+            if gh release view "$RELEASE_TAG" --json isDraft,assets > release.json 2>/dev/null && [[ "$(jq -r .isDraft release.json)" == false ]]; then
+              break
+            fi
+            [[ $attempt -lt 90 ]] || { echo "Release $RELEASE_TAG was not published within 90 minutes"; exit 1; }
+            sleep 60
+          done
+          # Never replace bytes on a published release; a rerun only adds what is missing.
+          for file in "$image" "$image.sha256"; do
+            name="$(basename "$file")"
+            if jq -e --arg name "$name" '.assets[] | select(.name == $name)' release.json > /dev/null; then
+              echo "$name is already attached"
+            else
+              gh release upload "$RELEASE_TAG" "$file"
+            fi
+          done

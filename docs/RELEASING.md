@@ -49,6 +49,16 @@ Expected public assets (keep the exact generated names):
 - `Shard-<version>-portable.exe`
 - `latest.yml` (references the NSIS installer, never the portable EXE)
 - `SHA256SUMS.txt` (covers both EXEs, the blockmap, and metadata)
+- `Shard-<version>-x86_64.AppImage` and `Shard-<version>-x86_64.AppImage.sha256`
+  (Linux preview)
+
+The **Linux build** workflow also runs for every `v*` tag. Its `attach` job
+waits (up to 90 minutes) until Release Windows has published that tag's
+release, then uploads the AppImage and its checksum. It only adds missing
+assets and never replaces one already attached. To add the AppImage to an
+existing release, run **Linux build** manually with `release_tag` set to the
+tag; it builds the tagged source. There is no `latest-linux.yml`: the in-app
+updater is Windows-only, so Linux users download new AppImages themselves.
 
 The workflow uses the normal `GITHUB_TOKEN` with `contents: write` only in
 the publish job. Enable Actions and allow that permission in repository/org

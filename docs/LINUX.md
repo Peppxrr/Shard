@@ -39,7 +39,10 @@ Development: `bash scripts/linux/build.sh --config Debug` stages
 `npm --prefix app run verify -- core` runs the Linux build plus the native
 tests; the Windows-only capture E2E and `release` scope are not available on
 Linux. `.github/workflows/linux.yml` builds the core, runs the native tests and
-uploads an unsigned AppImage on a Fedora container.
+uploads an unsigned AppImage on a Fedora container. For `v*` tags it also
+attaches the AppImage and a `.sha256` checksum to the GitHub release once the
+Windows release is published (see [Releasing](RELEASING.md)). The AppImage
+does not update itself; download the newer one from the release page.
 
 libobs and its plugins link the system FFmpeg/x264, so the runtime is not yet
 portable to other distributions. The editor/export tools use

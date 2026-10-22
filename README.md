@@ -91,7 +91,7 @@ It is built on OBS Studio's capture engine, including OBS's official signed Game
 
 Settings, the library and your clips live in `%APPDATA%\Shard` unless you choose another clips folder, and they are kept when Shard updates.
 
-**Linux (very early preview):** an unsigned `Shard-<version>.AppImage` is built by the [Linux build](https://github.com/Peppxrr/Shard/actions/workflows/linux.yml) workflow. Expect bugs, missing features and manual setup steps; read [Linux](docs/LINUX.md) first.
+**Linux (very early preview):** download the unsigned `Shard-<version>-x86_64.AppImage` from the [latest release](https://github.com/Peppxrr/Shard/releases/latest), make it executable and run it. It does not update itself; download new versions from the releases page. Expect bugs, missing features and manual setup steps; read [Linux](docs/LINUX.md) first.
 
 ## Privacy
 
