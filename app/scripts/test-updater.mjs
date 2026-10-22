@@ -49,7 +49,7 @@ try {
   const preload = require("typescript").transpileModule(readFileSync(new URL("../src/main/preload.ts", import.meta.url), "utf8"), {
     compilerOptions: { target: require("typescript").ScriptTarget.ES2022, module: require("typescript").ModuleKind.CommonJS },
   }).outputText;
-  vm.runInNewContext(preload, { exports: {}, process: { platform: "win32", argv: [] }, require: name => {
+  vm.runInNewContext(preload, { exports: {}, process: { platform: "win32", argv: [], env: {} }, require: name => {
     assert.equal(name, "electron");
     return { contextBridge: { exposeInMainWorld: (name, api) => { bridges[name] = api; } }, ipcRenderer: ipc };
   } });
