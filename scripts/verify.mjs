@@ -16,6 +16,11 @@ if (scopes.some(scope => !allowed.includes(scope))) {
   process.exit(2);
 }
 const release = scopes.includes("release");
+const linux = process.platform === "linux";
+if (release && linux) {
+  console.error("Release verification builds the Windows installer; on Linux use `npm --prefix app run package:linux`.");
+  process.exit(2);
+}
 const config = release ? "Release" : "Debug";
 const steps = new Map();
 const add = (id, command, args, cwd = root) => steps.set(id, { id, command, args, cwd });
@@ -54,16 +59,24 @@ if (release || scopes.includes("storage")) {
 }
 
 if (release || scopes.some(scope => scope === "core" || scope === "capture")) {
-  ps("core-build", "scripts/build.ps1", "-Config", config);
-  add("core-test-build", "cmake", ["--build", "build_x64", "--config", config, "--target", "shard_tests", "shard_capture_resilience_tests", "shard_audio_isolation_tests", "shard_perf_tests", "shard_priority_tests", "shard_save_queue_tests", "--parallel"]);
-  add("detection-tests", path.join(root, "build_x64", config, "shard_tests.exe"), []);
-  add("capture-unit-tests", path.join(root, "build_x64", config, "shard_capture_resilience_tests.exe"), []);
-  add("audio-isolation-tests", path.join(root, "build_x64", config, "shard_audio_isolation_tests.exe"), []);
-  add("perf-tests", path.join(root, "build_x64", config, "shard_perf_tests.exe"), []);
-  add("priority-tests", path.join(root, "build_x64", config, "shard_priority_tests.exe"), []);
-  add("save-queue-tests", path.join(root, "build_x64", config, "shard_save_queue_tests.exe"), []);
+  const tests = {
+    "detection-tests": "shard_tests", "capture-unit-tests": "shard_capture_resilience_tests",
+    "audio-isolation-tests": "shard_audio_isolation_tests", "perf-tests": "shard_perf_tests",
+    "priority-tests": "shard_priority_tests", "save-queue-tests": "shard_save_queue_tests",
+  };
+  if (linux) {
+    // build.sh builds shardcore and the test targets in the single-config
+    // build_linux, then stages core-bin (Release) or core-bin-dev (Debug).
+    add("core-build", "bash", [path.join(root, "scripts/linux/build.sh"), "--config", config]);
+    for (const [id, test] of Object.entries(tests)) add(id, path.join(root, "build_linux", test), []);
+  } else {
+    ps("core-build", "scripts/build.ps1", "-Config", config);
+    add("core-test-build", "cmake", ["--build", "build_x64", "--config", config, "--target", ...Object.values(tests), "--parallel"]);
+    for (const [id, test] of Object.entries(tests)) add(id, path.join(root, "build_x64", config, `${test}.exe`), []);
+  }
 }
-if (scopes.includes("capture")) {
+// The capture end-to-end runner drives Windows capture (scripts/e2e.ps1).
+if (scopes.includes("capture") && !linux) {
   const bin = path.join(root, "app/resources", release ? "core-bin" : "core-bin-dev");
   ps("capture-e2e", "scripts/e2e.ps1", "-CoreBin", bin);
 }

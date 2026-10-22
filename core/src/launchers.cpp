@@ -13,11 +13,6 @@
 #include <map>
 #include <set>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
-
 namespace shard {
 
 namespace fs = std::filesystem;
@@ -29,113 +24,8 @@ int64_t LauncherDiscovery::nowMs()
   return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-// ------------------------------------------------------------ Win32 impl ---
-
-#ifdef _WIN32
-
-namespace {
-
-const char* kAppModelPackagesKey =
-    "SOFTWARE\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\Repository\\"
-    "Packages";
-
-std::string winReadRegistry(const std::string& hive, const std::string& keyPath, const std::string& valueName)
-{
-  HKEY root = hive == "HKCU" ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE;
-  HKEY key = nullptr;
-  if (RegOpenKeyExA(root, keyPath.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
-    return "";
-  std::string out;
-  DWORD type = 0;
-  DWORD size = 0;
-  if (RegQueryValueExA(key, valueName.c_str(), nullptr, &type, nullptr, &size) == ERROR_SUCCESS && size > 0) {
-    out.resize(size);
-    DWORD actual = size;
-    if (RegQueryValueExA(key, valueName.c_str(), nullptr, &type, reinterpret_cast<LPBYTE>(out.data()), &actual) ==
-        ERROR_SUCCESS) {
-      if (type == REG_SZ || type == REG_EXPAND_SZ) {
-        while (!out.empty() && out.back() == '\0')
-          out.pop_back();
-      } else {
-        out.clear(); // non-string value: not usable
-      }
-    } else {
-      out.clear();
-    }
-  }
-  RegCloseKey(key);
-  return out;
-}
-
-std::vector<std::string> winListRegistryKeys(const std::string& hive, const std::string& keyPath)
-{
-  std::vector<std::string> out;
-  HKEY root = hive == "HKCU" ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE;
-  HKEY key = nullptr;
-  if (RegOpenKeyExA(root, keyPath.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
-    return out;
-  char name[512];
-  for (DWORD i = 0;; i++) {
-    DWORD size = sizeof(name);
-    LONG r = RegEnumKeyExA(key, i, name, &size, nullptr, nullptr, nullptr, nullptr);
-    if (r == ERROR_NO_MORE_ITEMS)
-      break;
-    if (r != ERROR_SUCCESS)
-      break;
-    out.emplace_back(name, size);
-  }
-  RegCloseKey(key);
-  return out;
-}
-
-bool fileExists(const std::string& p)
-{
-  std::error_code ec;
-  return fs::exists(p, ec) && !fs::is_directory(p, ec);
-}
-
-} // namespace
-
-ScanContext LauncherDiscovery::defaults()
-{
-  ScanContext ctx;
-  ctx.readRegistry = winReadRegistry;
-  ctx.listRegistryKeys = winListRegistryKeys;
-  ctx.msStorePackagesKey = kAppModelPackagesKey;
-
-  const char* pf86 = getenv("ProgramFiles(x86)");
-  const char* pf = getenv("ProgramFiles");
-  const char* pd = getenv("ProgramData");
-  const char* drive = getenv("SystemDrive");
-
-  if (pf86) {
-    ctx.steamLibraryFile = std::string(pf86) + "\\Steam\\steamapps\\libraryfolders.vdf";
-    ctx.steamAppInfoFile = std::string(pf86) + "\\Steam\\appcache\\appinfo.vdf";
-  } else if (pf) {
-    ctx.steamLibraryFile = std::string(pf) + "\\Steam\\steamapps\\libraryfolders.vdf";
-    ctx.steamAppInfoFile = std::string(pf) + "\\Steam\\appcache\\appinfo.vdf";
-  }
-  if (pd)
-    ctx.epicManifestsDir = std::string(pd) + "\\Epic\\EpicGamesLauncher\\Data\\Manifests";
-  if (pd) {
-    const std::string riotDir = std::string(pd) + "\\Riot Games";
-    ctx.riotInstallsFile = riotDir + "\\RiotClientInstalls.json";
-  }
-  if (const char* home = getenv("USERPROFILE"))
-    ctx.heroicConfigDir = std::string(home) + "\\.config\\heroic";
-  (void)drive;
-  return ctx;
-}
-
-#else
-
-ScanContext LauncherDiscovery::defaults()
-{
-  ScanContext ctx;
-  return ctx; // Linux-ready: providers return empty without Win32 roots
-}
-
-#endif
+// LauncherDiscovery::defaults() (well-known launcher paths and registry
+// access) is implemented per platform in platform/<os>/launchers_<os>.cpp.
 
 // ------------------------------------------------------------ exe scan ----
 
@@ -848,7 +738,7 @@ std::vector<GameDefinition> LauncherDiscovery::scanMsStore(const ScanContext& ct
     const std::string root = ctx.readRegistry("HKCU", keyPath, "PackageRootFolder");
     if (root.empty())
       continue;
-    const std::string manifest = readFileText(root + "\\AppxManifest.xml");
+    const std::string manifest = readFileText((fs::path(root) / "AppxManifest.xml").string());
     if (manifest.empty())
       continue;
     // Game Pass PC games are packaged desktop apps (full-trust process);

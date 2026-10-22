@@ -86,7 +86,7 @@ assert.equal(recordingPriorityEffect({ ...priority, current: false }).state, "ac
 // core exiting (crash or restart) is no longer Active, and the change is published.
 if (process.platform === "win32") {
   const { RecordingPriority } = loadTs("src/main/recording-priority.ts");
-  const live = new RecordingPriority({ launchPaths: () => ({ bin: "", configDir: "", games: "" }), enabled: () => true, parentWindow: () => null });
+  const live = new RecordingPriority({ launchPaths: () => ({ bin: "", exe: "", configDir: "", games: "" }), enabled: () => true, parentWindow: () => null });
   const published = [];
   live.on("status", status => published.push(recordingPriorityEffect(status).state));
   const session = (elevated, gpuPriority) => ({ elevated, gpuPriority, adapter: { name: "GPU", vendor: "nvidia", driver: "1" } });

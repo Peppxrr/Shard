@@ -1,4 +1,5 @@
-// Shard dev runner (started by scripts/dev.ps1 — builds the core first).
+// Shard dev runner (started by scripts/dev.ps1 — builds the core first; on
+// Linux run `scripts/linux/build.sh --config Debug` first, then this script).
 //
 // Orchestrates three processes:
 //   1. Vite dev server            — renderer (React) with HMR, port 5173.
@@ -176,7 +177,7 @@ function watchMainOutput() {
 
 async function main() {
   if (!existsSync(coreBinDev)) {
-    log(`missing ${coreBinDev} — run scripts/dev.ps1 (without -SkipCore) first`);
+    log(`missing ${coreBinDev} — ${isWin ? "run scripts/dev.ps1 (without -SkipCore)" : "run bash scripts/linux/build.sh --config Debug"} first`);
     process.exit(1);
   }
   if (!existsSync(bin("electron"))) {

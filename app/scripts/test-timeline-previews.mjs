@@ -11,11 +11,10 @@ registerHooks({ resolve(specifier, context, next) {
 } });
 const { TimelinePreviews } = await import("../src/main/timeline-previews.ts");
 const { ownedProcesses } = await import("../src/main/bundled-processes.ts");
+const { resolveFfmpegTool } = await import("../src/main/ffmpeg-path.ts");
 
-const stagedFfmpeg = path.resolve("resources/core-bin/ffmpeg/ffmpeg.exe");
-const vendorFfmpeg = path.resolve("../vendor/ffmpeg/bin/ffmpeg.exe");
-const executable = existsSync(stagedFfmpeg) ? stagedFfmpeg : vendorFfmpeg;
-assert.ok(existsSync(executable), `FFmpeg test binary not found: ${executable}`);
+// The staged core-bin build, then the pinned vendor build (system FFmpeg off Windows).
+const executable = resolveFfmpegTool("ffmpeg", [path.resolve("resources/core-bin/ffmpeg"), path.resolve("../vendor/ffmpeg/bin")]);
 const parent = path.resolve("../tmp");
 await fs.mkdir(parent, { recursive: true });
 const root = await fs.mkdtemp(path.join(parent, "timeline-preview-test-"));

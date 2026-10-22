@@ -4,6 +4,7 @@ import { PERF_CAUSE_LABEL } from "../../shared/perf";
 import { Icon, IconButton, Button, EmptyState, Modal, ShardSelect } from "./ui";
 import { mediaFileUrl, StandaloneVideoPlayer } from "../editor/VideoPreview";
 import { ClipRename } from "./ClipRename";
+import { clipDisplayName } from "../clip-display";
 
 interface Props {
   clips: ClipRecord[];
@@ -80,7 +81,7 @@ export const LibraryPage = memo(function LibraryPage({ clips, onOpenEditor, open
       return (
         (gameFilter === "all" || c.game === gameFilter) &&
         (sourceFilter === "all" || (sourceFilter === "favorites" ? c.protected === 1 : c.source === sourceFilter)) &&
-        (!q || (c.game ?? "").toLowerCase().includes(q) || pathBase(c.path).toLowerCase().includes(q) ||
+        (!q || clipDisplayName(c).toLowerCase().includes(q) || pathBase(c.path).toLowerCase().includes(q) ||
           dateStr.includes(q))
       );
     });
@@ -92,7 +93,7 @@ export const LibraryPage = memo(function LibraryPage({ clips, onOpenEditor, open
       case "size":
         return out.sort((a, b) => b.sizeBytes - a.sizeBytes);
       case "game":
-        return out.sort((a, b) => (a.game ?? "").localeCompare(b.game ?? ""));
+        return out.sort((a, b) => clipDisplayName(a).localeCompare(clipDisplayName(b)));
       case "favorites":
         return out.sort((a, b) => b.protected - a.protected || b.createdAt - a.createdAt);
       default: // newest
@@ -188,7 +189,7 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
     <article data-shard-component="clip" data-favorite={isFav} data-source={clip.source} className="clip" aria-busy={pending}>
       <button type="button"
         data-shard-slot="clip-thumbnail" className="clip__thumb" onClick={onOpen}
-        aria-label={`Play ${clip.game ?? "untagged clip"}, ${fmtDateTime(clip.createdAt)}`}
+        aria-label={`Play ${clipDisplayName(clip)}, ${fmtDateTime(clip.createdAt)}`}
         draggable
         title="Click to play · drag to share"
         onDragStart={(e) => {
@@ -209,7 +210,7 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
       </button>
       <div data-shard-slot="clip-details" className="clip__meta">
         <div data-shard-slot="clip-heading" className="clip__heading">
-          <button type="button" data-shard-slot="clip-title" className="clip__title" onClick={onOpen}>{clip.game ?? "Untagged"}</button>
+          <button type="button" data-shard-slot="clip-title" className="clip__title" onClick={onOpen}>{clipDisplayName(clip)}</button>
           <IconButton size="sm" label={isFav ? "Unfavorite" : "Favorite — keep from auto-delete"} active={isFav} disabled={pending}
             className={isFav ? "is-fav" : ""} onClick={() => void runAction(() => window.shard.setProtected(clip.id, !isFav))}>
             <Icon name="star" size={15} />
@@ -244,6 +245,7 @@ function ClipCard({ clip, onOpen, onEdit }: { clip: ClipRecord; onOpen: () => vo
 export function Viewer({ clip: originalClip, onClose, onEdit }: { clip: ClipRecord; onClose: () => void; onEdit?: (clip: ClipRecord) => void }) {
   const [renamedClip, setRenamedClip] = useState<ClipRecord | null>(null);
   const clip = renamedClip?.id === originalClip.id ? renamedClip : originalClip;
+  const title = clipDisplayName(clip);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [preparingExport, setPreparingExport] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -274,7 +276,7 @@ export function Viewer({ clip: originalClip, onClose, onEdit }: { clip: ClipReco
   };
   return (
     <Modal open onClose={onClose} size="lg" variant="clip-viewer"
-      title={clip.game ?? "Untagged"} sub={SOURCE_NAMES[clip.source]}>
+      title={title} sub={title === SOURCE_NAMES[clip.source] ? undefined : SOURCE_NAMES[clip.source]}>
       <div data-shard-component="clip-viewer" data-source={clip.source} className="clip-viewer">
         <div data-shard-slot="viewer-media" className="clip-viewer__media">
           <StandaloneVideoPlayer sourcePath={clip.path} posterPath={clip.thumb || undefined} loop mediaRef={videoRef} />

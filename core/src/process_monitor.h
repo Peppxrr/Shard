@@ -18,6 +18,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace shard {
 
@@ -74,21 +75,22 @@ public:
   // modules provide identity; generic graphics/middleware modules only
   // corroborate a launcher-classified or user-mapped game.
   ProcessRuntimeFacts probeRuntime(uint32_t pid) const;
-  bool wmiAvailable() const { return wmiOk_.load(); }
+  bool eventsAvailable() const { return eventsOk_.load(); }
 
 private:
-  void wmiLoop();
+  void eventLoop();
   void pushEvent(const ProcessEvent& e);
-  void applySnapshot();
+  // Shared: drain queued events, diff `fresh` against the table, emit.
+  void applySnapshot(std::map<uint32_t, ProcessInfo> fresh);
 
   mutable std::mutex mtx_;
   std::map<uint32_t, ProcessInfo> table_;
   std::deque<ProcessEvent> queue_;
   std::function<void(const ProcessEvent&)> sink_;
 
-  std::thread wmiThread_;
+  std::thread eventThread_;
   std::atomic<bool> run_{false};
-  std::atomic<bool> wmiOk_{false};
+  std::atomic<bool> eventsOk_{false};
 };
 
 } // namespace shard

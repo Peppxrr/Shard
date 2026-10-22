@@ -2,18 +2,13 @@
 
 #include "game_util.h"
 #include "log.h"
+#include "platform/window_system.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <set>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <dwmapi.h>
-#endif
 
 namespace shard {
 
@@ -331,19 +326,13 @@ void GameSystem::evaluateForegroundProcess()
 
 void GameSystem::evaluateVisibleProcesses()
 {
-#ifdef _WIN32
+  if (!platform::windowInfoAvailable())
+    return;
   // One window enumeration discovers surfaces that appear after WMI's start
   // event, including games already open when Shard starts and second monitors.
   // Module enumeration remains limited to processes with captureable windows.
-  std::set<uint32_t> visible;
-  EnumWindows([](HWND window, LPARAM param) -> BOOL {
-    if (IsWindowVisible(window) && !IsIconic(window)) {
-      DWORD pid = 0;
-      GetWindowThreadProcessId(window, &pid);
-      reinterpret_cast<std::set<uint32_t>*>(param)->insert(pid);
-    }
-    return TRUE;
-  }, reinterpret_cast<LPARAM>(&visible));
+  const auto pids = platform::visibleWindowPids();
+  const std::set<uint32_t> visible(pids.begin(), pids.end());
   {
     std::lock_guard<std::mutex> lock(stateMtx_);
     for (auto it = visibleSince_.begin(); it != visibleSince_.end();) {
@@ -353,7 +342,6 @@ void GameSystem::evaluateVisibleProcesses()
   }
   for (uint32_t pid : visible)
     evaluateProcess(pid);
-#endif
 }
 
 std::string GameSystem::createRuntimeProduct(const ProcessInfo& process, const DetectionResult& result)
@@ -520,98 +508,36 @@ void GameSystem::probeSessions()
 GameSystem::WindowProbe GameSystem::probeWindow(uint32_t pid, const std::string& titleHint) const
 {
   WindowProbe out;
-#ifdef _WIN32
   if (pid == 0)
     return out;
 
-  HWND fg = GetForegroundWindow();
-  DWORD fgPid = 0;
-  if (fg)
-    GetWindowThreadProcessId(fg, &fgPid);
-  out.foreground = fgPid == pid;
+  if (!platform::windowInfoAvailable()) {
+    // No window information on this desktop: identity evidence alone must be
+    // able to qualify a game, so report a captureable on-screen surface.
+    out.hasWindow = true;
+    out.captureable = true;
+    out.onScreen = true;
+    out.area = 1920L * 1080L;
+    return out;
+  }
 
-  // Collect every visible top-level window of the pid, then pick the best
-  // capture target: fullscreen > title contains the game name (emulators and
-  // multi-window games create a separate game window) > largest > first.
-  struct Win {
-    HWND hwnd = nullptr;
-    std::string title;
-    std::string cls;
-    long area = 0;
-    bool fullscreen = false;
-    bool minimized = false;
-    bool onScreen = false;
-    bool captureable = false;
-  };
-  std::vector<Win> wins;
-  struct Ctx {
-    uint32_t pid;
-    std::vector<Win>* wins;
-  } ctx = {pid, &wins};
-  EnumWindows(
-      [](HWND h, LPARAM lp) -> BOOL {
-        Ctx* c = reinterpret_cast<Ctx*>(lp);
-        DWORD wpid = 0;
-        GetWindowThreadProcessId(h, &wpid);
-        if (wpid != c->pid || !IsWindowVisible(h))
-          return TRUE;
-        DWORD cloaked = 0;
-        if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
-          return TRUE;
-        const LONG_PTR exStyles = GetWindowLongPtr(h, GWL_EXSTYLE);
-        if ((exStyles & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0)
-          return TRUE;
-        Win w;
-        w.hwnd = h;
-        wchar_t titleW[512] = {0};
-        if (GetWindowTextW(h, titleW, 512) > 0) {
-          int len = WideCharToMultiByte(CP_UTF8, 0, titleW, -1, nullptr, 0, nullptr, nullptr);
-          if (len > 1) {
-            w.title.assign(len - 1, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, titleW, -1, w.title.data(), len, nullptr, nullptr);
-          }
-        }
-        wchar_t clsW[256] = {0};
-        if (GetClassNameW(h, clsW, 256) > 0) {
-          int len = WideCharToMultiByte(CP_UTF8, 0, clsW, -1, nullptr, 0, nullptr, nullptr);
-          if (len > 1) {
-            w.cls.assign(len - 1, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, clsW, -1, w.cls.data(), len, nullptr, nullptr);
-          }
-        }
-        RECT rect;
-        if (GetWindowRect(h, &rect)) {
-          RECT client = {};
-          if (GetClientRect(h, &client))
-            w.area = (long)(client.right - client.left) * (long)(client.bottom - client.top);
-          // Minimized windows report an off-screen icon rect — IsIconic is the
-          // reliable check. onScreen = the window rect intersects a monitor.
-          w.minimized = IsIconic(h) != 0;
-          w.onScreen = MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) != nullptr;
-          w.captureable = !w.minimized && w.onScreen && w.area >= (long)320 * 200;
-          DWORD styles = (DWORD)GetWindowLongPtr(h, GWL_STYLE);
-          bool maximized = (styles & WS_MAXIMIZE) != 0 && (styles & WS_BORDER) != 0;
-          if (!maximized) {
-            HMONITOR monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
-            MONITORINFO mi = {};
-            mi.cbSize = sizeof(mi);
-            if (monitor && GetMonitorInfo(monitor, &mi)) {
-              w.fullscreen = rect.left == mi.rcMonitor.left && rect.right == mi.rcMonitor.right &&
-                             rect.top == mi.rcMonitor.top && rect.bottom == mi.rcMonitor.bottom;
-            }
-          }
-        }
-        c->wins->push_back(std::move(w));
-        return TRUE;
-      },
-      reinterpret_cast<LPARAM>(&ctx));
+  out.foreground = platform::foregroundPid() == pid;
+
+  // Collect every eligible visible top-level window of the pid, then pick the
+  // best capture target: fullscreen > title contains the game name (emulators
+  // and multi-window games create a separate game window) > largest > first.
+  std::vector<platform::TopLevelWindow> wins;
+  for (auto& window : platform::listWindows(pid)) {
+    if (window.eligible)
+      wins.push_back(std::move(window));
+  }
 
   out.hasWindow = !wins.empty();
   if (wins.empty())
     return out;
 
   const std::string hint = toLower(trim(titleHint));
-  const Win* best = &wins[0];
+  const platform::TopLevelWindow* best = &wins[0];
   for (const auto& w : wins) {
     const bool wFull = w.fullscreen;
     const bool bFull = best->fullscreen;
@@ -637,24 +563,12 @@ GameSystem::WindowProbe GameSystem::probeWindow(uint32_t pid, const std::string&
   out.minimized = best->minimized;
   out.onScreen = best->onScreen;
   out.area = best->area;
-#endif
-  (void)pid;
-  (void)titleHint;
   return out;
 }
 
 uint32_t GameSystem::foregroundPid() const
 {
-#ifdef _WIN32
-  HWND fg = GetForegroundWindow();
-  if (!fg)
-    return 0;
-  DWORD pid = 0;
-  GetWindowThreadProcessId(fg, &pid);
-  return pid;
-#else
-  return 0;
-#endif
+  return platform::foregroundPid();
 }
 
 // Active-game following: the game that holds focus for the debounce window
@@ -915,7 +829,8 @@ nlohmann::json GameSystem::sessionsJson() const
                    {"confidence", s.score},
                    {"launcher", s.launcher.empty() ? nlohmann::json(nullptr) : nlohmann::json(s.launcher)},
                    {"emulator", s.emulator},
-                   {"primary", s.primary}});
+                   {"primary", s.primary},
+                   {"path", s.path}});
   }
   return arr;
 }

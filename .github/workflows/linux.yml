@@ -1,0 +1,74 @@
+name: Linux build
+
+# Test build of the Linux (Wayland) port: compiles libobs, the Linux plugins
+# and shardcore from the platform/linux sources, runs the native unit tests and
+# packages an unsigned AppImage artifact. Nothing is published.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "core/**"
+      - "scripts/linux/**"
+      - "app/**"
+      - "runtime-dependencies.json"
+      - ".github/workflows/linux.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "scripts/linux/**"
+      - "app/**"
+      - "runtime-dependencies.json"
+      - ".github/workflows/linux.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Fedora matches the supported desktop and its RPM Fusion FFmpeg/x264.
+    container: fedora:44
+    steps:
+      - name: Base tools and RPM Fusion
+        run: |
+          dnf install -y git tar xz findutils which python3 make
+          dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build dependencies
+        run: bash scripts/linux/install-deps-fedora.sh
+      - name: Build and stage core
+        run: bash scripts/linux/build.sh --config Release
+      - name: Native tests
+        working-directory: build_linux
+        run: |
+          set -e
+          for t in shard_tests shard_capture_resilience_tests shard_audio_isolation_tests shard_perf_tests \
+                   shard_priority_tests shard_save_queue_tests; do
+            echo "== $t"; "./$t"
+          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Package AppImage
+        working-directory: app
+        run: |
+          npm ci
+          npm run package:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-linux
+          if-no-files-found: error
+          path: |
+            app/release/*.AppImage

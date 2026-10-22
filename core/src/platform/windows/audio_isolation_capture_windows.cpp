@@ -14,7 +14,6 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
 #include <mmdeviceapi.h>
@@ -26,11 +25,8 @@
 #include <wrl/implements.h>
 #include <util/threading.h>
 #include <util/windows/win-version.h>
-#endif
 
 namespace shard {
-
-#ifdef _WIN32
 
 namespace {
 
@@ -912,23 +908,5 @@ void AudioIsolationController::stop()
     impl_->thread.join();
   impl_.reset();
 }
-
-#else // !_WIN32
-
-struct AudioIsolationController::Impl {};
-
-bool processLoopbackSupported()
-{
-  return false;
-}
-
-void registerProcessLoopbackSource() {}
-
-AudioIsolationController::AudioIsolationController() = default;
-AudioIsolationController::~AudioIsolationController() = default;
-void AudioIsolationController::start(obs_scene_t*, std::vector<IsolationRow>, std::vector<std::string>) {}
-void AudioIsolationController::stop() {}
-
-#endif
 
 } // namespace shard

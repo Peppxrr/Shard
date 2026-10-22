@@ -273,6 +273,8 @@ export function VideoPreview({
               "--range-color": "var(--accent)",
             } as CSSProperties}
             onChange={(event) => onVolumeChange(Number(event.target.value))}
+            onDoubleClick={() => onVolumeChange(1)}
+            title="Double-click to reset to 100%"
           />
           <span data-shard-slot="player-speed" className="editor-player__speed" title="Preview playback speed">
             <ShardSelect ariaLabel="Playback speed" value={playbackRate} onChange={setPlaybackRate}

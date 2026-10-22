@@ -6,11 +6,15 @@
 // rendered text before display, DPI-aware, and kept inside the work area.
 //
 // Supports: clip saved, recording started/stopped, capture switched.
+//
+// KDE Wayland ignores client positioning and stacking, so a KWin window rule
+// matched on the overlay's title places and raises it (linux-desktop.ts).
 import { BrowserWindow, screen } from "electron";
 import { app } from "electron";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { getSettings } from "./settings";
+import { OVERLAY_TITLE, ensureKdeOverlayRule, isKdeSession } from "./linux-desktop";
 
 const MARGIN = 18;
 const HOLD_MS = 2200;
@@ -26,17 +30,42 @@ export class SaveOverlay {
   private win: BrowserWindow | null = null;
   private timer: NodeJS.Timeout | null = null;
 
+  // KWin applies window rules when a window maps and reloads them shortly
+  // after a reconfigure; install Shard's rule at startup so even the first
+  // overlay is placed by it.
+  prepare(): void {
+    if (!isKdeSession()) return;
+    const wa = screen.getPrimaryDisplay().workArea;
+    void ensureKdeOverlayRule(wa.x + MARGIN, wa.y + MARGIN)
+      .catch(error => console.warn("[overlay] Could not update the KWin window rule", error));
+  }
+
   show(label: string, kind: OverlayKind = "clip"): void {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
     const wa = screen.getPrimaryDisplay().workArea;
+    if (isKdeSession()) {
+      void ensureKdeOverlayRule(wa.x + MARGIN, wa.y + MARGIN)
+        .catch(error => console.warn("[overlay] Could not update the KWin window rule", error))
+        .then(() => this.render(label, kind, wa));
+      return;
+    }
+    this.render(label, kind, wa);
+  }
+
+  private render(label: string, kind: OverlayKind, wa: Electron.Rectangle): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
     // Start wide enough to measure natural content, then shrink to the exact
     // rendered overlay width before showing it.
     const initialW = Math.min(MAX_WIDTH, Math.max(1, wa.width - MARGIN * 2));
     if (!this.win || this.win.isDestroyed()) {
       this.win = new BrowserWindow({
+        title: OVERLAY_TITLE,
         x: wa.x + MARGIN,
         y: wa.y + MARGIN,
         width: initialW,
@@ -162,7 +191,7 @@ function overlayHtml(kind: OverlayKind, themeId: string = "default"): string {
   })();
 
   return `<!doctype html>
-<html><head><meta charset="utf-8"><style>
+<html><head><meta charset="utf-8"><title>${OVERLAY_TITLE}</title><style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { background: transparent; overflow: hidden; border-radius: 14px; margin: 0; }
   html { background: transparent; }

@@ -8,6 +8,11 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 #include <ixwebsocket/IXConnectionState.h>
@@ -54,7 +59,19 @@ int Server::pickFreePort()
   WSACleanup();
   return port;
 #else
-  return -1;
+  const int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+  if (s < 0)
+    return -1;
+  sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  int port = -1;
+  socklen_t len = sizeof(addr);
+  if (bind(s, (sockaddr*)&addr, sizeof(addr)) == 0 && getsockname(s, (sockaddr*)&addr, &len) == 0)
+    port = ntohs(addr.sin_port);
+  close(s);
+  return port;
 #endif
 }
 

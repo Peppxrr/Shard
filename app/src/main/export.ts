@@ -6,7 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import type { ClipRecord, EditorExportProject, EditorTimelineClip, ExportProgress, ExportResult, ExportSettings } from "../shared/contracts";
-import { ffmpegBin, ffprobeAsync, listExportEncoders, probeAudioTracks } from "./ffmpeg";
+import { ffmpegTool, ffprobeAsync, listExportEncoders, probeAudioTracks } from "./ffmpeg";
 import { buildVideoEncoderArgs, pickExportResolution as pickResolution } from "./export-video";
 import { editorDir } from "./library";
 import {
@@ -244,7 +244,7 @@ export class ExportManager extends EventEmitter {
     percentEnd: number,
   ): Promise<void> {
     const { promise, resolve, reject } = Promise.withResolvers<void>();
-    const exe = path.join(ffmpegBin(), "ffmpeg.exe");
+    const exe = ffmpegTool("ffmpeg");
     console.info("[editor][ffmpeg] spawn", { executable: exe, arguments: args });
     const child = spawn(exe, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     this.current = child;

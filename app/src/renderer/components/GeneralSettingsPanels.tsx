@@ -2,7 +2,8 @@ import { useState } from "react";
 import type { ExportEncoderInfo, MonitorInfo, Settings } from "../../shared/contracts";
 import { largeVideoBytes } from "../../shared/storage-policy";
 import { Button, Card, Confirm, Icon, ShardSelect, Toggle } from "./ui";
-import { ChoiceCards, NumberControl, SettingRow, SwitchRow } from "./SettingControls";
+import { ChoiceCards, DurationControl, NumberControl, SettingRow, SwitchRow } from "./SettingControls";
+import { replayHotkeyMinimum } from "../../shared/replay-policy";
 import { UpdatesSettings } from "./UpdatesSettings";
 import { MedalImport } from "./MedalImport";
 import { StorageSummary } from "./StorageSummary";
@@ -23,10 +24,13 @@ export function CaptureSettingsPanel({ settings, onChange, monitors }: Props & {
       <ShardSelect value={String(settings.capture.monitor)} onChange={value => capture({ monitor: Number(value) })} disabled={settings.capture.mode === "game" || !monitors.length}
         options={monitors.length ? monitors.map(m => ({ value: String(m.index), label: `${m.name} · ${m.width}×${m.height}${m.primary ? " (Primary)" : ""}` })) : [{ value: String(settings.capture.monitor), label: "Finding displays…" }]} />
     </SettingRow>
-  </Card><Card title="Replay history" sub="Keep recent gameplay ready to save from memory.">
-    <SettingRow title="Duration" description="The maximum history available to your save shortcut."><NumberControl label="Replay duration" value={settings.replay.maxSeconds} min={30} unit="sec" onChange={maxSeconds => replay({ maxSeconds })} /></SettingRow>
-    <SettingRow title="Memory limit" description="A lower limit may shorten the available history."><NumberControl label="Replay memory limit" value={settings.replay.maxMb} min={256} unit="MB" onChange={maxMb => replay({ maxMb })} /></SettingRow>
-    <p className="settings-note"><Icon name="disc" size={14} />Memory is released 15 seconds after capture stops.</p>
+  </Card>{window.shard.platform === "linux" && <Card title="Game capture" sub="Capture Vulkan and Proton games directly instead of through screen capture.">
+    <SwitchRow title="Game capture for all Vulkan/Proton games" description="Applies to games started after your next login. OpenGL games and games in a Flatpak sandbox aren’t covered. To capture one Steam game right away, add OBS_VKCAPTURE=1 %command% to its launch options instead." checked={settings.app.vkcaptureAllGames} onChange={vkcaptureAllGames => onChange({ ...settings, app: { ...settings.app, vkcaptureAllGames } })} />
+    {window.shard.vkcaptureActive && <p className="settings-note"><Icon name="check" size={14} />Active in this session.</p>}
+  </Card>}<Card title="Replay history" sub="Keep recent gameplay ready to save from memory.">
+    <SettingRow title="Duration" description="Type a length like 30s, 5m or 1h 30m and press Enter. Duration and memory adjust together, and the buffer always covers your longest assigned save shortcut."><DurationControl label="Replay duration" seconds={settings.replay.maxSeconds} min={replayHotkeyMinimum(settings)} onChange={maxSeconds => replay({ maxSeconds })} /></SettingRow>
+    <SettingRow title="Memory limit" description="Linked to duration using your video and audio quality, with extra room for bitrate changes."><NumberControl label="Replay memory limit" value={settings.replay.maxMb} min={256} max={2_147_483_647} unit="MB" onChange={maxMb => replay({ maxMb })} /></SettingRow>
+    <SettingRow title="Stop delay" description="Wait after capture becomes inactive before clearing replay history. Also applies when automatic recording stops after the last game closes."><DurationControl label="Capture stop delay" seconds={settings.game.graceSeconds} min={0} onChange={graceSeconds => onChange({ ...settings, game: { ...settings.game, graceSeconds } })} /></SettingRow>
   </Card></div>;
 }
 
@@ -81,11 +85,11 @@ export function AppSettingsPanel({ settings, onChange, version }: Props & { vers
   return <div data-shard-slot="settings-section-layout" className="settings-sections"><Card span="full" title="Clip notifications" sub="Choose how the app lets you know a clip was saved.">
     <ChoiceCards label="Clip notification style" value={settings.app.notificationStyle} onChange={notificationStyle => patch({ notificationStyle })} options={[
       { value: "overlay", label: "Overlay", description: "A brief popup in the corner.", icon: "overlay" },
-      { value: "windows", label: "Windows", description: "A notification when the app is hidden.", icon: "bell" },
+      { value: "windows", label: "System", description: "A notification when the app is hidden.", icon: "bell" },
       { value: "off", label: "Off", description: "Save without a visual notification.", icon: "bellOff" },
     ]} />
   </Card><Card title="Startup & background" sub="Keep capture available when you need it.">
-    <SwitchRow title="Start with Windows" description="Open the app when you sign in." checked={settings.app.startWithWindows} onChange={startWithWindows => patch({ startWithWindows })} />
+    <SwitchRow title={window.shard.platform === "linux" ? "Launch at login" : "Start with Windows"} description="Open the app when you sign in." checked={settings.app.startWithWindows} onChange={startWithWindows => patch({ startWithWindows })} />
     <SwitchRow title="Keep running when closed" description="Closing the window sends the app to the system tray." checked={settings.app.minimizeToTray} onChange={minimizeToTray => patch({ minimizeToTray })} />
   </Card><RecordingPerformanceCard /><Card title="Advanced" sub="Performance and troubleshooting options.">
     <SwitchRow title="Hardware acceleration" description="Use GPU acceleration for the app. Changing this requires a restart." checked={settings.app.hardwareAcceleration ?? true} onChange={setPending} />

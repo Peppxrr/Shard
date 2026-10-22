@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import electron from "electron";
-import { existsSync } from "node:fs";
+import { resolveFfmpegTool } from "../src/main/ffmpeg-path.ts";
 
 const app = process.cwd();
 const temporary = path.resolve(app, "../tmp");
@@ -13,8 +13,8 @@ const fixture = await mkdtemp(path.join(temporary, "editor-player-test-"));
 let passed = false;
 try {
   const source = path.join(fixture, "source.mp4");
-  const staged = path.join(app, "resources/core-bin/ffmpeg.exe");
-  const ffmpeg = existsSync(staged) ? staged : path.resolve(app, "../vendor/ffmpeg/bin/ffmpeg.exe");
+  // The staged core-bin build, then the pinned vendor build (system FFmpeg off Windows).
+  const ffmpeg = resolveFfmpegTool("ffmpeg", [path.join(app, "resources/core-bin/ffmpeg"), path.resolve(app, "../vendor/ffmpeg/bin")]);
   const media = spawnSync(ffmpeg, ["-y", "-v", "error",
     "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=6", "-an",
     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", source], { encoding: "utf8", windowsHide: true });

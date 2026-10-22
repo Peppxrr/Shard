@@ -14,6 +14,7 @@
 
 #include <ixwebsocket/IXWebSocket.h>
 #include <ixwebsocket/IXWebSocketMessage.h>
+#include <ixwebsocket/IXWebSocketServer.h>
 
 // WebSocket JSON-RPC 2.0 server bound to 127.0.0.1. ixwebsocket v11 never
 // reads back an OS-assigned ephemeral port, so we choose a concrete free port

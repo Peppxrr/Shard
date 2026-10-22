@@ -1,6 +1,9 @@
 import { lazy, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipRecord, CoreState, ExportProgress, Settings } from "../shared/contracts";
 import { DEFAULT_SETTINGS } from "../shared/contracts";
+import { reconcileReplaySettings } from "../shared/replay-policy";
+import { formatDuration } from "../shared/duration";
+import { useCapturedGameIcon } from "./app-icons";
 import { CapturePage } from "./components/CapturePage";
 import { fmtSize, LibraryPage } from "./components/LibraryPage";
 import { getSavedSettingsSection, type SettingsSection } from "./components/settingsSections";
@@ -331,14 +334,14 @@ export function App() {
             setSavedSettings(next);
             void window.shard.setSettings(next).catch(() => {});
           }} />}
-          {tab === "settings" && <SettingsPage settings={settings} savedSettings={savedSettings} onChange={setSettings} activeSection={settingsSection}
+          {tab === "settings" && <SettingsPage settings={settings} savedSettings={savedSettings} onChange={next => setSettings(current => reconcileReplaySettings(next, current))} activeSection={settingsSection}
             onSectionChange={requestSettingsSection} updatesRequest={updatesRequest}
             onUpdatesRequestHandled={handleUpdatesRequestHandled}
             onCommit={(next) => {
-              setSettings(next);
-              const committed = { ...savedSettings, audio: next.audio };
+              setSettings(current => reconcileReplaySettings(next, current));
+              const committed = reconcileReplaySettings({ ...savedSettings, audio: next.audio }, savedSettings);
               void window.shard.setSettings(committed).then(() => {
-                setSavedSettings((current) => ({ ...current, audio: next.audio }));
+                setSavedSettings((current) => ({ ...current, audio: next.audio, replay: committed.replay }));
               }).catch((error: unknown) => {
                 pushToast(`Audio source update failed: ${error instanceof Error ? error.message : String(error)}`, "error");
               });
@@ -426,17 +429,18 @@ function LiveStatus() {
     });
   }, []);
   const capturing = subject && subject.kind !== "none";
+  const gameIcon = useCapturedGameIcon(subject);
   return (
     <div className="lv">
       {recording && <span className="chip chip--rec"><span className="dot dot--rec" /> REC</span>}
       {capturing ? (
         <span className={`chip ${subject?.kind === "game" ? "chip--game" : "chip--monitor"}`}>
-          <Icon name={subject?.kind === "game" ? "box" : "screen"} size={12} /><span className="lv__subject" title={subject?.name ?? undefined}>{subject?.name ?? (subject?.kind === "game" ? "Game" : "Desktop")}</span>
+          {gameIcon ? <img data-shard-slot="status-game-icon" className="lv__icon" src={gameIcon} alt="" draggable={false} /> : <Icon name={subject?.kind === "game" ? "box" : "screen"} size={12} />}<span className="lv__subject" title={subject?.name ?? undefined}>{subject?.name ?? (subject?.kind === "game" ? "Game" : "Desktop")}</span>
         </span>
       ) : (
         !recording && <span className="chip chip--idle">Waiting for capture</span>
       )}
-      {ring !== null && <span className="lv__ring num">{Math.floor(ring)}s buffered</span>}
+      {ring !== null && <span className="lv__ring num">{formatDuration(ring, true)} buffered</span>}
     </div>
   );
 }

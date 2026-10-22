@@ -32,7 +32,21 @@ constexpr EncoderCatalogEntry kEncoderCatalog[] = {
     {"obs_qsv11_v2", "Intel Quick Sync H.264", "h264", "intel", true},
     {"obs_qsv11_hevc", "Intel Quick Sync HEVC", "hevc", "intel", true},
     {"obs_qsv11_av1", "Intel Quick Sync AV1", "av1", "intel", true},
+    // Linux: obs-ffmpeg's VA-API encoders (Intel/AMD Mesa drivers). The *_tex
+    // ids take NV12 textures from the OpenGL mix without a CPU copy.
+    {"ffmpeg_vaapi_tex", "VA-API H.264", "h264", "vaapi", true},
+    {"hevc_ffmpeg_vaapi_tex", "VA-API HEVC", "hevc", "vaapi", true},
+    {"av1_ffmpeg_vaapi_tex", "VA-API AV1", "av1", "vaapi", true},
 };
+
+// VA-API serves the Intel and AMD drivers; the OBS graphics device decides
+// which hardware encoder auto selection prefers.
+bool vendorMatchesGpu(const char* vendor, const std::string& gpuVendor)
+{
+  if (std::strcmp(vendor, "vaapi") == 0)
+    return gpuVendor == "intel" || gpuVendor == "amd";
+  return gpuVendor == vendor;
+}
 
 bool encoderIdExists(const char* id)
 {
@@ -95,13 +109,17 @@ std::vector<std::string> EncoderManager::videoEncoderCandidates(const std::strin
       appendIfAvailable(out, "obs_nvenc_hevc_soft");
     else if (requested == "obs_nvenc_av1_tex")
       appendIfAvailable(out, "obs_nvenc_av1_soft");
+    else if (requested.find("vaapi_tex") != std::string::npos)
+      // Same VA-API encoder with a CPU frame upload when the texture path
+      // cannot share the OpenGL device.
+      appendIfAvailable(out, requested.substr(0, requested.size() - 4).c_str());
     appendIfAvailable(out, "obs_x264");
     return out;
   }
 
   const std::string primaryVendor = activeGpuVendor();
   for (const auto& entry : kEncoderCatalog)
-    if (entry.hardware && std::strcmp(entry.codec, "h264") == 0 && primaryVendor == entry.vendor)
+    if (entry.hardware && std::strcmp(entry.codec, "h264") == 0 && vendorMatchesGpu(entry.vendor, primaryVendor))
       appendIfAvailable(out, entry.id);
 
   // Multi-GPU systems can expose more than one working H.264 encoder. Prefer
@@ -198,6 +216,12 @@ obs_data_t* EncoderManager::videoSettings(const std::string& encoderId) const
   } else if (id.find("qsv") != std::string::npos) {
     obs_data_set_string(s, "profile", id.find("h264") != std::string::npos ? "high" : "main");
     obs_data_set_string(s, "target_usage", "TU4");
+  } else if (id.find("vaapi") != std::string::npos) {
+    // obs-ffmpeg-vaapi keys: "profile"/"level" are integer FFmpeg profile ids
+    // whose defaults (H.264 High, HEVC/AV1 Main) already fit; "vaapi_device"
+    // defaults to the first render node supporting the codec. No B-frames:
+    // many Intel low-power VA-API entrypoints reject them.
+    obs_data_set_int(s, "bf", 0);
   }
   return s;
 }

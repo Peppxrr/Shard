@@ -1,4 +1,4 @@
-// core-client.ts — spawns shardcore.exe from resources/core-bin, parses the
+// core-client.ts — spawns shardcore(.exe) from resources/core-bin, parses the
 // PORT line, and speaks WebSocket JSON-RPC with reconnect+backoff. Core crash
 // -> restart up to 5 times, then surface a fatal error state.
 import { type ChildProcess } from "node:child_process";
@@ -74,8 +74,12 @@ export class CoreClient extends EventEmitter {
 
   // Paths every core launch uses; the Recording priority task bakes in the
   // same values, so they must stay identical.
-  get launchPaths(): { bin: string; configDir: string; games: string } {
-    return { bin: this.coreBinDir, configDir: path.join(app.getPath("userData"), "core"), games: gamesJsonPath() };
+  get launchPaths(): { bin: string; exe: string; configDir: string; games: string } {
+    const bin = this.coreBinDir;
+    return {
+      bin, exe: path.join(bin, process.platform === "win32" ? "shardcore.exe" : "shardcore"),
+      configDir: path.join(app.getPath("userData"), "core"), games: gamesJsonPath(),
+    };
   }
 
   start(): Promise<void> {
@@ -100,8 +104,7 @@ export class CoreClient extends EventEmitter {
   private spawnCore(): void {
     this.reconnectTimer = null;
     if (this.shuttingDown || this.proc) return;
-    const { bin, configDir, games } = this.launchPaths;
-    const exe = path.join(bin, "shardcore.exe");
+    const { bin, exe, configDir, games } = this.launchPaths;
     const args = ["--config-dir", configDir, "--core-bin", bin, "--games", games, "--port", "0"];
     const priority = process.platform === "win32" && !this.priorityUnavailable && (this.options.priorityLaunch?.() ?? false);
     this.launchMode = priority ? "priority" : "normal";
@@ -109,7 +112,11 @@ export class CoreClient extends EventEmitter {
 
     this.supervised = false;
     this.lastPort = undefined;
-    this.proc = spawn(exe, priority ? ["--priority-bridge", ...args] : args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    // Linux: libobs and its modules resolve from core-bin even where the
+    // staged binaries carry no $ORIGIN RPATH.
+    const ldPath = process.env.LD_LIBRARY_PATH;
+    const env = process.platform === "linux" ? { ...process.env, LD_LIBRARY_PATH: ldPath ? `${bin}:${ldPath}` : bin } : undefined;
+    this.proc = spawn(exe, priority ? ["--priority-bridge", ...args] : args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env });
     if (process.platform === "win32") ownedProcesses.awaitOnly(this.proc);
     const proc = this.proc;
     const stdout = new CoreLineDecoder(line => {
@@ -308,6 +315,10 @@ export class CoreClient extends EventEmitter {
             if (!proc.stdin || proc.stdin.destroyed) throw new Error("Capture supervisor control pipe is unavailable");
             proc.stdin.on("error", () => {});
             proc.stdin.write("terminate\n");
+          } else if (process.platform === "linux") {
+            // Let libobs shut down on SIGTERM before forcing it.
+            proc.kill("SIGTERM");
+            await bounded("Capture core SIGTERM exit", closed, 2000).catch(() => { proc.kill("SIGKILL"); });
           } else proc.kill("SIGKILL");
           await bounded("Capture core and bundled helper exit", closed, 8000);
         }

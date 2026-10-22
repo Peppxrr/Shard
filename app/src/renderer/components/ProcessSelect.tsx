@@ -98,7 +98,8 @@ export function ProcessCombobox({
   const commit = (exe: string) => {
     const normalized = exe.trim().toLowerCase();
     if (!normalized) return;
-    const finalExe = normalized.endsWith(".exe") ? normalized : normalized + ".exe";
+    // Windows executables always end in .exe; Linux executables have no suffix.
+    const finalExe = window.shard.platform === "linux" || normalized.endsWith(".exe") ? normalized : normalized + ".exe";
     onChange(finalExe);
     setQuery(finalExe);
     setOpen(false);

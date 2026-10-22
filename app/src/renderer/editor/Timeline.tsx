@@ -833,7 +833,7 @@ export function Timeline({
               <button role="menuitem" onClick={closeMenuThen(() => onTrackChange(menuTrack.streamIndex, { included: !menuTrack.included }))}>{menuTrack.included ? "Exclude from export" : "Include in export"}</button>
               <button role="menuitem" onClick={closeMenuThen(() => onTrackChange(menuTrack.streamIndex, { volume: 1 }))}>Reset track volume</button>
               <button role="menuitem" className="is-danger" onClick={closeMenuThen(() => onDeleteAudioTrack(menuTrack.streamIndex))}><Icon name="trash" size={14} />Delete track</button>
-              <label className="editor-context__volume">Volume <input className="volume-slider" type="range" min={0} max={2} step={0.05} value={menuTrack.volume} style={volumeSliderStyle(menuTrack.volume, 2)} onChange={(event) => onTrackChange(menuTrack.streamIndex, { volume: Number(event.target.value) })} /><span className="num">{Math.round(menuTrack.volume * 100)}%</span></label>
+              <label className="editor-context__volume">Volume <input className="volume-slider" type="range" min={0} max={2} step={0.05} value={menuTrack.volume} style={volumeSliderStyle(menuTrack.volume, 2)} onChange={(event) => onTrackChange(menuTrack.streamIndex, { volume: Number(event.target.value) })} onDoubleClick={() => onTrackChange(menuTrack.streamIndex, { volume: 1 })} title="Double-click to reset to 100%" /><span className="num">{Math.round(menuTrack.volume * 100)}%</span></label>
               <span className="editor-context__rule" />
             </>
           )}

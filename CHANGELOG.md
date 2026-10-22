@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Very early Linux preview.** An experimental Linux AppImage (Wayland, tested on Fedora with KDE Plasma) is now built alongside Windows. Expect bugs and missing features; see [Linux](docs/LINUX.md).
+- Durations are now typed in one box: enter `30s`, `5m`, `1h 30m` or `1:30` and press Enter. Replay length, stop delay and shortcut clip lengths all use it, and the Capture page and status bar show buffered time as minutes and seconds.
+- The Games page, status bar and App audio sources show each game's or app's own icon, skipping anti-cheat launchers, crash reporters and generic icons.
+- Settings › Audio is much more compact: each track is a single row with its device or app, volume, on/off switch and remove button. App audio is always kept off Desktop audio, so the separate option was removed.
+- Redesigned the clip saved sound settings with matching sound, file and volume rows.
+- Double-click any volume slider to reset it to 100%.
+
 ## 0.1.11
 
 - Video and separated audio now move, trim, and split together when linked. Hold Alt to edit a clip independently; trims keep the source material available so they can be adjusted again.

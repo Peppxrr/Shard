@@ -3,7 +3,6 @@
 // and its administrators-only runtime copy are managed by shardcore's
 // --priority-task helper (core/src/priority_task.*); the UI never elevates.
 import { EventEmitter } from "node:events";
-import path from "node:path";
 import { spawn } from "./bundled-processes";
 import type { PerfSession, RecordingPriorityStatus } from "../shared/contracts";
 
@@ -29,7 +28,7 @@ export function priorityFallbackMessage(reason: string): string {
 
 export interface RecordingPriorityOptions {
   // Identical to the core launch (CoreClient.launchPaths).
-  launchPaths: () => { bin: string; configDir: string; games: string };
+  launchPaths: () => { bin: string; exe: string; configDir: string; games: string };
   enabled: () => boolean;
   parentWindow: () => string | null;
 }
@@ -142,13 +141,13 @@ export class RecordingPriority extends EventEmitter {
   }
 
   private run(mode: "status" | "install" | "uninstall"): Promise<HelperResult> {
-    const { bin, configDir, games } = this.options.launchPaths();
+    const { bin, exe, configDir, games } = this.options.launchPaths();
     const args = ["--priority-task", mode, "--config-dir", configDir, "--core-bin", bin, "--games", games];
     const parent = this.options.parentWindow();
     if (parent) args.push("--parent-window", parent);
     const { promise, resolve } = Promise.withResolvers<HelperResult>();
     let stdout = "";
-    const child = spawn(path.join(bin, "shardcore.exe"), args, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(exe, args, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
     child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
     child.once("error", () => resolve({ code: null, report: null }));
     child.once("close", code => {

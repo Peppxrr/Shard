@@ -6,6 +6,7 @@
 #include "capture_resilience.h"
 #include "capture_geometry.h"
 #include "capture_display.h"
+#include "capture_subject.h"
 
 #include <obs.h>
 
@@ -35,22 +36,7 @@ inline uint64_t duration_ms_now()
 // retarget the live sources in place, so replay history and audio continue.
 class SourceManager {
 public:
-  struct Subject {
-    enum class Kind { None, Monitor, Window };
-    Kind kind = Kind::None;
-    std::string exe;   // lowercase exe basename (window subjects), e.g. "eldenring.exe"
-    std::string title; // window title (may be empty)
-    std::string cls;   // window class (may be empty)
-    std::string name;  // display name (game name / "Desktop")
-    uint32_t pid = 0;  // process id (window subjects)
-
-    bool operator==(const Subject& o) const
-    {
-      return kind == o.kind && exe == o.exe && title == o.title && cls == o.cls && pid == o.pid &&
-             name == o.name;
-    }
-    bool operator!=(const Subject& o) const { return !(*this == o); }
-  };
+  using Subject = CaptureSubject;
 
   SourceManager(App& app, Config& config, Events& events);
   ~SourceManager();

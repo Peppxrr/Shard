@@ -1,11 +1,13 @@
 #pragma once
 
 #include "config.h"
+#include "platform/platform.h"
 #include "system_info.h"
 
 #include <obs.h>
 
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -23,15 +25,6 @@ struct Events {
     if (sink)
       sink(sinkCtx, type, params);
   }
-};
-
-struct MonitorInfo {
-  int index = 0;
-  std::string id;
-  std::string name;
-  uint32_t width = 0;
-  uint32_t height = 0;
-  bool primary = false;
 };
 
 // Owns the libobs context: startup, video/audio reset, the main scene,

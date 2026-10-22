@@ -10,8 +10,10 @@
 //   - no build symbols (*.pdb) or old-layout leftovers may ship;
 //   - shardcore.exe must not be older than the core sources (a stale core in
 //     a fresh installer is exactly the "fixed but still broken" trap).
-// Run via `npm run package` (wired in package.json) or directly:
+// Run via `npm run package` / `npm run package:linux` (wired in package.json) or directly:
 //   node scripts/verify-core-bin.mjs [path-to-core-bin]
+// On Linux the tree staged by scripts/linux/build.sh is checked instead: no
+// hook payload exists there, and FFmpeg may come from the system.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -54,6 +56,19 @@ const STALE_AT_DATA_ROOT = [
   "get-graphics-offsets32.exe", "get-graphics-offsets64.exe",
 ];
 
+// Linux (scripts/linux/build.sh staging). libobs keeps its soname links, so
+// each library is matched by prefix.
+const LINUX_ROOT_FILES = [
+  "shardcore", "obs-ffmpeg-mux", "obs-nvenc-test", "runtime-dependencies.json", "data/libobs/default.effect",
+  // libobs dlopens the graphics module by its unversioned name.
+  "libobs-opengl.so",
+  // obs-vkcapture's in-game Vulkan layer and OpenGL preload library.
+  "vkcapture/libVkLayer_obs_vkcapture.so", "vkcapture/libobs_glcapture.so",
+];
+const LINUX_LIBRARIES = ["libobs.so"];
+const LINUX_PLUGINS = ["linux-pipewire", "linux-pulseaudio", "obs-ffmpeg", "obs-x264", "obs-nvenc", "linux-vkcapture"];
+const linux = process.platform === "linux";
+
 const errors = [];
 const fail = (msg) => { errors.push(msg); console.error(`  x ${msg}`); };
 
@@ -72,7 +87,36 @@ function* walk(dir) {
 console.log(`==> Verifying staged core-bin: ${coreBin}`);
 
 if (!existsSync(coreBin)) {
-  fail(`staging dir does not exist — run scripts/build.ps1 first`);
+  fail(`staging dir does not exist — run ${linux ? "scripts/linux/build.sh" : "scripts/build.ps1"} first`);
+} else if (linux) {
+  for (const f of LINUX_ROOT_FILES) {
+    if (!existsSync(join(coreBin, f))) fail(`missing ${f}`);
+  }
+  const rootEntries = readdirSync(coreBin);
+  for (const lib of LINUX_LIBRARIES) {
+    if (!rootEntries.some(name => name === lib || name.startsWith(`${lib}.`))) fail(`missing ${lib}*`);
+  }
+  for (const p of LINUX_PLUGINS) {
+    if (!existsSync(join(coreBin, "obs-plugins/64bit", `${p}.so`))) fail(`missing obs-plugins/64bit/${p}.so`);
+  }
+  const pluginDir = join(coreBin, "obs-plugins/64bit");
+  for (const name of existsSync(pluginDir) ? readdirSync(pluginDir) : []) {
+    if (!LINUX_PLUGINS.includes(name.replace(/\.so$/, ""))) fail(`unexpected OBS module obs-plugins/64bit/${name} (libobs would load it)`);
+  }
+  // Optional bundled FFmpeg; without it the app uses the system ffmpeg/ffprobe.
+  if (existsSync(join(coreBin, "ffmpeg"))) {
+    for (const f of ["ffmpeg", "ffprobe"]) {
+      if (!existsSync(join(coreBin, "ffmpeg", f))) fail(`missing ffmpeg/${f}`);
+    }
+  }
+  const stagedPins = join(coreBin, "runtime-dependencies.json");
+  if (existsSync(stagedPins) && JSON.stringify(JSON.parse(readFileSync(stagedPins, "utf8"))) !== JSON.stringify(pins))
+    fail("staged runtime dependency versions differ from the selected pins — rebuild the core");
+  const shardcore = join(coreBin, "shardcore");
+  const newest = newestCoreSource();
+  if (existsSync(shardcore) && statSync(shardcore).mtimeMs < newest.mtimeMs) {
+    fail(`staged shardcore is older than ${newest.name} — re-run scripts/linux/build.sh before packaging`);
+  }
 } else {
   for (const f of ROOT_FILES) {
     if (!existsSync(join(coreBin, f))) fail(`missing ${f}`);
@@ -150,18 +194,7 @@ if (!existsSync(coreBin)) {
   // Staleness: a fresh installer wrapping an old core reproduces bugs that
   // were already fixed in source. Compare mtimes (git checkouts can shift
   // these; re-run scripts/build.ps1 if this fires spuriously).
-  let newestSource = 0;
-  let newestName = "";
-  const coreSrc = join(repoRoot, "core/src");
-  for (const p of walk(coreSrc)) {
-    const m = statSync(p).mtimeMs;
-    if (m > newestSource) { newestSource = m; newestName = relative(repoRoot, p); }
-  }
-  const cmakeLists = join(repoRoot, "core/CMakeLists.txt");
-  if (existsSync(cmakeLists) && statSync(cmakeLists).mtimeMs > newestSource) {
-    newestSource = statSync(cmakeLists).mtimeMs;
-    newestName = "core/CMakeLists.txt";
-  }
+  const { mtimeMs: newestSource, name: newestName } = newestCoreSource();
   const shardcore = join(coreBin, "shardcore.exe");
   // Version bumps now live in package.json instead of changing CMakeLists.
   // Check the actual PE version so an old core cannot pass the mtime gate.
@@ -184,7 +217,25 @@ if (!existsSync(coreBin)) {
 
 if (errors.length) {
   console.error(`\ncore-bin verification FAILED (${errors.length} problem${errors.length === 1 ? "" : "s"}).`);
-  console.error("Fix with: powershell -File scripts/build.ps1   (rebuilds + restages the Release core)");
+  console.error(linux
+    ? "Fix with: bash scripts/linux/build.sh   (rebuilds + restages the Release core)"
+    : "Fix with: powershell -File scripts/build.ps1   (rebuilds + restages the Release core)");
   process.exit(1);
 }
 console.log("==> core-bin verification passed — safe to package");
+
+// Newest core source (or CMakeLists) modification, for the staleness gate.
+function newestCoreSource() {
+  let mtimeMs = 0;
+  let name = "";
+  for (const p of walk(join(repoRoot, "core/src"))) {
+    const m = statSync(p).mtimeMs;
+    if (m > mtimeMs) { mtimeMs = m; name = relative(repoRoot, p); }
+  }
+  const cmakeLists = join(repoRoot, "core/CMakeLists.txt");
+  if (existsSync(cmakeLists) && statSync(cmakeLists).mtimeMs > mtimeMs) {
+    mtimeMs = statSync(cmakeLists).mtimeMs;
+    name = "core/CMakeLists.txt";
+  }
+  return { mtimeMs, name };
+}

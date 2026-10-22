@@ -7,12 +7,13 @@ import { spawnSync } from "node:child_process";
 import { registerHooks } from "node:module";
 
 import { buildVideoEncoderArgs, pickExportResolution } from "../src/main/export-video.ts";
+import { resolveFfmpegTool } from "../src/main/ffmpeg-path.ts";
 import { existsSync, statSync } from "node:fs";
 import "./test-playback-diagnostics.mjs";
 
 const editorCacheDirectory = await mkdtemp(path.join(os.tmpdir(), "shard-editor-cache-test-"));
 registerHooks({ resolve(specifier, context, next) {
-  if (["./bundled-processes", "./timeline-previews", "./editor-preparation", "./waveform-cache", "../shared/timeline-export", "../../shared/timeline-export"].includes(specifier)) specifier += ".ts";
+  if (["./bundled-processes", "./timeline-previews", "./editor-preparation", "./waveform-cache", "./ffmpeg-path", "../shared/timeline-export", "../../shared/timeline-export"].includes(specifier)) specifier += ".ts";
   if (specifier === "electron") return {
     url: `data:text/javascript,${encodeURIComponent(`export const app = { getPath: () => ${JSON.stringify(editorCacheDirectory)}, getAppPath: () => process.cwd() };`)}`,
     shortCircuit: true,
@@ -387,12 +388,12 @@ assert.deepEqual(
 );
 
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "Shard Editor Ω "));
-const stagedFfmpegDir = path.resolve("resources/core-bin/ffmpeg");
-const vendorFfmpegDir = path.resolve("../vendor/ffmpeg/bin");
-const ffmpegDir = existsSync(path.join(stagedFfmpegDir, "ffmpeg.exe")) ? stagedFfmpegDir : vendorFfmpegDir;
-const ffmpeg = path.join(ffmpegDir, "ffmpeg.exe");
-const ffprobe = path.join(ffmpegDir, "ffprobe.exe");
-assert.ok(existsSync(ffmpeg) && existsSync(ffprobe), `FFmpeg test binaries not found in ${ffmpegDir}`);
+// The staged core-bin build, then the pinned vendor build (system FFmpeg off Windows).
+const ffmpegDirs = [path.resolve("resources/core-bin/ffmpeg"), path.resolve("../vendor/ffmpeg/bin")];
+const ffmpeg = resolveFfmpegTool("ffmpeg", ffmpegDirs);
+const ffprobe = resolveFfmpegTool("ffprobe", ffmpegDirs);
+const ffmpegDir = path.dirname(ffmpeg);
+assert.equal(path.dirname(ffprobe), ffmpegDir, "ffmpeg and ffprobe come from one FFmpeg build");
 // ffmpeg.ts resolves <resourcesPath>/core-bin/ffmpeg like the packaged app. A
 // clean release checkout has no staged core-bin yet, so expose the same
 // binaries the test selected through a temporary junction.

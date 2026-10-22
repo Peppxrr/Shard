@@ -36,11 +36,11 @@ inline bool replayCanPurge(bool empty, int keyframes)
 // useful packets before the first watchdog readiness signal arrives.
 class ReplayActivityGrace {
 public:
-  bool shouldStop(bool captureActive, bool buffering, uint64_t nowMs)
+  bool shouldStop(bool captureActive, bool buffering, uint64_t nowMs, uint64_t graceMs = 15000)
   {
     if (captureActive || !buffering) { reset(); return false; }
     if (!inactive_) { inactive_ = true; sinceMs_ = nowMs; }
-    return nowMs - sinceMs_ >= 15000;
+    return nowMs - sinceMs_ >= graceMs;
   }
   void reset() { inactive_ = false; }
 private:

@@ -1,11 +1,13 @@
 import { KeyCaps } from "./HotkeyControls";
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ClipRecord, CoreState, PerfSample, Settings } from "../../shared/contracts";
+import type { CaptureMethod, ClipRecord, CoreState, PerfSample, Settings } from "../../shared/contracts";
 import { fmtDuration, fmtSize, relativeDate, Viewer } from "./LibraryPage";
 import { Button, Card, EmptyState, Icon, Segmented, StatusDot } from "./ui";
 import { mediaFileUrl } from "../editor/VideoPreview";
 import { StorageSummary } from "./StorageSummary";
 import { ClipSaveTracker } from "../../shared/clip-saves";
+import { clipDisplayName } from "../clip-display";
+import { durationParts, formatDuration } from "../../shared/duration";
 
 interface Props {
   settings: Settings;
@@ -24,6 +26,9 @@ const ENC_LABEL: Record<string, string> = {
   obs_nvenc_h264_tex: "NVENC H.264",
   obs_nvenc_hevc_tex: "NVENC HEVC",
   obs_nvenc_av1_tex: "NVENC AV1",
+  ffmpeg_vaapi_tex: "VA-API H.264 (GPU)",
+  hevc_ffmpeg_vaapi_tex: "VA-API HEVC (GPU)",
+  av1_ffmpeg_vaapi_tex: "VA-API AV1 (GPU)",
 };
 const PRESET_LABEL: Record<string, string> = {
   low: "Low · 720p30 · 4 Mbps",
@@ -52,6 +57,8 @@ export const CapturePage = memo(function CapturePage({ settings, clips }: Props)
   const [dur, setDur] = useState<Dur>("60");
   const [recent, setRecent] = useState<ClipRecord | null>(null);
   const [perf, setPerf] = useState<PerfSample | null>(null);
+  // Latest capture.method event (Linux: game captured through the screencast).
+  const [captureMethod, setCaptureMethod] = useState<{ method: CaptureMethod; reason: string } | null>(null);
   const recentGrid = useRef<HTMLDivElement>(null);
   // Failsafe only, for a lost core connection that never reports a result or
   // restarts: no clip-save event for this long ends the spinner.
@@ -87,6 +94,7 @@ export const CapturePage = memo(function CapturePage({ settings, clips }: Props)
         setRecording(st.recording.active);
         setSubject(st.capture.subject);
         setPerf(st.perf?.latest ?? null);
+        if (st.perf?.session) setCaptureMethod({ method: st.perf.session.capture.method, reason: st.perf.session.capture.reason });
       }).catch(() => {});
     };
     loadState();
@@ -96,6 +104,7 @@ export const CapturePage = memo(function CapturePage({ settings, clips }: Props)
       else if (type === "recording.state") setRecording((params as { active: boolean }).active);
       else if (type === "capture.subject") setSubject(params as unknown as Subject);
       else if (type === "perf.stats") setPerf(params as unknown as PerfSample); // core contract shape
+      else if (type === "capture.method") setCaptureMethod(params as unknown as { method: CaptureMethod; reason: string }); // core contract shape
       // Hotkey saves show the spinner too.
       if (clipSaves.apply(type, params)) syncSaves();
     });
@@ -143,7 +152,7 @@ export const CapturePage = memo(function CapturePage({ settings, clips }: Props)
               </p>
             </div>
             <p className="capture__meta num dim">
-              {MODE_LABEL[settings.capture.mode]} · {v.fps} FPS · {resLabel} · {settings.replay.maxSeconds}s buffer
+              {MODE_LABEL[settings.capture.mode]} · {v.fps} FPS · {resLabel} · {formatDuration(settings.replay.maxSeconds)} buffer
               {perf?.active && perf.cause !== "ok" && (
                 <span data-shard-component="perf-hint" data-shard-state={perf.cause} role="status" className="perf-hint"
                   title={`${perf.lostPct}% of frames lost in the last 5 s. ${perf.hint ?? ""}${perf.gpu.available ? ` GPU 3D ${Math.round(perf.gpu.engine3d ?? 0)}% · Video encoder ${Math.round(perf.gpu.videoEncode ?? 0)}%.` : ""}`}>
@@ -153,8 +162,10 @@ export const CapturePage = memo(function CapturePage({ settings, clips }: Props)
             </p>
           </div>
           <div className="capture__ring">
-            <div className="capture__ring-num num">{ringSeconds === null ? "—" : Math.floor(ringSeconds)}</div>
-            <div className="eyebrow" style={{ marginTop: 2 }}>sec buffered</div>
+            <div className="capture__ring-num num" aria-label={ringSeconds === null ? undefined : `${formatDuration(ringSeconds, true)} buffered`}>
+              {ringSeconds === null ? "—" : durationParts(ringSeconds, true).map(part => <span key={part.unit}>{part.value}<span className="capture__ring-unit">{part.unit}</span></span>)}
+            </div>
+            <div className="eyebrow" style={{ marginTop: 2 }}>buffered</div>
             {recording && <span className="chip chip--rec"><span className="dot dot--rec" /> REC</span>}
           </div>
         </div>
@@ -163,7 +174,7 @@ export const CapturePage = memo(function CapturePage({ settings, clips }: Props)
             <Segmented<Dur>
               value={dur}
               onChange={setDur}
-              options={[{ value: "30", label: "30s" }, { value: "60", label: "60s" }, { value: "120", label: "2m" }, { value: "300", label: "5m" }]}
+              options={(["30", "60", "120", "300"] as const).map(value => ({ value, label: formatDuration(Number(value)) }))}
             />
             <Button data-shard-component="capture-button" data-shard-state={saving ? "saving" : "ready"} variant="primary" icon={<Icon name="save" size={16} />} loading={saving} onClick={saveClip}>Save clip</Button>
           </div>
@@ -173,6 +184,12 @@ export const CapturePage = memo(function CapturePage({ settings, clips }: Props)
             {recording ? "Stop recording" : "Start recording"}
           </Button>
         </div>
+        {captureMethod?.method === "pipewire_desktop_window" && (
+          <div data-shard-component="capture-method-notice" data-shard-state={captureMethod.reason} role="status" className="editor-notice">
+            <Icon name="monitor" size={15} />
+            <span>This game is recorded through screen capture, so windows and panels on top of it are recorded too. For game capture, turn on <strong>Game capture for all Vulkan/Proton games</strong> in Settings › Capture, or add <code>OBS_VKCAPTURE=1 %command%</code> to the game’s Steam launch options, then restart the game.</span>
+          </div>
+        )}
       </section>
 
       <div data-shard-component="utility-rail" data-shard-slot="capture-summary" className="capture__grid utility-rail">
@@ -209,14 +226,14 @@ export const CapturePage = memo(function CapturePage({ settings, clips }: Props)
           <h2 className="card__title"><Icon name="film" size={16} />Recent</h2>
           <div className="recents" ref={recentGrid}>
             {lastClips.map((c) => (
-              <button key={c.id} className="recent" onClick={() => setRecent(c)} title={c.game ?? "Untagged"}>
+              <button key={c.id} className="recent" onClick={() => setRecent(c)} title={clipDisplayName(c)}>
                 <div className="recent__thumb">
                   {c.thumb ? <img src={mediaFileUrl(c.thumb)} alt="" /> : <div className="recent__nothumb"><Icon name="film" size={20} /></div>}
                   {c.protected === 1 && <span className="badge badge--fav"><Icon name="star" size={10} /></span>}
                   <span className="badge badge--dur num">{fmtDuration(c.durationMs)}</span>
                 </div>
                 <div className="recent__meta">
-                  <div className="recent__title">{c.game ?? "Untagged"}</div>
+                  <div className="recent__title">{clipDisplayName(c)}</div>
                   <div className="dim">{relativeDate(c.createdAt)} · {fmtSize(c.sizeBytes)}</div>
                 </div>
               </button>

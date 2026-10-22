@@ -11,8 +11,10 @@ const SETTINGS_SEARCH: SettingsSearchResult[] = [
   { section: "appearance", title: "Custom themes", keywords: "appearance themes folder import options" },
   { section: "capture", title: "Capture source", keywords: "mode auto desktop game only screen" },
   { section: "capture", title: "Display", keywords: "monitor screen desktop" },
-  { section: "capture", title: "Duration", keywords: "replay history buffer seconds length" },
+  { section: "capture", title: "Game capture for all Vulkan/Proton games", keywords: "vkcapture obs_vkcapture steam proton vulkan game capture linux" },
+  { section: "capture", title: "Duration", keywords: "replay history buffer seconds minutes length hotkeys shortcuts" },
   { section: "capture", title: "Memory limit", keywords: "replay history buffer ram mb" },
+  { section: "capture", title: "Stop delay", keywords: "replay history buffer capture inactive game automatic recording grace seconds minutes" },
   { section: "video", title: "Recording quality", keywords: "preset low medium high custom resolution width height bitrate mbps" },
   { section: "video", title: "Frame rate", keywords: "fps 30 60 120 motion" },
   { section: "video", title: "Encoder", keywords: "encoding compression gpu cpu h264 hevc av1 nvenc x264 preset" },
@@ -27,8 +29,8 @@ const SETTINGS_SEARCH: SettingsSearchResult[] = [
   { section: "storage", title: "Keep clips under", keywords: "storage size limit target automatic cleanup space disk gb delete oldest" },
   { section: "storage", title: "Include edited clips", keywords: "automatic cleanup editor exports delete" },
   { section: "storage", title: "Import", keywords: "medal folder library" },
-  { section: "app", title: "Clip notifications", keywords: "notification style overlay windows off popup" },
-  { section: "app", title: "Start with Windows", keywords: "startup sign in login" },
+  { section: "app", title: "Clip notifications", keywords: "notification style overlay system windows off popup" },
+  { section: "app", title: "Start with Windows", keywords: "startup sign in login launch" },
   { section: "app", title: "Keep running when closed", keywords: "background system tray minimize" },
   { section: "app", title: "Hardware acceleration", keywords: "performance gpu restart" },
   { section: "app", title: "Developer console", keywords: "advanced diagnostics logs troubleshooting" },
@@ -38,7 +40,11 @@ const SETTINGS_SEARCH: SettingsSearchResult[] = [
 export function searchSettings(query: string, shortcutLabels: string): SettingsSearchResult[] {
   const terms = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
   if (!terms.length) return [];
-  return SETTINGS_SEARCH.filter(result => {
+  // Linux: the startup switch is labelled "Launch at login" (titles must match
+  // it) and only Linux has the Vulkan game capture switch.
+  const linux = window.shard?.platform === "linux";
+  return SETTINGS_SEARCH.filter(result => linux || !result.title.startsWith("Game capture for all"))
+    .map(result => linux && result.title === "Start with Windows" ? { ...result, title: "Launch at login" } : result).filter(result => {
     const text = `${result.section} ${result.title} ${result.keywords} ${result.section === "hotkeys" ? shortcutLabels : ""}`.toLocaleLowerCase();
     return terms.every(term => text.includes(term));
   });

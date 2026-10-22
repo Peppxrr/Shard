@@ -22,7 +22,10 @@ export type EncoderChoice =
   | "av1_texture_amf"
   | "obs_qsv11_v2"
   | "obs_qsv11_hevc"
-  | "obs_qsv11_av1";
+  | "obs_qsv11_av1"
+  | "ffmpeg_vaapi_tex"
+  | "hevc_ffmpeg_vaapi_tex"
+  | "av1_ffmpeg_vaapi_tex";
 export type ExportEncoderChoice =
   | "auto"
   | "libx264"
@@ -48,9 +51,8 @@ export interface AudioSourceConfig {
   gain: number; // 0..2
   enabled: boolean;
   // kind === "process" only. True: the app is captured on its own track and
-  // removed from every Desktop audio track (core: audio_isolation.h). Missing
-  // in settings written before this existed, which keeps the old duplicate
-  // capture; new App audio rows default to true.
+  // removed from every Desktop audio track (core: audio_isolation.h). The app
+  // always saves true; the core still treats a missing value as false.
   excludeFromDesktop?: boolean;
 }
 
@@ -77,7 +79,7 @@ export interface ReplaySettings {
 
 export interface GameSettings {
   autoRecord: boolean;
-  graceSeconds: number; // auto-record grace after the last game session ends
+  graceSeconds: number; // stop delay for inactive replay capture and ended game auto-recording
   verboseDetection: boolean; // structured [GameDetection] logs on core stderr
 }
 
@@ -122,7 +124,7 @@ export interface StorageStatus {
 export interface AppSettings {
   // How clip-saved feedback is delivered.
   //   overlay  -> on-screen popup (always visible, top-left)
-  //   windows  -> Windows notification when the window is hidden/unfocused
+  //   windows  -> system (OS) notification when the window is hidden/unfocused
   //   off      -> no notification
   notificationStyle: NotificationStyle;
   startWithWindows: boolean;
@@ -146,6 +148,10 @@ export interface AppSettings {
   // core updates), so libobs can raise its GPU priority. Off by default; under
   // full GPU load it trades a little game performance for smooth recording.
   recordingPriority: boolean;
+  // Linux only: write ~/.config/environment.d/90-shard-vkcapture.conf with
+  // OBS_VKCAPTURE=1 so Vulkan/Proton games started after the next login load
+  // obs-vkcapture (true game capture instead of the screencast crop).
+  vkcaptureAllGames: boolean;
 }
 
 
@@ -176,12 +182,12 @@ export const DEFAULT_SETTINGS: Settings = {
   replay: { maxSeconds: 600, maxMb: 2048 },
   game: {
     autoRecord: false,
-    graceSeconds: 30,
+    graceSeconds: 15,
     verboseDetection: false,
   },
   audio: { sources: [] },
   storage: { autoCleanup: true, limitGb: 20, clipsDir: "", deleteEdited: false },
-  app: { notificationStyle: "overlay", startWithWindows: false, minimizeToTray: true, clipSound: true, clipSoundVolume: 0.8, clipSoundPath: "", developerConsole: false, hardwareAcceleration: true, recordingPriority: false },
+  app: { notificationStyle: "overlay", startWithWindows: false, minimizeToTray: true, clipSound: true, clipSoundVolume: 0.8, clipSoundPath: "", developerConsole: false, hardwareAcceleration: true, recordingPriority: false, vkcaptureAllGames: false },
   export: { targetMb: 10, encoder: "auto", resolution: "source" },
   hotkeys: [
     { id: "save_60", label: "Save last minute", accelerator: "F8", action: "save_clip", durationSec: 60, durationUnit: "min" },
@@ -189,6 +195,13 @@ export const DEFAULT_SETTINGS: Settings = {
     { id: "record", label: "Toggle recording", accelerator: "F10", action: "toggle_record" },
   ],
 };
+
+export interface HotkeyStatus {
+  id: string;
+  accelerator: string;
+  ok: boolean;
+  error?: string;
+}
 
 // ---------------------------------------------------------------------------
 // Core RPC (mirrors core/src/rpc.cpp dispatch)
@@ -198,7 +211,7 @@ export interface VideoEncoderInfo {
   id: Exclude<EncoderChoice, "auto">;
   label: string;
   codec: "h264" | "hevc" | "av1";
-  vendor: "cpu" | "nvidia" | "amd" | "intel";
+  vendor: "cpu" | "nvidia" | "amd" | "intel" | "vaapi";
   hardware: boolean;
 }
 export interface ExportEncoderInfo {
@@ -233,7 +246,20 @@ export type RpcMethod =
   | "game.listIgnored"
   | "game.sessions"
   | "game.detectExplain"
+  | "hotkeys.bind"
   | "shutdown";
+
+// hotkeys.bind: the core registers the full hotkey set with the desktop's
+// global shortcut service (Linux: KDE kglobalaccel) and emits
+// `hotkey.pressed {id}`. Each call replaces the whole set; ids not listed are
+// unregistered. supported:false (Windows, no kglobalaccel) => results: [].
+export interface HotkeyBindParams {
+  bindings: { id: string; accelerator: string; description: string }[]; // Electron accelerator strings
+}
+export interface HotkeyBindResult {
+  supported: boolean;
+  results: { id: string; ok: boolean; error?: string }[];
+}
 
 // Where a game definition comes from.
 export type GameSource = "discovered" | "user";
@@ -269,6 +295,17 @@ export interface GameSessionInfo {
   launcher: string | null;
   emulator: boolean;
   primary: boolean;
+  path: string; // active process image path, lowercase ("" when unknown)
+}
+
+// Games page artwork lookup; `path` is a running session's executable.
+export interface GameIconRequest {
+  id: string;
+  name: string;
+  executables: string[];
+  installPaths: string[];
+  launchers: LauncherRef[];
+  path?: string;
 }
 
 export interface DetectionReason {
@@ -310,7 +347,11 @@ export interface CoreState {
 export interface CoreEvent {
   // clip.queued {request, requestedSec, depth}: a save was accepted (before muxing);
   // clip.saved/error carry the same `request` id; clip.dropped {request}: the ring stopped first.
-  type: "ready" | "game.changed" | "game.session" | "clip.queued" | "clip.saved" | "clip.dropped" | "recording.state" | "ring.stats" | "perf.stats" | "error" | "capture.subject";
+  // hotkey.pressed {id}: a hotkeys.bind binding fired. capture.method
+  // {method: CaptureMethod, reason}: the active capture method or its reason
+  // changed (Linux reason "vkcapture_not_enabled": the game runs without the
+  // obs-vkcapture layer, so it is captured through the desktop screencast).
+  type: "ready" | "game.changed" | "game.session" | "clip.queued" | "clip.saved" | "clip.dropped" | "recording.state" | "ring.stats" | "perf.stats" | "error" | "capture.subject" | "hotkey.pressed" | "capture.method";
   params: Record<string, unknown>;
 }
 
@@ -371,7 +412,7 @@ export interface PerfEncoderPath {
   settings: Record<string, unknown> | null;
 }
 
-export type CaptureMethod = "game_capture" | "wgc_window" | "wgc_monitor" | "none";
+export type CaptureMethod = "game_capture" | "wgc_window" | "wgc_monitor" | "pipewire_desktop" | "pipewire_desktop_window" | "vkcapture" | "none";
 
 // Logged as [perf-session] whenever an output starts.
 export interface PerfSession {
@@ -635,6 +676,11 @@ export interface ShardApi {
   onToast(cb: (message: string) => void): () => void;
   // Frameless Windows shell controls. Other platforms retain their native frame.
   windowControlsSupported: boolean;
+  // process.platform of the app ("win32", "linux"); Windows-only wording and
+  // the ".exe" game executable rule follow it.
+  platform: string;
+  // Linux: OBS_VKCAPTURE=1 is set in this desktop session (games started from it load obs-vkcapture).
+  vkcaptureActive: boolean;
   // Windows display language for dates and numbers (Chromium UI strings ship in en-US only).
   regionalLocale: string;
   minimizeWindow(): Promise<void>;
@@ -663,5 +709,13 @@ export interface ShardApi {
   // keys that are currently registered (e.g. restoring the F8/F9 defaults).
   suspendHotkeys(): Promise<void>;
   resumeHotkeys(): Promise<void>;
+  // Linux only (empty elsewhere): registration result per hotkey id for the saved
+  // settings, e.g. accelerators the Wayland shortcut portal cannot bind; pushed after every apply.
+  getHotkeyStatus(): Promise<HotkeyStatus[]>;
+  onHotkeyStatus(cb: (statuses: HotkeyStatus[]) => void): () => void;
   listProcesses(): Promise<Array<{ exe: string; pid: number; title: string }>>;
+  // Data URLs keyed by game id; games without artwork are omitted.
+  gameIcons(requests: GameIconRequest[]): Promise<Record<string, string>>;
+  // App icons keyed by lowercase executable name ("discord.exe"); unknown apps are omitted.
+  appIcons(exes: string[]): Promise<Record<string, string>>;
 }

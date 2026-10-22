@@ -68,3 +68,4 @@ app/build/*
 /fix.js
 /get_fg*.ps1
 /probe*.ps1
+/.claude/settings.local.json

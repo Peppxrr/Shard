@@ -1,5 +1,7 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Icon, Toggle } from "./ui";
+import { MAX_CAPTURE_SECONDS } from "../../shared/replay-policy";
+import { formatDuration, parseDuration } from "../../shared/duration";
 
 export function SettingRow({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
   return <div className="setting-row"><div className="setting-row__copy"><h3>{title}</h3>{description && <p>{description}</p>}</div><div className="setting-row__control">{children}</div></div>;
@@ -42,5 +44,38 @@ export function NumberControl({ label, value, min, max = Number.MAX_SAFE_INTEGER
       if (raw.trim() && Number.isFinite(parsed) && parsed >= min && parsed <= max && Math.abs(parsed / step - Math.round(parsed / step)) < 0.00001) onChange(parsed);
     }} onBlur={commit} onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); }} />
     {unit && <span className="number-control__unit" aria-hidden="true">{unit}</span>}
+  </label>;
+}
+
+// Free-form duration ("90s", "5m", "1h 30m", "1:30"); commits on Enter or
+// blur, clamps to the allowed range and redisplays in its compact form.
+export function DurationControl({ label, seconds, min = 1, max = MAX_CAPTURE_SECONDS, onChange }: {
+  label: string; seconds: number; min?: number; max?: number; onChange: (seconds: number) => void;
+}) {
+  const id = useId();
+  const [draft, setDraftState] = useState<string | null>(null);
+  const [invalid, setInvalid] = useState(false);
+  // Enter commits then blurs; the ref lets the following blur see it was handled.
+  const pending = useRef<string | null>(null);
+  const setDraft = (value: string | null) => { pending.current = value; setDraftState(value); };
+  const commit = () => {
+    const text = pending.current;
+    if (text === null) return;
+    const parsed = parseDuration(text);
+    setDraft(null);
+    setInvalid(parsed === null);
+    if (parsed === null) return;
+    const next = Math.min(max, Math.max(min, parsed));
+    if (next !== seconds) onChange(next);
+  };
+  return <label data-shard-component="duration-control" data-unit={seconds >= 60 ? "min" : "sec"} data-shard-state={invalid ? "invalid" : undefined} className="number-control duration-control" htmlFor={id}
+    title={`Type a length such as 30s, 5m or 1h 30m. Minimum ${formatDuration(min)}.`}>
+    <span className="sr">{label}</span>
+    <input id={id} type="text" inputMode="text" spellCheck={false} autoComplete="off" aria-invalid={invalid || undefined}
+      value={draft ?? formatDuration(seconds)} onChange={event => { setDraft(event.target.value); setInvalid(false); }}
+      onBlur={commit} onKeyDown={event => {
+        if (event.key === "Enter") { commit(); event.currentTarget.blur(); }
+        else if (event.key === "Escape") { setDraft(null); setInvalid(false); event.currentTarget.blur(); }
+      }} />
   </label>;
 }

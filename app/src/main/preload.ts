@@ -13,6 +13,7 @@ import type {
   EditorExportProject,
   ExportProgress,
   ExportEncoderInfo,
+  HotkeyStatus,
   PerfSample,
   RecordingPriorityStatus,
   Settings,
@@ -117,6 +118,8 @@ const api: ShardApi = {
   },
   restartApp: () => ipcRenderer.invoke("app:restart") as Promise<void>,
   windowControlsSupported: process.platform === "win32",
+  platform: process.platform,
+  vkcaptureActive: process.env.OBS_VKCAPTURE === "1",
   // Set by regional-locale.ts in the main process.
   regionalLocale: process.argv.find((arg) => arg.startsWith("--shard-regional-locale="))?.slice("--shard-regional-locale=".length) || "en-US",
   minimizeWindow: () => ipcRenderer.invoke("window:minimize") as Promise<void>,
@@ -130,7 +133,15 @@ const api: ShardApi = {
   },
   suspendHotkeys: () => ipcRenderer.invoke("hotkeys:suspend") as Promise<void>,
   resumeHotkeys: () => ipcRenderer.invoke("hotkeys:resume") as Promise<void>,
+  getHotkeyStatus: () => ipcRenderer.invoke("hotkeys:status") as Promise<HotkeyStatus[]>,
+  onHotkeyStatus: (cb) => {
+    const listener = (_e: unknown, statuses: HotkeyStatus[]) => cb(statuses);
+    ipcRenderer.on("hotkeys:status", listener);
+    return () => ipcRenderer.removeListener("hotkeys:status", listener);
+  },
   listProcesses: () => ipcRenderer.invoke("processes:list") as Promise<Array<{ exe: string; pid: number; title: string }>>,
+  gameIcons: (requests) => ipcRenderer.invoke("games:icons", requests) as Promise<Record<string, string>>,
+  appIcons: (exes) => ipcRenderer.invoke("apps:icons", exes) as Promise<Record<string, string>>,
 
   onToast: (cb) => {
     const listener = (_e: unknown, message: string) => cb(message);

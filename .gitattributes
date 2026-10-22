@@ -1,0 +1,3 @@
+# Linux build scripts must keep LF endings, including in Windows checkouts
+# that are copied to a Linux machine.
+*.sh text eol=lf

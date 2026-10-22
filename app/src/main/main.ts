@@ -11,7 +11,8 @@ import path from "node:path";
 import { ThemeStore } from "./themes";
 import { CoreClient } from "./core-client";
 import { loadSettings, getSettings, saveSettings, seedGamesJson } from "./settings";
-import { HotkeyManager } from "./hotkeys";
+import { HotkeyManager, enableGlobalShortcutsPortal } from "./hotkeys";
+import { applyLinuxAutostart, applyVkcaptureEnvironment } from "./linux-desktop";
 import { Library, clipsDir, editorDir } from "./library";
 import { clipDragIcon } from "./drag-icon";
 import { medalImportMetadata, scanMp4Tree } from "./library-import";
@@ -20,6 +21,7 @@ import { ExportManager } from "./export";
 import { listExportEncoders, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews, stopEditorPreviews, resumeEditorPreviews } from "./ffmpeg";
 import { SaveOverlay } from "./overlay";
 import { getDefaultSoundPath, playClipSound, previewClipSound, setSoundWindow } from "./sound";
+import { appIcons, gameIcons } from "./app-icons";
 import { DevConsole } from "./dev-console";
 import { regionalLocaleArgument } from "./regional-locale";
 import { copyPlaybackReport } from "./playback-diagnostics";
@@ -32,7 +34,7 @@ import { recordingPriorityDiagnostics } from "../shared/recording-priority";
 import { ClipSaveTracker } from "../shared/clip-saves";
 import { collectBundleMembers, writeBundle } from "./diagnostics-bundle";
 import { parseClipLag } from "../shared/perf";
-import type { AudioSourceConfig, AudioTrackInfo, ClipLagInfo, ClipRecord, CoreState, DevConsoleLine, EditorExportProject, ExportProgress, PerfSample, PerfSession, RecordingPriorityStatus, Settings, StorageSettings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
+import type { AudioSourceConfig, AudioTrackInfo, ClipLagInfo, ClipRecord, CoreState, DevConsoleLine, EditorExportProject, ExportProgress, HotkeyStatus, PerfSample, PerfSession, RecordingPriorityStatus, Settings, StorageSettings, LibraryImportKind, LibraryImportResult } from "../shared/contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,6 +43,7 @@ const execFileAsync = promisify(execFile);
 if (!app.isPackaged && process.env.SHARD_DEV_USER_DATA) {
   app.setPath("userData", path.resolve(process.env.SHARD_DEV_USER_DATA));
 }
+enableGlobalShortcutsPortal();
 
 function appIcon(): NativeImage {
   const candidates = [
@@ -57,6 +60,7 @@ function appIcon(): NativeImage {
 export interface ProcessEntry { exe: string; pid: number; title: string }
 
 async function listProcesses(): Promise<ProcessEntry[]> {
+  if (process.platform === "linux") return listLinuxProcesses();
   // Try PowerShell first (rich window titles), fall back to tasklist.
   try {
     const { stdout } = await execFileAsync("powershell.exe", [
@@ -101,6 +105,29 @@ async function listProcesses(): Promise<ProcessEntry[]> {
     return [...map.values()].sort((a, b) => a.exe.localeCompare(b.exe));
   } catch {}
   return [];
+}
+
+// Same identity as the core's Linux process monitor: the exe link's basename,
+// or argv[0]'s for Wine/Proton games ("C:\...\Game.exe" -> "game.exe"), else
+// comm when the link is unreadable. Kernel threads (empty cmdline) are skipped;
+// Wayland exposes no window titles.
+async function listLinuxProcesses(): Promise<ProcessEntry[]> {
+  const pids = (await fs.readdir("/proc").catch(() => [] as string[])).filter(entry => /^\d+$/.test(entry));
+  const map = new Map<string, ProcessEntry>();
+  await Promise.all(pids.map(async pid => {
+    const [link, cmdline, comm] = await Promise.all([
+      fs.readlink(`/proc/${pid}/exe`).catch(() => ""),
+      fs.readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => ""),
+      fs.readFile(`/proc/${pid}/comm`, "utf8").catch(() => ""),
+    ]);
+    if (!cmdline) return;
+    const image = path.posix.basename(link.replace(/ \(deleted\)$/, ""));
+    const argv0 = cmdline.split("\0")[0].split(/[\\/]/).pop() ?? "";
+    const wine = argv0.toLowerCase().endsWith(".exe") && (!image || /^wine(64)?(-preloader)?$/.test(image) || image !== argv0);
+    const exe = (wine ? argv0 : image || comm.trim()).toLowerCase();
+    if (exe && !map.has(exe)) map.set(exe, { exe, pid: Number(pid), title: "" });
+  }));
+  return [...map.values()].sort((a, b) => a.exe.localeCompare(b.exe));
 }
 
 
@@ -198,6 +225,7 @@ async function main(): Promise<void> {
   await app.whenReady();
   if (!shutdown.acceptingWork) return;
   app.setAppUserModelId("com.shard.app");
+  overlay.prepare();
 
   await loadSettings();
   if (!shutdown.acceptingWork) return;
@@ -284,7 +312,7 @@ async function main(): Promise<void> {
     devConsole.feed({ t: Date.now(), level: "app", text: `FATAL: ${msg}` });
   });
 
-  hotkeys = new HotkeyManager(core, (msg) => toast(msg));
+  hotkeys = new HotkeyManager(core, (msg) => toast(msg), reportLinuxHotkeys);
 
   createWindow();
   applicationStarted = true;
@@ -539,8 +567,12 @@ function registerIpc(): void {
   });
   handle("hotkeys:suspend", () => hotkeys.suspend());
   handle("hotkeys:resume", () => hotkeys.resume());
+  // The hotkey editor shows registration errors on Linux only (Wayland portal limits).
+  handle("hotkeys:status", () => process.platform === "linux" ? hotkeys.statusList() : []);
   handle("devconsole:toggle", () => devConsole.toggle());
   handle("processes:list", async () => listProcesses());
+  handle("games:icons", async (_e, requests: unknown) => gameIcons(requests));
+  handle("apps:icons", async (_e, exes: unknown) => appIcons(exes));
 
 
 
@@ -631,18 +663,41 @@ function identifyAudioTrack(track: AudioTrackInfo, source: AudioSourceConfig | u
 
 function applyAppSettings(s: Settings): void {
   if (!app.isPackaged && process.env.SHARD_DEV_USER_DATA) return;
+  if (process.platform === "linux") {
+    void applyLinuxAutostart(s.app.startWithWindows).catch(error => console.warn("[autostart] Could not update the login entry", error));
+    void applyVkcaptureEnvironment(s.app.vkcaptureAllGames).catch(error => console.warn("[vkcapture] Could not update the session environment", error));
+    return;
+  }
   app.setLoginItemSettings({
     openAtLogin: s.app.startWithWindows,
     path: process.execPath,
   });
 }
 
+// Linux registrations (desktop shortcut service or portal) resolve
+// asynchronously, including the first one at startup; each changed result is
+// reported here, to the dev console and the hotkey editor.
+function reportLinuxHotkeys(statuses: HotkeyStatus[]): void {
+  for (const st of statuses) {
+    if (st.ok) continue;
+    const text = `Hotkey ${st.accelerator} failed to register: ${st.error ?? "key in use"}`;
+    toast(text);
+    devConsole.feed({ t: Date.now(), level: "app", severity: "warn", text });
+  }
+  const summary = statuses.filter(st => st.accelerator).map(st => `${st.accelerator} ${st.ok ? "ok" : "failed"}`).join(", ");
+  devConsole.feed({ t: Date.now(), level: "app", severity: "info", text: `Hotkeys (${hotkeys.backend}): ${summary || "none"}` });
+  win?.webContents.send("hotkeys:status", statuses);
+}
+
 async function applySettings(s: Settings): Promise<void> {
   await saveSettings(s);
+  s = getSettings();
   if (!shutdown.acceptingWork) return;
   const statuses = hotkeys.apply(s);
-  for (const st of statuses) {
-    if (!st.ok) toast(`Hotkey ${st.accelerator} failed to register: ${st.error ?? "key in use"}`);
+  if (process.platform !== "linux") {
+    for (const st of statuses) {
+      if (!st.ok) toast(`Hotkey ${st.accelerator} failed to register: ${st.error ?? "key in use"}`);
+    }
   }
   applyAppSettings(s);
   // Developer console follows the setting: open when enabled, close when off.

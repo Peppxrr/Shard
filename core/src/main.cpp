@@ -9,23 +9,19 @@
 #include "game_system.h"
 #include "log.h"
 #include "perf_monitor.h"
-#include "priority_task.h"
 #include "system_info.h"
 #include "recorder.h"
 #include "replay_ring.h"
 #include "jsonrpc.h"
+#include "platform/platform.h"
+#include "platform/global_shortcuts.h"
+#include "platform/window_system.h"
 #include "server.h"
 #include "sources.h"
-#include "process-supervisor.h"
 
 #include <obs.h>
 #include <util/platform.h>
 #include <util/base.h>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 #include <atomic>
 #include <chrono>
@@ -44,30 +40,6 @@ namespace fs = std::filesystem;
 using namespace std::chrono;
 
 namespace {
-
-// The process must be DPI-aware for WGC window capture to work: from an
-// unaware process on a scaled monitor, GetClientRect returns the *virtualized*
-// (logical) client size while the WGC frame surface is physical, so the
-// captured texture comes out 1/scale too small and the fit transform upscales
-// it — window capture looks "zoomed in". Desktop (monitor) capture is
-// unaffected because it has no per-window DPI involvement. OBS Studio ships
-// DPI-aware; the core (no manifest) must opt in at startup, before any
-// window is created. Per-monitor-aware-v2 (physical pixels on every monitor),
-// falling back to system-aware on older systems.
-void setProcessDpiAware()
-{
-#ifdef _WIN32
-  typedef BOOL(WINAPI * PFN_SetProcessDpiAwarenessContext)(HANDLE);
-  HMODULE user32 = GetModuleHandleW(L"user32.dll");
-  if (user32) {
-    PFN_SetProcessDpiAwarenessContext setCtx =
-        (PFN_SetProcessDpiAwarenessContext)GetProcAddress(user32, "SetProcessDpiAwarenessContext");
-    if (setCtx && setCtx((HANDLE)-4)) // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-      return;
-  }
-  SetProcessDPIAware();
-#endif
-}
 
 struct LogSession {
   LogSession() { logStart(); }
@@ -210,11 +182,9 @@ int runSelftest(CliOptions& opt, Config& config, Events& events, App& app, Sourc
 
 int main(int argc, char** argv)
 {
-  setProcessDpiAware(); // before any window/obs_startup: WGC needs DPI awareness
-  // An elevated core (Recording priority, or Shard run as administrator)
-  // must never resolve DLLs from PATH or the working directory.
-  if (processElevated())
-    hardenElevatedDllSearch();
+  // Before logging/OBS: Windows DPI awareness (WGC) and elevated DLL search
+  // hardening; Linux parent-death and termination signals.
+  platform::initCoreProcess();
   // Asynchronous diagnostic log: libobs threads only enqueue, so a slow
   // stderr reader can never stall rendering, audio or encoding. Keeps all OBS
   // levels and long messages while stdout carries only the PORT handshake.
@@ -249,6 +219,12 @@ int main(int argc, char** argv)
     logFormat("shardcore: %s", app.lastError().c_str());
     return 2;
   }
+  platform::startWindowSystem();
+  // Pairs every early return (selftest, exit 3/4); the normal path also stops
+  // it explicitly right after games.stop(). stopWindowSystem is idempotent.
+  struct WindowSystemGuard {
+    ~WindowSystemGuard() { platform::stopWindowSystem(); }
+  } windowSystemGuard;
 
   EncoderManager encoders(config);
   const std::string preferredEncoder = encoders.resolveVideoEncoderId(config.video.encoder);
@@ -269,7 +245,7 @@ int main(int argc, char** argv)
   recorder.setPerfMonitor(&perf);
 
   // Buffer only while something is being captured; the watchdog's activity
-  // signal drives the ring's start/stop (15 s grace) lifecycle.
+  // signal drives the ring's start/stop lifecycle using the configured grace.
   sources.setCaptureActivityCb([&ring](bool active) { ring.setCaptureActive(active); });
 
   if (opt.selftest)
@@ -299,6 +275,12 @@ int main(int argc, char** argv)
   };
   g_server = &server;
 
+  // Desktop global shortcuts (Linux KDE); bound by the app via hotkeys.bind.
+  platform::startGlobalShortcuts([&events](const std::string& id) { events.emit("hotkey.pressed", {{"id", id}}); });
+  struct GlobalShortcutsGuard {
+    ~GlobalShortcutsGuard() { platform::stopGlobalShortcuts(); }
+  } globalShortcutsGuard;
+
   if (!server.start()) {
     logLine("shardcore: failed to start RPC server");
     sources.stopWatchdog();
@@ -319,8 +301,8 @@ int main(int argc, char** argv)
 
   games.start();
 
-  // Run until the app asks for shutdown.
-  while (!rpc.shutdownRequested()) {
+  // Run until the app (or the OS) asks for shutdown.
+  while (!rpc.shutdownRequested() && !platform::terminationRequested()) {
     rpc.updateCaptureGeometry();
     std::this_thread::sleep_for(milliseconds(100));
   }
@@ -328,6 +310,8 @@ int main(int argc, char** argv)
   // Ordered shutdown.
   logLine("shardcore: shutdown requested");
   games.stop();
+  platform::stopWindowSystem();
+  platform::stopGlobalShortcuts();
   statsRun.store(false);
   statsThread.join();
   recorder.prepareVideoReset();
@@ -346,13 +330,9 @@ int main(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
-#ifdef _WIN32
-  // Recording priority helpers (status/install/bridge/elevated entry) run
-  // instead of the core and never start the normal supervisor.
-  if (const auto code = shard::runPriorityMode(argc, argv))
+  // Platform-only modes that replace the core (Windows: Recording priority
+  // helpers and the process-tree supervisor parent).
+  if (const auto code = shard::platform::runPreCoreEntry(argc, argv))
     return *code;
-  if (!shard::isSupervisedChild(argc, argv))
-    return shard::superviseProcessTree();
-#endif
   return shard::main(argc, argv);
 }

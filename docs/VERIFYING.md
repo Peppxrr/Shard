@@ -23,10 +23,20 @@ Choose the smallest scope that exercises the changed behavior:
 
 Scopes combine: `npm --prefix app run verify -- editor updater` builds the app
 once and runs both sets of tests. Add `--plan` to preview the selected steps.
+For linked replay duration/memory, replay hotkey minimums, or stop-delay controls,
+also run `npm --prefix app run test:replay`; it checks the shared sizing policy
+and the actual settings inputs in Chromium with an isolated temporary profile.
 Selection is explicit so unrelated changes in the working tree do not expand
 the current task. Normal scopes assume dependencies and the core toolchain are
 already installed. Release scope fetches pinned FFmpeg if its binaries are
 missing; otherwise it reuses them.
+
+On Linux, `core`/`capture` run `scripts/linux/build.sh` and the six native
+test binaries from `build_linux/`; the capture E2E is Windows-only and
+`release` is refused. Changes under `core/src/platform/` or shared core files
+should build on both platforms: run `core` on Windows and either run
+`scripts/linux/build.sh` on a Fedora machine or rely on the `Linux build`
+workflow (`.github/workflows/linux.yml`). See [Linux](LINUX.md).
 
 Successful steps print one short result. Complete logs and a machine-readable
 `summary.json` are kept under ignored `tmp/verify/<run>/`; the ten newest

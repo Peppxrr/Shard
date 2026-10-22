@@ -17,8 +17,7 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include "process-supervisor.h"
+#include "platform/windows/process_supervisor.h"
 
 #include <windows.h>
 #include <aclapi.h>
@@ -26,13 +25,10 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <taskschd.h>
-#endif
 
 namespace shard {
 
 namespace fs = std::filesystem;
-
-#ifdef _WIN32
 
 namespace {
 
@@ -950,13 +946,5 @@ bool interactiveUserCanWrite(const char* dir)
   CloseHandle(linked.LinkedToken);
   return allowed;
 }
-
-#else
-
-std::optional<int> runPriorityMode(int, char**) { return std::nullopt; }
-void hardenElevatedDllSearch() {}
-bool interactiveUserCanWrite(const char*) { return true; }
-
-#endif
 
 } // namespace shard

@@ -10,8 +10,8 @@ function normalized(value: string): string {
   return value.replace(/Control/gi, "Ctrl").toLowerCase().split("+").sort().join("+");
 }
 
-export function HotkeyInput({ value, label, used = [], onCommit }: {
-  value: string; label: string; used?: string[]; onCommit: (accelerator: string) => void;
+export function HotkeyInput({ value, label, used = [], status, onCommit }: {
+  value: string; label: string; used?: string[]; status?: string; onCommit: (accelerator: string) => void;
 }) {
   const [capturing, setCapturing] = useState(false);
   const [ready, setReady] = useState(false);
@@ -37,12 +37,14 @@ export function HotkeyInput({ value, label, used = [], onCommit }: {
         event.preventDefault(); event.stopPropagation();
         if (event.key === "Escape") { setCapturing(false); setError(""); return; }
         if (!ready || ["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
-        if (event.metaKey) { setError("Use Ctrl, Alt or Shift instead of the Windows key."); return; }
+        if (event.metaKey) { setError(`Use Ctrl, Alt or Shift instead of the ${window.shard.platform === "linux" ? "Super" : "Windows"} key.`); return; }
         const parts: string[] = [];
         if (event.ctrlKey) parts.push("Ctrl");
         if (event.altKey) parts.push("Alt");
         if (event.shiftKey) parts.push("Shift");
-        const key = event.key === " " ? "Space" : event.key === "+" ? "Plus" : event.key.startsWith("Arrow") ? event.key.slice(5) : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+        // Linux: Shift turns digits into symbols ("*"), which the Wayland shortcut portal cannot bind.
+        const digit = window.shard.platform === "linux" ? /^Digit(\d)$/.exec(event.code)?.[1] : undefined;
+        const key = digit ?? (event.key === " " ? "Space" : event.key === "+" ? "Plus" : event.key.startsWith("Arrow") ? event.key.slice(5) : event.key.length === 1 ? event.key.toUpperCase() : event.key);
         parts.push(key);
         const accelerator = parts.join("+");
         if (used.some(other => normalized(other) === normalized(accelerator))) {
@@ -52,6 +54,6 @@ export function HotkeyInput({ value, label, used = [], onCommit }: {
       }}>
       {capturing ? <span className="shortcut__listening">{ready ? "Press a key combination…" : "Getting ready…"}</span> : <KeyCaps value={value} />}
     </button>
-    {error && <span className="shortcut__error" role="status">{error}</span>}
+    {(error || status) && <span className="shortcut__error" role="status">{error || status}</span>}
   </div>;
 }

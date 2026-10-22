@@ -1,23 +1,9 @@
 #include "sources.h"
 #include "capture_resilience.h"
 #include "log.h"
+#include "platform/capture_backend.h"
 
 #include <obs-module.h>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <dwmapi.h>
-#include <dxgi1_6.h>
-#include <wrl/client.h>
-// Callback-mode display and suspend/resume notifications. No message window
-// is required, so recovery remains active in this headless core process.
-#include <powersetting.h>
-#include <powrprof.h>
-#include <mmdeviceapi.h>
-#include <audioclient.h>
-#include <functiondiscoverykeys_devpkey.h>
-#endif
 
 #include <algorithm>
 #include <cctype>
@@ -33,280 +19,10 @@ namespace shard {
 
 namespace {
 
-// UTF-16 (WASAPI device ids) -> UTF-8.
-std::string utf8FromWide(const wchar_t* w)
+bool subjectWindowMinimized(const CaptureSubject& subject)
 {
-  if (!w)
-    return {};
-#ifdef _WIN32
-  int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
-  if (len <= 1)
-    return {};
-  std::string out(len - 1, '\0');
-  WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), len, nullptr, nullptr);
-  return out;
-#else
-  return {};
-#endif
+  return capture::windowMinimized(capture::findSubjectWindow(subject));
 }
-
-// OBS window_capture descriptor escaping: ':' and '#' must be encoded
-// (see ms_build_window_strings in libobs/util/windows/window-helpers.c).
-std::string encodeWindowPart(const std::string& s)
-{
-  std::string out;
-  out.reserve(s.size());
-  for (char c : s) {
-    if (c == '#')
-      out += "#22";
-    else if (c == ':')
-      out += "#3A";
-    else
-      out += c;
-  }
-  return out;
-}
-
-// Both modern OBS 32.2.1 capture sources expose this boolean and pass it
-// to libobs-winrt, which selects BGRA8 before allocating the WGC frame pool.
-// Shard outputs Rec.709 SDR, including when Windows displays HDR content.
-void setWgcSdrSettings(obs_data_t* settings)
-{
-  obs_data_set_bool(settings, "force_sdr", true);
-}
-
-HMONITOR monitorHandle(int index)
-{
-  struct Context { int index; int current = 0; HMONITOR monitor = nullptr; } context{index};
-  EnumDisplayMonitors(nullptr, nullptr,
-      [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
-        auto& state = *reinterpret_cast<Context*>(param);
-        if (state.current++ != state.index) return TRUE;
-        state.monitor = monitor;
-        return FALSE;
-      }, reinterpret_cast<LPARAM>(&context));
-  return context.monitor;
-}
-
-CaptureDisplayState queryCaptureDisplay(HMONITOR monitor)
-{
-  CaptureDisplayState result;
-  result.monitor = reinterpret_cast<uintptr_t>(monitor);
-  MONITORINFOEXW info = {};
-  info.cbSize = sizeof(info);
-  if (!monitor || !GetMonitorInfoW(monitor, &info)) return result;
-  result.name = utf8FromWide(info.szDevice);
-
-  // Map the selected GDI display to an active DisplayConfig target. Query
-  // failures remain unknown, rather than silently claiming SDR. Topology can
-  // change between sizing and querying; retry that race a bounded three times.
-  for (int attempt = 0; attempt < 3; ++attempt) {
-    UINT32 pathCount = 0, modeCount = 0;
-    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) break;
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-    const LONG status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(),
-                                           &modeCount, modes.data(), nullptr);
-    if (status == ERROR_INSUFFICIENT_BUFFER) continue;
-    if (status != ERROR_SUCCESS) break;
-    for (UINT32 i = 0; i < pathCount; ++i) {
-      const auto& path = paths[i];
-      DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
-      source.header = {DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof(source),
-                       path.sourceInfo.adapterId, path.sourceInfo.id};
-      if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
-          wcscmp(source.viewGdiDeviceName, info.szDevice) != 0) continue;
-      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO color = {};
-      color.header = {DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, sizeof(color),
-                      path.targetInfo.adapterId, path.targetInfo.id};
-      if (DisplayConfigGetDeviceInfo(&color.header) == ERROR_SUCCESS)
-        result.advancedColor = color.advancedColorEnabled != 0;
-#if NTDDI_VERSION >= NTDDI_WIN11_GA
-      // On newer Windows, ACM/WCG and HDR are distinct advanced-color modes.
-      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 color2 = {};
-      color2.header = {DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2, sizeof(color2),
-                       path.targetInfo.adapterId, path.targetInfo.id};
-      if (DisplayConfigGetDeviceInfo(&color2.header) == ERROR_SUCCESS) {
-        result.advancedColor = color2.advancedColorActive != 0;
-        result.hdr = color2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
-      }
-#endif
-      break;
-    }
-    break;
-  }
-  // Older Windows lacks the separate HDR state API. Use the OS-reported
-  // active DXGI output color space, not luminance, bit depth or probe pixels.
-  if (!result.hdr.has_value()) {
-    using Microsoft::WRL::ComPtr;
-    ComPtr<IDXGIFactory1> factory;
-    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-      for (UINT i = 0; !result.hdr.has_value(); ++i) {
-        ComPtr<IDXGIAdapter1> adapter;
-        if (factory->EnumAdapters1(i, &adapter) != S_OK) break;
-        for (UINT j = 0; ; ++j) {
-          ComPtr<IDXGIOutput> output;
-          if (adapter->EnumOutputs(j, &output) != S_OK) break;
-          DXGI_OUTPUT_DESC desc = {};
-          if (FAILED(output->GetDesc(&desc)) || desc.Monitor != monitor) continue;
-          ComPtr<IDXGIOutput6> output6;
-          DXGI_OUTPUT_DESC1 desc1 = {};
-          if (SUCCEEDED(output.As(&output6)) && SUCCEEDED(output6->GetDesc1(&desc1)))
-            result.hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-          break;
-        }
-      }
-    }
-  }
-  return result;
-}
-
-// The WGC monitor capture ("monitor_capture" → duplicator-monitor-capture)
-// targets a monitor by its device-interface id string ("monitor_id"), while
-// the config stores a monitor *index* (EnumDisplayMonitors order). Resolve
-// the index to the id; returns "" when the index is out of range.
-std::string monitorDeviceId(int index)
-{
-  struct Ctx {
-    int index;
-    int cur = 0;
-    char id[256] = {0};
-  } ctx;
-  ctx.index = index;
-  EnumDisplayMonitors(
-      nullptr, nullptr,
-      [](HMONITOR hmon, HDC /*hdc*/, LPRECT /*rect*/, LPARAM lp) -> BOOL {
-        Ctx* c = reinterpret_cast<Ctx*>(lp);
-        if (c->cur++ != c->index)
-          return TRUE;
-        MONITORINFOEXA mi = {};
-        mi.cbSize = sizeof(mi);
-        if (GetMonitorInfoA(hmon, &mi)) {
-          DISPLAY_DEVICEA dev = {};
-          dev.cb = sizeof(dev);
-          if (EnumDisplayDevicesA(mi.szDevice, 0, &dev, EDD_GET_DEVICE_INTERFACE_NAME))
-            strncpy(c->id, dev.DeviceID, sizeof(c->id) - 1);
-        }
-        return FALSE; // found the target monitor; stop
-      },
-      reinterpret_cast<LPARAM>(&ctx));
-  return ctx.id;
-}
-
-#ifdef _WIN32
-HWND findSubjectWindow(const SourceManager::Subject& subject)
-{
-  struct Candidate {
-    const SourceManager::Subject* subject;
-    HWND window = nullptr;
-    int score = -1;
-    long area = -1;
-  } candidate{&subject};
-
-  EnumWindows(
-      [](HWND window, LPARAM param) -> BOOL {
-        Candidate* best = reinterpret_cast<Candidate*>(param);
-        DWORD pid = 0;
-        GetWindowThreadProcessId(window, &pid);
-        if (pid != best->subject->pid || !IsWindowVisible(window))
-          return TRUE;
-
-        wchar_t titleW[512] = {};
-        wchar_t classW[256] = {};
-        GetWindowTextW(window, titleW, static_cast<int>(std::size(titleW)));
-        GetClassNameW(window, classW, static_cast<int>(std::size(classW)));
-        const std::string title = utf8FromWide(titleW);
-        const std::string cls = utf8FromWide(classW);
-        int score = 0;
-        if (!best->subject->cls.empty() && cls == best->subject->cls)
-          score += 2;
-        if (!best->subject->title.empty() && title == best->subject->title)
-          score += 1;
-
-        RECT rect = {};
-        long area = 0;
-        if (GetWindowRect(window, &rect))
-          area = (rect.right - rect.left) * (rect.bottom - rect.top);
-        if (score > best->score || (score == best->score && area > best->area)) {
-          best->window = window;
-          best->score = score;
-          best->area = area;
-        }
-        return TRUE;
-      },
-      reinterpret_cast<LPARAM>(&candidate));
-
-  return candidate.window;
-}
-
-// OBS exposes metadata read from its actual wc->window through get_hooked,
-// but no numeric HWND. Resolve that metadata uniquely within the target PID.
-// Ambiguous/missing matches stay unknown rather than reporting another window's
-// monitor. Before OBS acquires a target, use Shard's resolved target HWND.
-std::optional<uintptr_t> acquiredWgcWindow(obs_source_t* source, uint32_t pid)
-{
-  if (!source) return std::nullopt;
-  calldata_t data = {};
-  const bool acquired = proc_handler_call(obs_source_get_proc_handler(source), "get_hooked", &data) &&
-                        calldata_bool(&data, "hooked");
-  if (!acquired) { calldata_free(&data); return std::nullopt; }
-  struct Context {
-    uint32_t pid;
-    std::string title;
-    std::string cls;
-    HWND window = nullptr;
-    int matches = 0;
-  } context{pid, calldata_string(&data, "title"), calldata_string(&data, "class")};
-  calldata_free(&data);
-  EnumWindows([](HWND window, LPARAM param) -> BOOL {
-    auto& state = *reinterpret_cast<Context*>(param);
-    DWORD windowPid = 0;
-    GetWindowThreadProcessId(window, &windowPid);
-    if (windowPid != state.pid || !IsWindowVisible(window)) return TRUE;
-    wchar_t title[512] = {}, cls[256] = {};
-    GetWindowTextW(window, title, static_cast<int>(std::size(title)));
-    GetClassNameW(window, cls, static_cast<int>(std::size(cls)));
-    if (utf8FromWide(title) == state.title && utf8FromWide(cls) == state.cls) {
-      state.window = window;
-      ++state.matches;
-    }
-    return TRUE;
-  }, reinterpret_cast<LPARAM>(&context));
-  return context.matches == 1 ? reinterpret_cast<uintptr_t>(context.window) : uintptr_t{0};
-}
-#endif
-
-bool subjectWindowMinimized(const SourceManager::Subject& subject)
-{
-#ifdef _WIN32
-  const HWND window = findSubjectWindow(subject);
-  return window && IsIconic(window);
-#else
-  (void)subject;
-  return false;
-#endif
-}
-
-#ifdef _WIN32
-ULONG CALLBACK capturePowerCallback(PVOID context, ULONG type, PVOID setting)
-{
-  auto* state = static_cast<CaptureRecoveryState*>(context);
-  if (!state)
-    return ERROR_SUCCESS;
-
-  if (type == PBT_APMRESUMEAUTOMATIC || type == PBT_APMRESUMECRITICAL || type == PBT_APMRESUMESUSPEND) {
-    state->onResume();
-  } else if (type == PBT_POWERSETTINGCHANGE && setting) {
-    const auto* change = static_cast<const POWERBROADCAST_SETTING*>(setting);
-    if (IsEqualGUID(change->PowerSetting, GUID_CONSOLE_DISPLAY_STATE) && change->DataLength >= sizeof(DWORD)) {
-      DWORD displayState = 0;
-      std::memcpy(&displayState, change->Data, sizeof(displayState));
-      state->onDisplayState(static_cast<int>(displayState));
-    }
-  }
-  return ERROR_SUCCESS;
-}
-#endif
 
 } // namespace
 
@@ -394,22 +110,8 @@ void SourceManager::applyVideoSourceLocked()
 {
   removeVideoSourceItem();
 
-  // Desktop: WGC monitor capture of the configured monitor. With graphics
-  // initialized before module load, "monitor_capture" is the WGC duplicator,
-  // which targets monitors by device-id string ("monitor_id"); the legacy
-  // BitBlt implementation used the "monitor" index. Set both.
-  {
-    obs_data_t* s = obs_data_create();
-    const std::string devId = monitorDeviceId(config_.capture.monitor);
-    if (!devId.empty())
-      obs_data_set_string(s, "monitor_id", devId.c_str());
-    obs_data_set_int(s, "monitor", config_.capture.monitor);
-    obs_data_set_int(s, "method", 2); // METHOD_WGC
-    obs_data_set_bool(s, "capture_cursor", true);
-    setWgcSdrSettings(s);
-    monitorSource_ = obs_source_create("monitor_capture", "monitor-capture", s, nullptr);
-    obs_data_release(s);
-  }
+  // Desktop capture of the configured monitor (Windows: WGC monitor_capture).
+  monitorSource_ = capture::createDesktopSource(config_);
   // The hook is preferred while healthy. Keep WGC running underneath so it
   // can take over without waiting for a new capture session.
   createGameCaptureLocked();
@@ -465,38 +167,14 @@ void SourceManager::applyVideoSourceLocked()
 
 void SourceManager::createWindowCaptureLocked()
 {
-  obs_data_t* s = obs_data_create();
-  obs_data_set_int(s, "method", 2);
-  setWgcSdrSettings(s);
-  obs_data_set_int(s, "priority", 2);
-  obs_data_set_bool(s, "cursor", true);
-  // Keep WGC's complete surface alive. The scene item is cropped to the
-  // Win32 client rect only when that geometry is valid; failed geometry
-  // therefore falls back to a live full-window frame instead of black.
-  obs_data_set_bool(s, "client_area", false);
-  obs_data_set_string(s, "window", "::");
-  windowSource_ = obs_source_create("window_capture", "game-window", s, nullptr);
-  obs_data_release(s);
+  windowSource_ = capture::createWindowSource(monitorSource_);
 }
 
 bool SourceManager::pidAlive(uint32_t pid)
 {
   if (pid == 0)
     return false;
-#ifdef _WIN32
-  // A handle can outlive the process (OBS holds one to a hooked target), so
-  // check the exit state. Protected processes may refuse even limited query
-  // access while running; only a missing PID is treated as exited.
-  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (!h)
-    return GetLastError() == ERROR_ACCESS_DENIED;
-  DWORD exitCode = 0;
-  const bool alive = GetExitCodeProcess(h, &exitCode) && exitCode == STILL_ACTIVE;
-  CloseHandle(h);
-  return alive;
-#else
-  return false;
-#endif
+  return capture::processAlive(pid);
 }
 
 CaptureSize SourceManager::captureSize() const
@@ -536,21 +214,18 @@ bool SourceManager::resizeCanvas(CaptureSize size)
 
 void SourceManager::refreshTargetWindowLocked()
 {
-#ifdef _WIN32
-  const HWND window = findSubjectWindow(subject_);
-  if (!window || IsIconic(window)) return;
-  const uintptr_t identity = reinterpret_cast<uintptr_t>(window);
+  const uintptr_t identity = capture::findSubjectWindow(subject_);
+  if (!identity || capture::windowMinimized(identity)) return;
   if (identity == targetWindow_) return;
   const bool replaced = targetWindow_ != 0;
   targetWindow_ = identity;
   if (!replaced) return;
   // Launchers/splash screens can replace the HWND without changing PID,
   // title or class. The old hook texture can remain acquired indefinitely.
-  wchar_t title[512] = {}, cls[256] = {};
-  GetWindowTextW(window, title, static_cast<int>(std::size(title)));
-  GetClassNameW(window, cls, static_cast<int>(std::size(cls)));
-  subject_.title = utf8FromWide(title);
-  subject_.cls = utf8FromWide(cls);
+  if (const auto names = capture::windowIdentity(identity)) {
+    subject_.title = names->title;
+    subject_.cls = names->cls;
+  }
   logRecoveryLocked("target_window_replaced", "recreate_game_and_wgc", 2, duration_ms_now());
   healthRecovery_.resetEvidence();
   resetFrameProbeLocked();
@@ -559,12 +234,10 @@ void SourceManager::refreshTargetWindowLocked()
   setWindowTargetLocked(subject_);
   logFormat("capture: game window replaced for pid=%lu; reacquiring capture",
             static_cast<unsigned long>(subject_.pid));
-#endif
 }
 
 void SourceManager::refreshCaptureDisplayLocked(uint64_t nowMs)
 {
-#ifdef _WIN32
   if (subject_.kind == Subject::Kind::None) {
     captureDisplay_ = {};
     captureDisplayWindow_ = 0;
@@ -572,20 +245,14 @@ void SourceManager::refreshCaptureDisplayLocked(uint64_t nowMs)
     return;
   }
   captureDisplayWindow_ = subject_.kind == Subject::Kind::Window
-      ? acquiredWgcWindow(windowSource_, subject_.pid).value_or(targetWindow_) : 0;
-  const uintptr_t monitor = selectCaptureMonitor(subject_.kind == Subject::Kind::Window,
-      captureDisplayWindow_, config_.capture.monitor,
-      [](uintptr_t hwnd) {
-        const HWND window = reinterpret_cast<HWND>(hwnd);
-        return IsWindow(window) ? reinterpret_cast<uintptr_t>(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)) : 0;
-      },
-      [](int index) { return reinterpret_cast<uintptr_t>(monitorHandle(index)); });
+      ? capture::acquiredWindow(windowSource_, subject_.pid).value_or(targetWindow_) : 0;
+  const uintptr_t monitor = capture::displayForTarget(subject_.kind == Subject::Kind::Window,
+      captureDisplayWindow_, config_.capture.monitor);
   if (monitor == captureDisplay_.monitor && lastDisplayQueryMs_ && nowMs - lastDisplayQueryMs_ < 5000) return;
-  captureDisplay_ = queryCaptureDisplay(reinterpret_cast<HMONITOR>(monitor));
+  captureDisplay_ = capture::queryCaptureDisplay(monitor);
   lastDisplayQueryMs_ = nowMs;
   // Always-forced SDR means moving displays or toggling HDR doesn't change
   // WGC's BGRA8 format. OBS follows the window; do not reset any source/output.
-#endif
 }
 
 std::string SourceManager::colorDiagnosticsLocked() const
@@ -612,9 +279,7 @@ void SourceManager::applySubjectLocked()
   const bool showGame = subject_.kind == Subject::Kind::Window;
   if (showGame) {
     setWindowTargetLocked(subject_);
-#ifdef _WIN32
-    targetWindow_ = reinterpret_cast<uintptr_t>(findSubjectWindow(subject_));
-#endif
+    targetWindow_ = capture::findSubjectWindow(subject_);
   }
   lastDisplayQueryMs_ = 0;
   refreshCaptureDisplayLocked(duration_ms_now());
@@ -685,44 +350,19 @@ void SourceManager::fillWindowFrameLocked()
 {
   struct obs_sceneitem_crop sceneCrop = {};
   windowClientSize_ = {};
-#ifdef _WIN32
   if (windowItem_ && windowSource_ && subject_.kind == Subject::Kind::Window) {
     const uint32_t sourceWidth = obs_source_get_width(windowSource_);
     const uint32_t sourceHeight = obs_source_get_height(windowSource_);
-    const HWND window = findSubjectWindow(subject_);
-    RECT client = {};
-    RECT frame = {};
-    POINT clientOrigin = {};
-    if (sourceWidth && sourceHeight && window && !IsIconic(window) && GetClientRect(window, &client) &&
-        ClientToScreen(window, &clientOrigin) &&
-        SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))) {
-      const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
-      const int64_t clientHeight = client.bottom - client.top;
-      const uint32_t captionInset =
-          (style & WS_CAPTION) == WS_CAPTION && clientOrigin.y > frame.top
-              ? captionBoundaryInset(GetDpiForWindow(window))
-              : 0;
-      const ClientAreaCrop crop =
-          computeClientAreaCrop(sourceWidth, sourceHeight, frame.left, frame.top, clientOrigin.x,
-                                clientOrigin.y + captionInset, client.right - client.left,
-                                clientHeight - captionInset);
-      if (crop.valid) {
-        sceneCrop.left = static_cast<int>(crop.left);
-        sceneCrop.top = static_cast<int>(crop.top);
-        sceneCrop.right = static_cast<int>(crop.right);
-        sceneCrop.bottom = static_cast<int>(crop.bottom);
-        // The small caption-boundary inset is display cleanup, not a change
-        // in the game's aspect ratio. Keep video geometry consistent with
-        // the hook/client so fallback switching cannot discard replay history.
-        const auto clientCrop = computeClientAreaCrop(sourceWidth, sourceHeight, frame.left, frame.top,
-            clientOrigin.x, clientOrigin.y, client.right - client.left, clientHeight);
-        if (clientCrop.valid)
-          windowClientSize_ = {sourceWidth - clientCrop.left - clientCrop.right,
-                               sourceHeight - clientCrop.top - clientCrop.bottom};
-      }
+    const capture::WindowSceneCrop crop =
+        capture::windowSceneCrop(capture::findSubjectWindow(subject_), sourceWidth, sourceHeight);
+    if (crop.valid) {
+      sceneCrop.left = static_cast<int>(crop.left);
+      sceneCrop.top = static_cast<int>(crop.top);
+      sceneCrop.right = static_cast<int>(crop.right);
+      sceneCrop.bottom = static_cast<int>(crop.bottom);
+      windowClientSize_ = crop.clientSize;
     }
   }
-#endif
   fillFrame(windowItem_, &sceneCrop);
 }
 
@@ -732,19 +372,7 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
   if (!windowSource_ && !gameSource_)
     return;
   resetFrameProbeLocked();
-  const std::string desc = encodeWindowPart(s.title) + ":" + encodeWindowPart(s.cls) + ":" + encodeWindowPart(s.exe);
-  obs_data_t* d = obs_data_create();
-  obs_data_set_string(d, "window", desc.c_str());
-  if (windowSource_) {
-    obs_data_t* windowSettings = obs_data_create();
-    obs_data_apply(windowSettings, d);
-    setWgcSdrSettings(windowSettings);
-    obs_source_update(windowSource_, windowSettings);
-    obs_data_release(windowSettings);
-  }
-  if (gameSource_)
-    obs_source_update(gameSource_, d);
-  obs_data_release(d);
+  capture::targetGameSources(windowSource_, gameSource_, s);
 
   const auto now = std::chrono::steady_clock::now();
   captureHealthyAt_ = now;
@@ -763,23 +391,18 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
 
 void SourceManager::createGameCaptureLocked()
 {
-  obs_data_t* s = obs_data_create();
-  obs_data_set_string(s, "capture_mode", "window");
-  obs_data_set_int(s, "priority", 2);
-  obs_data_set_bool(s, "capture_cursor", true);
-  obs_data_set_bool(s, "anti_cheat_hook", true);
-  obs_data_set_int(s, "hook_rate", 1);
-  const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
-  obs_data_set_bool(s, "shard_gc_diagnostics", diagnostics && *diagnostics && std::string(diagnostics) != "0");
-  obs_data_set_string(s, "window", "::");
-  gameSource_ = obs_source_create("game_capture", "game-capture", s, nullptr);
-  obs_data_release(s);
+  gameSource_ = capture::createHookSource();
 }
 
 void SourceManager::recreateGameCaptureLocked()
 {
   // Updating the same descriptor does not reset an already acquired texture
   // in OBS. Recreate only the failed hook, leaving WGC and audio uninterrupted.
+  // Backends whose game connection outlives the source only get a re-target.
+  if (!capture::hookRecreationResets()) {
+    retryGameCaptureLocked();
+    return;
+  }
   probeHookPending_ = false;
   hookObservation_ = {};
   if (gameItem_) {
@@ -934,29 +557,14 @@ void SourceManager::retryMonitorCaptureLocked()
 {
   if (!monitorSource_ || subject_.kind != Subject::Kind::Monitor)
     return;
-  obs_data_t* settings = obs_data_create();
-  const std::string devId = monitorDeviceId(config_.capture.monitor);
-  if (!devId.empty())
-    obs_data_set_string(settings, "monitor_id", devId.c_str());
-  obs_data_set_int(settings, "monitor", config_.capture.monitor);
-  obs_data_set_int(settings, "method", 2);
-  obs_data_set_bool(settings, "capture_cursor", true);
-  setWgcSdrSettings(settings);
-  obs_source_update(monitorSource_, settings);
-  obs_data_release(settings);
+  capture::retryDesktopSource(monitorSource_, config_);
 }
 
 void SourceManager::retryWindowCaptureLocked()
 {
   if (!windowSource_ || subject_.kind != Subject::Kind::Window)
     return;
-  const std::string desc = encodeWindowPart(subject_.title) + ":" + encodeWindowPart(subject_.cls) + ":" +
-                           encodeWindowPart(subject_.exe);
-  obs_data_t* d = obs_data_create();
-  obs_data_set_string(d, "window", desc.c_str());
-  setWgcSdrSettings(d);
-  obs_source_update(windowSource_, d);
-  obs_data_release(d);
+  capture::retryWindowSource(windowSource_, subject_);
   lastWindowAction_ = "retry";
   lastWindowActionMs_ = duration_ms_now();
 }
@@ -965,12 +573,7 @@ void SourceManager::retryGameCaptureLocked()
 {
   if (!gameSource_ || subject_.kind != Subject::Kind::Window)
     return;
-  const std::string desc = encodeWindowPart(subject_.title) + ":" + encodeWindowPart(subject_.cls) + ":" +
-                           encodeWindowPart(subject_.exe);
-  obs_data_t* d = obs_data_create();
-  obs_data_set_string(d, "window", desc.c_str());
-  obs_source_update(gameSource_, d);
-  obs_data_release(d);
+  const std::string desc = capture::retryHookSource(gameSource_, subject_);
   lastHookAction_ = "retry";
   lastHookActionMs_ = duration_ms_now();
   const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
@@ -1009,18 +612,16 @@ void SourceManager::setGameSubject(const std::string& exe, const std::string& na
 
   const bool visibleIdentityChanged =
       subject_.kind != Subject::Kind::Window || subject_.pid != cand.pid || subject_.name != cand.name;
-#ifdef _WIN32
   // Games rewrite their titles (FPS counters, level names). The same HWND
   // needs no retarget: a new descriptor would restart the hook and the WGC
   // session. OBS only uses the title to choose among this exe's windows.
   if (subject_.kind == Subject::Kind::Window && subject_.pid == cand.pid && subject_.exe == cand.exe &&
-      targetWindow_ && reinterpret_cast<uintptr_t>(findSubjectWindow(cand)) == targetWindow_) {
+      targetWindow_ && capture::findSubjectWindow(cand) == targetWindow_) {
     subject_ = std::move(cand);
     if (visibleIdentityChanged)
       emitSubjectChanged();
     return;
   }
-#endif
   if (subject_.pid != cand.pid) targetWindow_ = 0;
   healthRecovery_.resetEvidence();
   videoRecoveryRequested_ = false;
@@ -1111,6 +712,7 @@ void SourceManager::noteCaptureMethodLocked(const char* method, const std::strin
        << " hook_api=" << (facts.hookApi.empty() ? "unknown" : facts.hookApi)
        << " hook_mode=" << (facts.hookMode.empty() ? "none" : facts.hookMode);
   logLine(line.str());
+  events_.emit("capture.method", {{"method", method}, {"reason", reason}});
 }
 
 std::string SourceManager::probeDiagnosticsLocked(uint64_t nowMs) const
@@ -1225,7 +827,10 @@ void SourceManager::recoverCaptureLocked(bool eligible, bool monitor, uint64_t n
       ++hookRetryCount_;
       break;
     case CaptureRecoveryAction::RecreateWgc:
-      recreateWindowCaptureLocked();
+      // A window source aliasing the desktop session (Linux) gains nothing
+      // from recreation; re-apply its target instead.
+      if (capture::windowSourceIsIndependent()) recreateWindowCaptureLocked();
+      else retryWindowCaptureLocked();
       lastWindowRetry_ = std::chrono::steady_clock::now();
       ++wgcRetryCount_;
       break;
@@ -1248,39 +853,9 @@ void SourceManager::watchdogLoop()
   constexpr auto kNoFramesDelay = std::chrono::seconds(10);
   CaptureRecoveryState recoveryState;
   CaptureRecoverySchedule recoverySchedule;
-#ifdef _WIN32
-  // Shared hook textures may fail to reopen during a D3D11 device reset
-  // while game_capture still reports its previous dimensions. Recreate the
-  // sources after OBS has rebuilt its device, outside the graphics callback.
-  gs_device_loss graphicsRecovery = {};
-  graphicsRecovery.data = &recoveryState;
-  graphicsRecovery.device_loss_release = [](void*) {};
-  graphicsRecovery.device_loss_rebuild = [](void*, void* data) {
-    static_cast<CaptureRecoveryState*>(data)->onGraphicsRebuilt();
-  };
-  obs_enter_graphics();
-  gs_register_loss_callbacks(&graphicsRecovery);
-  obs_leave_graphics();
-  DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS powerSubscription = {};
-  powerSubscription.Callback = capturePowerCallback;
-  powerSubscription.Context = &recoveryState;
-  HPOWERNOTIFY displayNotification = nullptr;
-  HPOWERNOTIFY suspendNotification = nullptr;
-  const DWORD displayResult = PowerSettingRegisterNotification(&GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_CALLBACK,
-                                       reinterpret_cast<HANDLE>(&powerSubscription),
-                                       &displayNotification);
-  if (displayResult != ERROR_SUCCESS) {
-    logFormat("capture: display notification registration failed (%lu)", displayResult);
-    displayNotification = nullptr;
-  }
-  const DWORD suspendResult = PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK,
-                                             reinterpret_cast<HANDLE>(&powerSubscription),
-                                             &suspendNotification);
-  if (suspendResult != ERROR_SUCCESS) {
-    logFormat("capture: suspend notification registration failed (%lu)", suspendResult);
-    suspendNotification = nullptr;
-  }
-#endif
+  // Display power, suspend/resume and graphics-device-loss notifications
+  // (Windows: D3D11 device rebuild callbacks and power notifications).
+  capture::SystemEventSubscription systemEvents(recoveryState);
   auto lastWatchdogTick = std::chrono::steady_clock::now();
 
   while (watchdogRun_.load()) {
@@ -1309,6 +884,7 @@ void SourceManager::watchdogLoop()
     bool active = false;
     {
       std::lock_guard<std::mutex> lock(sourceMutex_);
+      capture::persistDesktopState(monitorSource_, config_);
       if (subject_.kind == Subject::Kind::Window && !pidAlive(subject_.pid)) {
         if (requestedGame_.pid == subject_.pid) requestedGame_ = {};
         if (mode == "auto") {
@@ -1332,7 +908,7 @@ void SourceManager::watchdogLoop()
         const bool monitorHealthy = monitorReady && monitorObservation_.healthy(tickMs);
         active = monitorReady;
         activeBackend_ = ActiveBackend::None;
-        noteCaptureMethodLocked("wgc_monitor", monitorReady ? "desktop_subject" : "desktop_waiting_for_frames");
+        noteCaptureMethodLocked(capture::methodNames().desktop, monitorReady ? "desktop_subject" : "desktop_waiting_for_frames");
         if (monitorHealthy) {
           captureHealthyAt_ = now;
           lastWindowRetry_ = now;
@@ -1455,11 +1031,15 @@ void SourceManager::watchdogLoop()
                       hookRejected ? "true" : "false");
           }
           if (desired == ActiveBackend::Hook)
-            noteCaptureMethodLocked("game_capture", "hook_frames_ready");
+            noteCaptureMethodLocked(capture::methodNames().hook, "hook_frames_ready");
           else
-            noteCaptureMethodLocked("wgc_window",
+            noteCaptureMethodLocked(capture::methodNames().window,
                                     hookRejected ? std::string("hook_rejected_") + backendHealth_.rejectionReason()
-                                    : !gameWidth || !gameHeight ? std::string("hook_not_attached")
+                                    : !gameWidth || !gameHeight ? [&] {
+                                        // Platform-specific cause (Linux: game launched without vkcapture).
+                                        const std::string why = capture::hookUnavailableReason(subject_.pid);
+                                        return why.empty() ? std::string("hook_not_attached") : why;
+                                      }()
                                     : hookProbeStale ? std::string("hook_probe_stale")
                                                      : std::string("hook_unavailable"));
         } else {
@@ -1473,9 +1053,8 @@ void SourceManager::watchdogLoop()
 
           if (!minimized && !recoveryState.displaySleeping() &&
               now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
-            std::string msg = "Capture for " + subject_.name +
-                              " is not producing frames through either game capture or WGC; recovery "
-                              "is still retrying";
+            std::string msg = "Capture for " + subject_.name + " is not producing frames through either game capture or " +
+                              capture::methodNames().windowLabel + "; recovery is still retrying";
             events_.emit("error", {{"code", "CAPTURE_NO_FRAMES"}, {"message", msg}});
             windowNoFramesReported_ = true;
           }
@@ -1486,7 +1065,8 @@ void SourceManager::watchdogLoop()
         if (windowHealthy) {
           lastWindowRetry_ = now;
           wgcRetryCount_ = 0;
-        } else if (!usableWindowReady && normalRecoveryAllowed && now - lastWindowRetry_ >= kRetryDelay) {
+        } else if (!usableWindowReady && normalRecoveryAllowed && capture::windowSourceIsIndependent() &&
+                   now - lastWindowRetry_ >= kRetryDelay) {
           logRecoveryLocked("wgc_dimensions_unavailable", "retry_wgc", 0, tickMs);
           retryWindowCaptureLocked();
           lastWindowRetry_ = now;
@@ -1528,14 +1108,10 @@ void SourceManager::watchdogLoop()
                 ? windowHeight - static_cast<uint32_t>(wgcCrop.top + wgcCrop.bottom)
                 : 0;
         uint32_t clientWidth = 0, clientHeight = 0;
-#ifdef _WIN32
-        HWND diagnosticWindow = reinterpret_cast<HWND>(targetWindow_);
-        RECT diagnosticClient = {};
-        if (diagnosticWindow && IsWindow(diagnosticWindow) && GetClientRect(diagnosticWindow, &diagnosticClient)) {
-          clientWidth = static_cast<uint32_t>(std::max<LONG>(0, diagnosticClient.right - diagnosticClient.left));
-          clientHeight = static_cast<uint32_t>(std::max<LONG>(0, diagnosticClient.bottom - diagnosticClient.top));
+        if (const auto client = capture::windowClientSize(targetWindow_)) {
+          clientWidth = client->width;
+          clientHeight = client->height;
         }
-#endif
         const char* selectedBackend = "none";
         if (activeBackend_ == ActiveBackend::Hook)
           selectedBackend = "hook";
@@ -1599,12 +1175,7 @@ void SourceManager::watchdogLoop()
           logLine(line.str());
         }
         bool validWindow = false;
-#ifdef _WIN32
-        DWORD targetPid = 0;
-        const HWND currentWindow = reinterpret_cast<HWND>(targetWindow_);
-        validWindow = currentWindow && IsWindow(currentWindow) && IsWindowVisible(currentWindow) &&
-                      GetWindowThreadProcessId(currentWindow, &targetPid) && targetPid == subject_.pid;
-#endif
+        validWindow = capture::windowLiveForPid(targetWindow_, subject_.pid);
         recoverCaptureLocked(validWindow && !minimized && !recoveryState.displaySleeping() &&
                              !recoverySchedule.pending(), false, tickMs);
       } else {
@@ -1632,15 +1203,6 @@ void SourceManager::watchdogLoop()
     lastWatchdogTick = std::chrono::steady_clock::now();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
-#ifdef _WIN32
-  if (displayNotification)
-    PowerSettingUnregisterNotification(displayNotification);
-  if (suspendNotification)
-    PowerUnregisterSuspendResumeNotification(suspendNotification);
-  obs_enter_graphics();
-  gs_unregister_loss_callbacks(&recoveryState);
-  obs_leave_graphics();
-#endif
 }
 
 // ---------------------------------------------------------------- audio ----
@@ -1695,23 +1257,9 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
 
     obs_source_t* src = nullptr;
     if (route == AudioRowRoute::AppWindow) {
-      obs_data_t* s = obs_data_create();
-      obs_data_set_string(s, "window", c.window.empty() ? "::" : c.window.c_str());
-      obs_data_set_bool(s, "use_device_timing", false);
-      src = obs_source_create("wasapi_process_output_capture", c.name.c_str(), s, nullptr);
-      obs_data_release(s);
-    } else if (c.kind == "input") {
-      obs_data_t* s = obs_data_create();
-      obs_data_set_string(s, "device_id", c.id.c_str());
-      obs_data_set_bool(s, "use_device_timing", false);
-      src = obs_source_create("wasapi_input_capture", c.name.c_str(), s, nullptr);
-      obs_data_release(s);
+      src = capture::createAppAudioSource(c.window, c.name);
     } else {
-      obs_data_t* s = obs_data_create();
-      obs_data_set_string(s, "device_id", c.id.c_str());
-      obs_data_set_bool(s, "use_device_timing", false);
-      src = obs_source_create("wasapi_output_capture", c.name.c_str(), s, nullptr);
-      obs_data_release(s);
+      src = capture::createAudioDeviceSource(c.kind == "input", c.id, c.name);
     }
 
     if (!src)
@@ -1736,11 +1284,7 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
   // with every row disabled is intentional silence and must not silently
   // re-enable the default device behind the UI toggle.
   if (audioSources_.empty() && !isolationOwnsRows && !allConfiguredSourcesDisabled) {
-    obs_data_t* s = obs_data_create();
-    obs_data_set_string(s, "device_id", "default");
-    obs_data_set_bool(s, "use_device_timing", false);
-    obs_source_t* src = obs_source_create("wasapi_output_capture", "Default output", s, nullptr);
-    obs_data_release(s);
+    obs_source_t* src = capture::createAudioDeviceSource(false, "default", "Default output");
     if (src) {
       obs_source_set_volume(src, 1.0f);
       obs_source_set_audio_mixers(src, (1u << 0) | (1u << 1)); // master + track 1
@@ -1755,68 +1299,7 @@ void SourceManager::setAudioSources(const std::vector<AudioSourceConfig>& source
 
 nlohmann::json SourceManager::listDevices()
 {
-  nlohmann::json out = nlohmann::json::array();
-
-#ifdef _WIN32
-  HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  bool needUninit = SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
-  if (hr == RPC_E_CHANGED_MODE) {
-    // Already initialized as MTA on this thread; keep using it.
-    needUninit = false;
-  }
-
-  IMMDeviceEnumerator* enumerator = nullptr;
-  hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
-                        (void**)&enumerator);
-  if (SUCCEEDED(hr) && enumerator) {
-    auto collect = [&](EDataFlow flow, bool isInput) {
-      IMMDeviceCollection* collection = nullptr;
-      if (FAILED(enumerator->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &collection)))
-        return;
-      UINT count = 0;
-      collection->GetCount(&count);
-      for (UINT i = 0; i < count; i++) {
-        IMMDevice* device = nullptr;
-        if (FAILED(collection->Item(i, &device)))
-          continue;
-
-        LPWSTR idW = nullptr;
-        DWORD state = 0;
-        if (SUCCEEDED(device->GetId(&idW)) && SUCCEEDED(device->GetState(&state))) {
-          IPropertyStore* props = nullptr;
-          std::string name = "Unknown device";
-          if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props))) {
-            PROPVARIANT var;
-            PropVariantInit(&var);
-            if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &var)) && var.pwszVal)
-              name = utf8FromWide(var.pwszVal);
-            PropVariantClear(&var);
-            props->Release();
-          }
-          std::string id;
-          if (idW)
-            id = utf8FromWide(idW);
-          bool vm = name.find("voicemeeter") != std::string::npos ||
-                    name.find("Voicemeeter") != std::string::npos ||
-                    name.find("VOICEMEETER") != std::string::npos;
-          out.push_back({{"id", id}, {"name", name}, {"isInput", isInput}, {"isVoicemeeter", vm}});
-          CoTaskMemFree(idW);
-        }
-        device->Release();
-      }
-      collection->Release();
-    };
-
-    collect(eRender, false);
-    collect(eCapture, true);
-
-    enumerator->Release();
-  }
-
-  if (needUninit)
-    CoUninitialize();
-#endif
-  return out;
+  return capture::listAudioDevices();
 }
 
 nlohmann::json SourceManager::listMonitors() const

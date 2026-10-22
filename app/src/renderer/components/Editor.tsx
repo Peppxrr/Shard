@@ -4,6 +4,7 @@ import type { ExportProgress, WaveformData } from "../../shared/contracts";
 import type { ClipRecord } from "../../shared/contracts";
 import { Button, Icon, IconButton, Modal, Toggle } from "./ui";
 import { ClipRename } from "./ClipRename";
+import { clipDisplayName } from "../clip-display";
 import { ExportResultDialog } from "./ExportResultDialog";
 import { AUDIO_KIND_LABEL, Timeline, audioTrackColorStyle, volumeSliderStyle } from "../editor/Timeline";
 import { VideoPreview, formatEditorTime, mediaFileUrl } from "../editor/VideoPreview";
@@ -626,7 +627,7 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
           <span className="editor-header__divider" aria-hidden="true" />
           <div className="editor-header__title">
             <strong title={clipName}>{clipName}</strong>
-            <span>{clip.game ?? "Untagged"} · {formatEditorTime(duration)}</span>
+            <span>{clipDisplayName(clip)} · {formatEditorTime(duration)}</span>
           </div>
           <div data-shard-slot="editor-rename" className="editor-header__rename">
             <ClipRename clip={clip} onRenamed={setRenamedClip} mediaRef={videoRef} disabled={exporting || loadingMedia} />
@@ -714,7 +715,8 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
                     <span className="sr">{track.name} volume</span>
                     <input className="volume-slider" type="range" min={0} max={2} step={0.05} value={track.volume} disabled={!track.included}
                       style={volumeSliderStyle(track.volume, 2)}
-                      onChange={(event) => commit((current) => updateAudioTrack(current, track.streamIndex, { volume: Number(event.target.value) }))} />
+                      onChange={(event) => commit((current) => updateAudioTrack(current, track.streamIndex, { volume: Number(event.target.value) }))}
+                      onDoubleClick={() => commit((current) => updateAudioTrack(current, track.streamIndex, { volume: 1 }))} title="Double-click to reset to 100%" />
                     <span className="num">{Math.round(track.volume * 100)}%</span>
                   </label>
                 </div>

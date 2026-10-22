@@ -4,6 +4,8 @@ Read this before changing OBS startup, source creation/ordering, Game Capture/WG
 
 These notes describe constraints that are easy to break while making a locally reasonable change. Current source remains authoritative when implementation details evolve.
 
+Platform scope: everything below about WGC, Game Capture, DXGI, DisplayConfig, WASAPI and Recording priority describes the Windows backend in `core/src/platform/windows/`. The capture model and recovery policy in `sources.cpp` are shared; the Linux backend (portal ScreenCast, obs-vkcapture, PulseAudio-on-PipeWire) and its differences are in `docs/LINUX.md`. OS-specific source ids, settings and window/display queries belong in `core/src/platform/capture_backend.h` implementations, never in shared files.
+
 ## OBS initialization and scene output
 
 WGC capability in the OBS win-capture module depends on the active graphics device at module-load time. Shard must establish its D3D11 video context before loading OBS modules. Reordering startup so modules load before graphics initialization can silently fall back to a capture path that is black for GPU-rendered windows.
@@ -105,7 +107,7 @@ Multi-source audio depends on separate OBS mixes and one audio encoder per used 
 
 ## Per-application audio isolation
 
-Mix 0 is the master; configured audio row `i` uses mix `min(i + 1, 5)`. An App audio row (`kind: "process"`) with `excludeFromDesktop: true` is an isolated app, and its audio must exist on exactly one row mix while mix 0 still contains it once. Rows without the flag, including every row saved before the flag existed, keep the original OBS `wasapi_process_output_capture` window-based capture, and the app is also heard in Desktop audio.
+Mix 0 is the master; configured audio row `i` uses mix `min(i + 1, 5)`. An App audio row (`kind: "process"`) with `excludeFromDesktop: true` is an isolated app, and its audio must exist on exactly one row mix while mix 0 still contains it once. The app always saves App audio rows with the flag set (older settings are upgraded on load); the core still treats a row without it as the original OBS `wasapi_process_output_capture` window-based capture, where the app is also heard in Desktop audio.
 
 Never build the Desktop track by subtracting an app capture from an endpoint capture. Independent streams differ in buffering, clocks, resampling and gain, so cancellation leaves artifacts. `PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` is also unsuitable: it excludes one tree from a system-wide capture that is not tied to an endpoint, so it also contains VoiceMeeter's own re-rendered mix and cannot exclude a second app.
 
@@ -135,11 +137,11 @@ AV1 keyframe handling is special: the ring parses AV1 OBUs because relying only 
 
 On restart, the save worker's run flag must be re-armed before the save thread starts. Be cautious when modifying output lifecycle or restart behavior; a ring can appear active while saves silently stop if worker lifecycle is broken.
 
-Game-only startup waits for a capture subject instead of briefly buffering empty video. Once a ring starts, initial source acquisition and later target/window transitions share the 15-second inactivity grace; a skipped readiness signal must not immediately discard newly buffered packets.
+Game-only startup waits for a capture subject instead of briefly buffering empty video. Once a ring starts, initial source acquisition and later target/window transitions share the configured stop delay (15 seconds by default); a skipped readiness signal must not immediately discard newly buffered packets before that delay expires. The Replay history setting uses `game.graceSeconds` for both replay inactivity and automatic recording after the final game closes; zero stops immediately. Replay snapshots this setting atomically when config changes.
 
 Stable source geometry uses live scene transforms when its aspect ratio and effective encoded dimensions/FPS match the current video path. For example, a 2560x1440 game with custom 1920x1080 output can fill the existing 1920x1080 canvas without resetting OBS, clearing replay history, or splitting recording. Native output-size, aspect-ratio or FPS changes of the subject that owns the canvas still require a video reset and a new recording segment. The 1.5-second source-size stability gate remains in place and restarts with each subject. `capture-geometry` logs distinguish preserved history from a necessary format boundary, while `replay-ring` logs a sustained inactivity stop. The displayed counter reflects retained encoded packets, not an independent timer.
 
-The canvas belongs to the subject it was fitted for (`CaptureCanvasOwner`). After a swap (game to game, desktop to game, game to desktop) the new subject is fitted inside the existing canvas, letterboxed if its aspect differs, and the ring keeps the previous subject's history (`replay_preserved=true reason=subject_switch`). A different subject takes over the canvas only after the ring has been idle — for example a game started after game-only mode's 15-second inactivity stop — or after a full video-pipeline restart. Auto mode therefore keeps the desktop canvas for games that appear while it is buffering.
+The canvas belongs to the subject it was fitted for (`CaptureCanvasOwner`). After a swap (game to game, desktop to game, game to desktop) the new subject is fitted inside the existing canvas, letterboxed if its aspect differs, and the ring keeps the previous subject's history (`replay_preserved=true reason=subject_switch`). A different subject takes over the canvas only after the ring has been idle — for example a game started after game-only mode's configured inactivity stop — or after a full video-pipeline restart. Auto mode therefore keeps the desktop canvas for games that appear while it is buffering.
 
 Clip snapshots keep a preceding video keyframe as decode-only negative-timestamp preroll, normalize packet timestamps in their stream timebases, and mux with an MP4 edit list so presentation still begins at the requested interval.
 

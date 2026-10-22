@@ -1,0 +1,61 @@
+const { app, BrowserWindow } = require("electron");
+const assert = require("node:assert/strict");
+const path = require("node:path");
+const fixture = process.argv[2];
+app.setPath("userData", path.join(fixture, "profile"));
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+app.whenReady().then(async () => {
+  const win = new BrowserWindow({ show: false, width: 1100, height: 1000, webPreferences: { backgroundThrottling: false } });
+  await win.loadFile(path.join(fixture, "dist/index.html"));
+  const js = source => win.webContents.executeJavaScript(source);
+  const until = async source => {
+    for (let i = 0; i < 100; i++) { if (await js(source)) return; await wait(20); }
+    throw new Error(`Timed out: ${source}`);
+  };
+  const field = label => `Array.from(document.querySelectorAll('.number-control')).find(el=>el.textContent.includes(${JSON.stringify(label)})).querySelector('input')`;
+  const edit = async (label, value) => {
+    await js(`(()=>{const el=${field(label)}; el.focus(); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,${JSON.stringify(String(value))});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await wait(40);
+    await js(`${field(label)}.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);
+    await wait(40);
+    await js(`${field(label)}.blur()`);
+    await wait(40);
+  };
+  await until("!!window.fixture");
+  assert.equal(await js(`${field("Replay duration")}.value`), "5m");
+  assert.equal(await js("document.body.textContent.includes('Memory is released')"), false);
+  assert.equal(await js(`${field("Capture stop delay")}.value`), "15s");
+  await js(`document.querySelector('[aria-label="Edit Save last 5 minutes"]').click()`);
+  await until(`${field("Clip length for Save last 5 minutes")} !== null`);
+  await edit("Clip length for Save last 5 minutes", "10 minutes");
+  await until("window.fixture.settings.replay.maxSeconds === 600");
+  assert.equal(await js(`${field("Replay duration")}.value`), "10m");
+  const floorMemory = await js("window.fixture.settings.replay.maxMb");
+  await edit("Replay duration", "20min");
+  await until("window.fixture.settings.replay.maxSeconds === 1200");
+  assert.ok(await js("window.fixture.settings.replay.maxMb") > floorMemory);
+  await edit("Replay memory limit", 256);
+  await until("window.fixture.settings.replay.maxSeconds === 600");
+  assert.equal(await js("window.fixture.settings.replay.maxMb"), floorMemory);
+  await edit("Replay duration", "5m");
+  assert.equal(await js("window.fixture.settings.replay.maxSeconds"), 600); // Clamped to the 10m shortcut.
+  assert.equal(await js(`${field("Replay duration")}.value`), "10m");
+  await edit("Capture stop delay", "5 m 1 sec");
+  assert.equal(await js("window.fixture.settings.game.graceSeconds"), 301);
+  assert.equal(await js(`${field("Capture stop delay")}.value`), "5m 1s");
+  await edit("Capture stop delay", "1:00");
+  assert.equal(await js("window.fixture.settings.game.graceSeconds"), 60);
+  assert.equal(await js(`${field("Capture stop delay")}.value`), "1m");
+  await edit("Capture stop delay", "soon");
+  assert.equal(await js("window.fixture.settings.game.graceSeconds"), 60);
+  assert.equal(await js(`${field("Capture stop delay")}.value`), "1m");
+  assert.equal(await js(`${field("Capture stop delay")}.closest('[data-shard-component="duration-control"]').dataset.shardState`), "invalid");
+  await edit("Capture stop delay", "30");
+  assert.equal(await js("window.fixture.settings.game.graceSeconds"), 30);
+  await edit("Capture stop delay", "0s");
+  assert.equal(await js("window.fixture.settings.game.graceSeconds"), 0);
+  const bounds = await js(`Array.from(document.querySelectorAll('[data-shard-component="duration-control"]')).map(el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width}})`);
+  assert.ok(bounds.every(r => r.width > 100 && r.left >= 0 && r.right <= 1100), JSON.stringify(bounds));
+  console.log("Replay settings UI: typed durations, hotkey growth, linked caps, clamping, invalid input and configurable stop delay passed");
+  win.destroy(); app.exit(0);
+}).catch(error => { console.error(error); app.exit(1); });

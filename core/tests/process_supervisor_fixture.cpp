@@ -1,4 +1,4 @@
-#include "../src/process-supervisor.h"
+#include "../src/platform/windows/process_supervisor.h"
 int main(int argc, char** argv) {
   if (argc > 1 && std::strcmp(argv[1], "--fail-setup") == 0) SetStdHandle(STD_OUTPUT_HANDLE, nullptr);
   if (argc > 1 && std::strcmp(argv[1], "--leaf") == 0) { Sleep(INFINITE); return 0; }

@@ -36,11 +36,15 @@ inline std::string normalizePath(const std::string& path)
 }
 
 // Case-insensitive path containment (a path is inside a normalized dir).
+// `lowerPath` may use either separator (Linux process paths use '/').
 inline bool pathUnder(const std::string& lowerPath, const std::string& normalizedDir)
 {
   if (normalizedDir.empty() || lowerPath.size() < normalizedDir.size())
     return false;
-  return lowerPath.compare(0, normalizedDir.size(), normalizedDir) == 0;
+  for (size_t i = 0; i < normalizedDir.size(); i++)
+    if ((lowerPath[i] == '/' ? '\\' : lowerPath[i]) != normalizedDir[i])
+      return false;
+  return true;
 }
 
 // "Elden Ring" -> "elden-ring"; stable ASCII slug for ids.

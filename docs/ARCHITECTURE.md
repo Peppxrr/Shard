@@ -43,13 +43,14 @@ Do not create a second competing schema.
 
 ## C++ core
 
-Important areas in `core/src/`:
+Important areas in `core/src/` (platform-neutral; OS code is in `platform/`, see below):
 
-- `main.cpp` — CLI, process/DPI setup, core construction and ordered shutdown.
+- `main.cpp` — CLI, core construction and ordered shutdown; process setup through `platform::initCoreProcess`.
 - `app.*` — OBS startup, graphics/audio initialization, module loading, scene ownership, pipeline restarts.
-- `sources.*` — monitor/window/Game Capture sources, capture subject retargeting, source transforms/crops, watchdog/recovery, audio sources.
+- `sources.*` — capture model: desktop/window/Game Capture sources, capture subject retargeting, source transforms/crops, watchdog/recovery, audio sources. OS source ids/settings come from `platform/capture_backend.h`.
 - `audio_isolation.*` — pure per-app audio isolation routing (which rows are isolated/filtered, process-tree/session partition).
-- `audio_isolation_capture.*` — Windows process-loopback OBS source and the controller that keeps isolated App rows and filtered Desktop rows in sync with processes and endpoint sessions.
+- `audio_isolation_capture.h` — process-loopback OBS source and the controller that keeps isolated App rows and filtered Desktop rows in sync with processes and endpoint sessions (Windows implementation; Linux reports it unsupported).
+- `platform/platform.h`, `platform/window_system.h`, `platform/capture_backend.h` — the only OS boundary. `platform/windows/` (Win32, DXGI, WGC, WASAPI, WMI, PDH, registry, Recording priority, supervisor) and `platform/linux/` (Wayland/EGL, xdg-desktop-portal, obs-vkcapture, PulseAudio-on-PipeWire, `/proc`, KWin bridge) implement them; CMake compiles one. See `docs/LINUX.md`.
 - `capture_geometry.h`, `capture_resilience.h` — isolated geometry/recovery decision logic used by native capture code/tests.
 - `encoders.*` — runtime video/audio encoder selection and settings.
 - `replay_ring.*`, `save_queue.h` — encoded RAM ring and clip snapshot/save path; save acceptance synchronized with the save worker.
@@ -97,6 +98,8 @@ Theme API compatibility is public behavior. See `docs/THEME-API.md` before chang
 ## Build/runtime layout
 
 Release native runtime is staged to `app/resources/core-bin/`; Debug development runtime goes to `app/resources/core-bin-dev/`. `scripts/build.ps1` builds into a fresh staging sibling and only replaces the usable stage after validation, avoiding stale DLL/data leftovers. The core-bin root holds `shardcore.exe`, libobs, only the OBS modules the core uses, and OBS's FFmpeg DLLs; the editor/export `ffmpeg.exe`/`ffprobe.exe` live in `core-bin/ffmpeg/` with their own shared FFmpeg DLLs and are spawned only for probing, thumbnails, editor previews and exports. The renderer lazily loads the Editor, Settings, Games and Developer Console views.
+
+On Linux, `scripts/linux/build.sh` stages the same directories with `shardcore`, `libobs.so*`/`libobs-opengl.so*`, `obs-ffmpeg-mux`, the Linux plugins and obs-vkcapture (`core-bin/vkcapture/`); FFmpeg comes from the system unless `core-bin/ffmpeg/` is bundled. `app/src/main/ffmpeg-path.ts` resolves the editor/export tools on both platforms.
 
 Runtime dependency pins live in `runtime-dependencies.json`. OBS source is pinned by the submodule, Shard's OBS changes live in `patches/`, and the official signed Game Capture injection payload is kept separately under `vendor/obs-hook-payload/` and verified during build/package.
 

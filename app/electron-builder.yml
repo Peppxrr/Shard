@@ -1,6 +1,6 @@
-# electron-builder packaging. Windows: nsis per-user + portable.
-# Linux targets can be added later without touching app code (core CMake is
-# already cross-platform via obs-studio).
+# electron-builder packaging. Windows: nsis per-user + portable. Linux:
+# AppImage + unpacked dir (Wayland test builds; core-bin from
+# scripts/linux/build.sh, FFmpeg from the system unless bundled).
 appId: com.shard.app
 productName: Shard
 buildNumber: "0"
@@ -21,17 +21,7 @@ files:
   - dist/main/**/*
   - dist/renderer/**/*
   - package.json
-  # Native modules load only their Windows x64 binary (better-sqlite3:
-  # prebuilds/win32-x64.node; uiohook-napi: build/Release, else its win32-x64
-  # prebuild). Sources, build intermediates and other platforms stay out.
-  - "!**/node_modules/better-sqlite3/{deps,src,build}/**"
-  - "!**/node_modules/better-sqlite3/binding.gyp"
-  - "!**/node_modules/better-sqlite3/prebuilds/{darwin-*,linux-*,linuxmusl-*,win32-arm64.node}"
-  - "!**/node_modules/uiohook-napi/{bin,libuiohook,src}/**"
-  - "!**/node_modules/uiohook-napi/binding.gyp"
-  - "!**/node_modules/uiohook-napi/build/*.vcxproj*"
-  - "!**/node_modules/uiohook-napi/build/Release/{obj/**,*.lib,*.exp,*.iobj,*.ipdb,*.pdb}"
-  - "!**/node_modules/uiohook-napi/prebuilds/{darwin-*,linux-*,win32-arm64}/**"
+  # Native-module filters are per platform (win.files / linux.files below).
   - "!**/node_modules/**/*.map"
 # Shard's UI is English; Chromium's other UI translations are never shown.
 electronLanguages:
@@ -58,6 +48,18 @@ win:
   icon: build/icon.ico
   # Signing is intentionally off. Never re-sign the official OBS payload.
   signExecutable: false
+  # Native modules load only their Windows x64 binary (better-sqlite3:
+  # prebuilds/win32-x64.node; uiohook-napi: build/Release, else its win32-x64
+  # prebuild). Sources, build intermediates and other platforms stay out.
+  files:
+    - "!**/node_modules/better-sqlite3/{deps,src,build}/**"
+    - "!**/node_modules/better-sqlite3/binding.gyp"
+    - "!**/node_modules/better-sqlite3/prebuilds/{darwin-*,linux-*,linuxmusl-*,win32-arm64.node}"
+    - "!**/node_modules/uiohook-napi/{bin,libuiohook,src}/**"
+    - "!**/node_modules/uiohook-napi/binding.gyp"
+    - "!**/node_modules/uiohook-napi/build/*.vcxproj*"
+    - "!**/node_modules/uiohook-napi/build/Release/{obj/**,*.lib,*.exp,*.iobj,*.ipdb,*.pdb}"
+    - "!**/node_modules/uiohook-napi/prebuilds/{darwin-*,linux-*,win32-arm64}/**"
   target:
     - target: nsis
       arch: [x64]
@@ -73,3 +75,28 @@ nsis:
   shortcutName: Shard
 portable:
   artifactName: ${productName}-${version}-portable.${ext}
+linux:
+  icon: build/icon-256.png
+  category: AudioVideo
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: dir
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  # Linux app id: package.json desktopName "com.shard.app.desktop" names the
+  # Wayland app_id and Chromium's systemd scope, from which xdg-desktop-portal
+  # derives the app id it requires for GlobalShortcuts (hotkeys). The desktop
+  # entry uses the same name so KDE ties the window and shortcuts to it.
+  syncDesktopName: true
+  # Both native modules load N-API prebuilds (better-sqlite3:
+  # prebuilds/linux-x64.node; uiohook-napi: prebuilds/linux-x64, unused on
+  # Wayland where hotkeys use the portal). `npm run package:linux` passes
+  # -c.npmRebuild=false: rebuilding uiohook from source needs X11 headers.
+  files:
+    - "!**/node_modules/better-sqlite3/{deps,src,build}/**"
+    - "!**/node_modules/better-sqlite3/binding.gyp"
+    - "!**/node_modules/better-sqlite3/prebuilds/{darwin-*,win32-*,linuxmusl-*,linux-arm64.node}"
+    - "!**/node_modules/uiohook-napi/{bin,libuiohook,src,build}/**"
+    - "!**/node_modules/uiohook-napi/binding.gyp"
+    - "!**/node_modules/uiohook-napi/prebuilds/{darwin-*,win32-*,linux-arm64,linux-loong64}/**"

@@ -422,6 +422,9 @@ static void testMinecraftJavaClientIdentity()
   CHECK_EQ(client(vanilla, gameWindow(false, "Java")).gameName, std::string("Minecraft"));
   CHECK_EQ((int)client("java.exe net.minecraft.client.main.Main", gameWindow(), graphicsRuntime(),
                       "java.exe").decision, (int)DetectionResult::Decision::Detected);
+  // Linux JVMs have no extension; argv0 is an absolute path.
+  CHECK_EQ((int)client("/app/jdk/bin/java -xmx2g -cp /mc/client.jar net.minecraft.client.main.main", gameWindow(),
+                       graphicsRuntime(), "java").decision, (int)DetectionResult::Decision::Detected);
   for (const auto& command : {
       java + "net.fabricmc.loader.impl.launch.knot.KnotClient --gameDir C:\\Games\\Pack",
       java + "net.fabricmc.loader.launch.knot.KnotClient",
@@ -971,8 +974,8 @@ static void testHeroicDiscovery()
   TestDir dir("heroic");
   const fs::path cfg = dir.root / ".config" / "heroic" / "games_config";
   writeFile(cfg / "Hades.json",
-            R"({"app_name":"Hades","title":"Hades","install":{"path":")" + jsonEscape(dir.root.string()) +
-                R"(\\Hades","platform":"windows"}})");
+            R"({"app_name":"Hades","title":"Hades","install":{"path":")" +
+                jsonEscape((dir.root / "Hades").string()) + R"(","platform":"windows"}})");
   writeFile(cfg / "NotInstalled.json",
             R"({"app_name":"Ghost","title":"Ghost","install":{"path":"Z:\\nowhere","platform":"windows"}})");
   writeFile(dir.root / "Hades" / "Hades.exe", "x");
@@ -1083,7 +1086,7 @@ static void testRiotDiscovery()
   TestDir dir("riot");
   writeFile(dir.root / "RiotClientInstalls.json",
             R"({"associated_game_clients":{"valorant_live":{"product_install_full_path":")" +
-                jsonEscape(dir.root.string()) + R"(\\VALORANT","product_name":"VALORANT"}}})");
+                jsonEscape((dir.root / "VALORANT").string()) + R"(","product_name":"VALORANT"}}})");
   writeFile(dir.root / "VALORANT" / "VALORANT.exe", "x");
 
   ScanContext ctx;

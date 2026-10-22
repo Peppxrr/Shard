@@ -166,6 +166,7 @@ void ReplayRing::ringData(void* data, struct encoder_packet* packet)
 ReplayRing::ReplayRing(App& app, Config& config, Events& events, EncoderManager& encoders)
     : app_(app), config_(config), events_(events), encoders_(encoders)
 {
+  stopDelaySeconds_.store(config.game.graceSeconds);
 }
 
 ReplayRing::~ReplayRing()
@@ -197,8 +198,10 @@ void ReplayRing::setCaptureActive(bool active)
   std::lock_guard<std::mutex> lock(lifecycleMtx_);
   if (active && !active_.load()) startLocked();
   const auto nowMs = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-  if (activityGrace_.shouldStop(active, active_.load(), nowMs)) {
-    logFormat("[replay-ring][info] action=stop reason=capture_inactive grace_ms=15000 history_cleared=true\n");
+  const auto graceMs = static_cast<uint64_t>(std::max(0, stopDelaySeconds_.load())) * 1000;
+  if (activityGrace_.shouldStop(active, active_.load(), nowMs, graceMs)) {
+    logFormat("[replay-ring][info] action=stop reason=capture_inactive grace_ms=%llu history_cleared=true\n",
+              static_cast<unsigned long long>(graceMs));
     stopLocked();
   }
 }

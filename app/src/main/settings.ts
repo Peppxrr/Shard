@@ -5,6 +5,7 @@ import { app } from "electron";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { DEFAULT_SETTINGS, type Settings } from "../shared/contracts";
+import { reconcileReplaySettings } from "../shared/replay-policy";
 
 let settings: Settings = structuredClone(DEFAULT_SETTINGS);
 let settingsPath = "";
@@ -26,7 +27,7 @@ export function getSettings(): Settings {
 }
 
 export async function saveSettings(next: Settings): Promise<void> {
-  settings = next;
+  settings = reconcileReplaySettings(next, settings);
   await fs.mkdir(path.dirname(settingsPath), { recursive: true });
   await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
 }
@@ -52,6 +53,8 @@ function normalizeSettings(next: Settings): Settings {
   if (typeof (next.app as unknown as Record<string, unknown>).hardwareAcceleration !== "boolean") (next.app as unknown as Record<string, unknown>).hardwareAcceleration = true;
   // Elevation is strictly opt-in: anything but an explicit true is off.
   next.app.recordingPriority = next.app.recordingPriority === true;
+  // Writes the user's session environment: also strictly opt-in.
+  next.app.vkcaptureAllGames = next.app.vkcaptureAllGames === true;
   if ((next.export.resolution as string) === "auto") next.export.resolution = "source";
   // Older versions used a zero limit to turn cleanup off.
   if (!Number.isFinite(next.storage.limitGb) || next.storage.limitGb <= 0) {
@@ -72,15 +75,14 @@ function normalizeSettings(next: Settings): Settings {
     const duration = hotkey.durationSec ?? 60;
     return { ...hotkey, durationUnit: duration >= 60 && duration % 60 === 0 ? "min" : "sec" };
   });
-  // App audio rows saved before isolation existed keep recording the app in
-  // Desktop audio too; only rows created with the toggle (or changed by the
-  // user) remove it, so an upgrade never silently changes captured tracks.
+  // An App audio row always owns its app: it is removed from Desktop audio so
+  // the two tracks never duplicate it. Older rows are upgraded to match.
   next.audio.sources = next.audio.sources.map((source) => {
-    if (source.kind === "process") return { ...source, excludeFromDesktop: source.excludeFromDesktop === true };
+    if (source.kind === "process") return { ...source, excludeFromDesktop: true };
     const { excludeFromDesktop: _unused, ...device } = source;
     return device;
   });
-  return next;
+  return reconcileReplaySettings(next);
 }
 
 // The game registry lives in games.json and is owned by the core. The app only

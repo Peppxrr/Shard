@@ -1,6 +1,7 @@
 #include "jsonrpc.h"
 
 #include "log.h"
+#include "platform/global_shortcuts.h"
 
 #include <algorithm>
 #include <atomic>
@@ -187,6 +188,26 @@ nlohmann::json Rpc::dispatch(const nlohmann::json& req)
     return {{"result", games_.sessions()}};
   if (method == "game.detectExplain")
     return {{"result", games_.detectExplain(params)}};
+  if (method == "hotkeys.bind") {
+    if (!params.contains("bindings") || !params["bindings"].is_array())
+      return {{"error", {{"code", -32602}, {"message", "hotkeys.bind requires bindings[]"}}}};
+    std::vector<platform::ShortcutBinding> bindings;
+    for (const auto& b : params["bindings"]) {
+      if (!b.is_object() || !b.contains("id") || !b["id"].is_string() || b["id"].get<std::string>().empty())
+        return {{"error", {{"code", -32602}, {"message", "hotkeys.bind: each binding needs an id"}}}};
+      bindings.push_back({b["id"].get<std::string>(), b.value("accelerator", std::string()),
+                          b.value("description", std::string())});
+    }
+    const auto bound = platform::bindGlobalShortcuts(bindings);
+    nlohmann::json results = nlohmann::json::array();
+    for (const auto& item : bound.results) {
+      nlohmann::json entry = {{"id", item.id}, {"ok", item.ok}};
+      if (!item.ok)
+        entry["error"] = item.error;
+      results.push_back(std::move(entry));
+    }
+    return {{"result", {{"supported", bound.supported}, {"results", std::move(results)}}}};
+  }
   if (method == "shutdown") {
     markShutdown();
     return {{"result", true}};
@@ -252,6 +273,7 @@ nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
     } else if (key == "replay") {
       ring_.updateCaps();
     } else if (key == "game") {
+      ring_.setStopDelay(config_.game.graceSeconds);
       games_.onConfigChanged();
     }
   }

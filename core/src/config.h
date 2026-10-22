@@ -63,7 +63,7 @@ struct ReplaySettings {
 struct GameSettings {
   bool autoRecord = false;
   std::string gamesPath; // path to games.json (registry)
-  int graceSeconds = 30; // auto-record grace after the last game session ends
+  int graceSeconds = 15; // shared game and replay stop grace after capture/session activity ends
   bool verboseDetection = false; // structured [GameDetection] logs on stderr
 
   nlohmann::json toJson() const;

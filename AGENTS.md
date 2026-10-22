@@ -18,18 +18,19 @@ The cross-language settings/RPC/event contract is `app/src/shared/contracts.ts`;
 - Themes or public UI hooks: `docs/THEME-API.md` and, for theme authoring, `docs/THEMES.md`
 - Packaging, updater, versions, tags, or publication: `docs/RELEASING.md`
 - OBS/FFmpeg/runtime dependency upgrades: `docs/DEPENDENCIES.md`
+- Linux port, platform split (`core/src/platform/`), Linux build/runtime: `docs/LINUX.md`
 - Contributor workflow and security expectations: `CONTRIBUTING.md`
 
 Do not preload all of these documents for unrelated work.
 
 ## Repository map
 
-- `core/src/` — C++ core: OBS lifecycle, sources, encoders, replay ring, recording, game detection, JSON-RPC/server.
+- `core/src/` — C++ core: OBS lifecycle, sources, encoders, replay ring, recording, game detection, JSON-RPC/server. Platform-neutral; OS code lives only in `core/src/platform/{windows,linux}/` behind the headers in `core/src/platform/`.
 - `core/tests/` — native logic/capture-resilience tests and fixtures.
 - `app/src/main/` — Electron main process: core lifecycle, IPC, library, export, hotkeys, themes, diagnostics, updater.
 - `app/src/renderer/` — React UI, library/viewer/editor/settings/games surfaces.
 - `app/src/shared/` — shared TypeScript contracts and theme types.
-- `scripts/` — build, dev, verification, capture fixtures, dependency helpers.
+- `scripts/` — build, dev, verification, capture fixtures, dependency helpers; `scripts/linux/` builds/stages the Linux core.
 - `patches/` — reproducible Shard changes to pinned OBS source.
 - `vendor/obs-studio/` — pinned OBS submodule.
 - `vendor/obs-hook-payload/` — verified official signed OBS injection payload.
@@ -44,6 +45,15 @@ Do not preload all of these documents for unrelated work.
 - Do not commit generated runtimes, release artifacts, fetched dependencies, temp logs, or private diagnostics.
 
 For native capture/OBS work, the additional invariants in `docs/CAPTURE.md` are mandatory.
+
+## Windows and Linux parity
+
+Shard ships on Windows and Linux. Plan every change for both platforms, not Windows first with Linux as a later port.
+
+- When a feature or fix touches platform behavior (paths, processes, launchers, audio devices, hotkeys, autostart, file icons, capture), implement the Linux side in the same task whenever it is possible, or degrade gracefully there with a clear fallback.
+- If Linux support genuinely cannot be done in the task (missing API, needs hardware testing), say so in the report and leave a short note at the relevant code or in `docs/LINUX.md` rather than silently shipping Windows-only behavior.
+- Keep OS-specific native code in `core/src/platform/{windows,linux}/`; in the app, branch on `process.platform` / `window.shard.platform` at the narrowest point and keep user-facing wording platform-neutral or platform-correct (for example, "Launch at login" vs "Start with Windows").
+- Do not assume Windows-only path rules (case-insensitivity, `\` separators, `.exe` names) in shared code.
 
 ## UI work
 

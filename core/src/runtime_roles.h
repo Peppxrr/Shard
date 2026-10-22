@@ -12,7 +12,8 @@ namespace shard {
 inline bool isMinecraftClientProcess(const std::string& exe, const std::string& commandLine)
 {
   const std::string name = toLower(exe);
-  if (name != "java.exe" && name != "javaw.exe")
+  // Linux JVM launchers have no extension.
+  if (name != "java.exe" && name != "javaw.exe" && name != "java")
     return false;
 
   std::vector<std::string> args;

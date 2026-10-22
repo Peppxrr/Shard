@@ -88,6 +88,17 @@ int main()
   assert(!activity.shouldStop(false, true, 60000));
   assert(!activity.shouldStop(false, true, 74999));
   assert(activity.shouldStop(false, true, 75000));
+  // Configured delays are honored, including values above the old 300-second
+  // UI range, and capture activity starts a fresh grace interval.
+  shard::ReplayActivityGrace configuredActivity;
+  assert(!configuredActivity.shouldStop(false, true, 1000, 301000));
+  assert(!configuredActivity.shouldStop(false, true, 301999, 301000));
+  assert(configuredActivity.shouldStop(false, true, 302000, 301000));
+  assert(!configuredActivity.shouldStop(true, true, 303000, 301000));
+  assert(!configuredActivity.shouldStop(false, true, 304000, 301000));
+  assert(configuredActivity.shouldStop(false, true, 605000, 301000));
+  shard::ReplayActivityGrace immediateActivity;
+  assert(immediateActivity.shouldStop(false, true, 0, 0));
   using shard::CaptureFrameContent;
   using shard::CaptureBackendHealth;
   using shard::CaptureDiagnosticSchedule;

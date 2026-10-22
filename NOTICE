@@ -15,6 +15,14 @@ and build scripts, consistent with the source-code distribution requirements
 of GNU GPL v2 Section 3. Modifications to the vendored OBS source, if any,
 are represented by the pinned source state and Shard's patch/build history.
 
+Linux builds (docs/LINUX.md) link libobs against the distribution's FFmpeg,
+x264 and other system libraries instead of the OBS dependency bundle, and ship
+the linux-pipewire, linux-pulseaudio, obs-ffmpeg, obs-x264 and obs-nvenc
+plugins. They also include obs-vkcapture 1.5.6 (OBS source module, Vulkan
+layer and OpenGL capture library) - Copyright (C) 2021 David Rosca,
+https://github.com/nowrep/obs-vkcapture, GNU GPL v2 or later; its source is
+fetched at that pinned tag by core/CMakeLists.txt.
+
 OBS is a trademark of Lain Bailey. Shard is an independent project and is not
 affiliated with or endorsed by the OBS Project.
 

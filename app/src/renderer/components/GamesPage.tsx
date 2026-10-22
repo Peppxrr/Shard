@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { GameInfo, GameSessionInfo, Settings } from "../../shared/contracts";
+import { loadGameIcons, useGameIcons } from "../app-icons";
 import { Button, Card, EmptyState, Field, Icon, Modal, Segmented, StatusDot } from "./ui";
-import { NumberControl, SettingRow, SwitchRow } from "./SettingControls";
+import { SwitchRow } from "./SettingControls";
 import { ProcessPickerButton } from "./ProcessSelect";
 
 type Props = { settings: Settings; onChange: (settings: Settings) => void };
 type View = "games" | "excluded";
 type Filter = "all" | "discovered" | "user";
+
+function GameIcon({ src }: { src?: string }) {
+  return <span data-shard-slot="game-icon" data-shard-state={src ? "image" : "fallback"} className="game-entry__icon">
+    {src ? <img src={src} alt="" draggable={false} /> : <Icon name="box" size={20} />}
+  </span>;
+}
 
 export function GamesPage({ settings, onChange }: Props) {
   const [games, setGames] = useState<GameInfo[]>([]);
@@ -23,6 +30,7 @@ export function GamesPage({ settings, onChange }: Props) {
   const [name, setName] = useState("");
   const [executables, setExecutables] = useState("");
   const [notice, setNotice] = useState("");
+  const icons = useGameIcons();
   const request = useRef(0);
   const mutating = useRef(false);
   const refresh = useCallback(async () => {
@@ -39,6 +47,7 @@ export function GamesPage({ settings, onChange }: Props) {
     const off = window.shard.onCoreEvent(type => { if (type === "ready" || type === "game.session" || type === "game.changed") void refresh(); });
     return () => { off(); ++request.current; };
   }, [refresh]);
+  useEffect(() => loadGameIcons(games, sessions), [games, sessions]);
   const patch = (next: Partial<Settings["game"]>) => onChange({ ...settings, game: { ...settings.game, ...next } });
   const run = async (work: () => Promise<void>, success: string) => {
     if (mutating.current) return;
@@ -56,7 +65,9 @@ export function GamesPage({ settings, onChange }: Props) {
   const submit = () => {
     const exes = [...new Set(executables.split(",").map(s => s.trim().toLowerCase()).filter(Boolean))];
     if (!exes.length || (dialog === "add" && !name.trim())) { setFormError("Enter a name and executable for the game."); return; }
-    if (exes.some(exe => /[\\/:]/.test(exe) || !exe.endsWith(".exe"))) { setFormError("Use executable filenames, such as game.exe, without a folder path."); return; }
+    // Windows games are .exe files; Linux accepts native names and Proton .exe names alike.
+    const linux = window.shard.platform === "linux";
+    if (exes.some(exe => /[\\/:]/.test(exe) || (!linux && !exe.endsWith(".exe")))) { setFormError(`Use executable filenames, such as ${linux ? "game or game.exe" : "game.exe"}, without a folder path.`); return; }
     void run(async () => {
       if (dialog === "add") {
         await invoke("game.addUserGame", { name: name.trim(), executables: exes });
@@ -78,7 +89,7 @@ export function GamesPage({ settings, onChange }: Props) {
 
   return <div data-shard-page="games" className="page games">
     <header className="page__head games-heading"><div><h1 className="page__title">Games</h1><p className="dim page__sub">Your games, their capture status, and what stays out.</p></div><Button variant="primary" icon={<Icon name="plus" size={15} />} onClick={() => open("add")} disabled={busy}>Add game</Button></header>
-    <section data-shard-slot="games-status" className="games-live" aria-label="Running games"><span className="setting-symbol"><Icon name="box" size={23} /></span><div className="games-live__copy"><span className="eyebrow">Running now</span><strong>{running.length ? `${running.length} game${running.length === 1 ? "" : "s"} detected` : "Waiting for a game"}</strong><p>{running.length ? "Sessions stay active when you switch to another app." : "Launch a game and it will appear here automatically."}</p></div>{running.length > 0 && <div className="games-live__sessions">{running.map(s => <span className="games-live__session" key={`${s.gameId}-${s.pid}`}><StatusDot state="live" /><span>{s.name}</span>{s.primary && <small>Primary</small>}</span>)}</div>}</section>
+    <section data-shard-slot="games-status" className="games-live" aria-label="Running games"><span className="setting-symbol"><Icon name="box" size={23} /></span><div className="games-live__copy"><span className="eyebrow">Running now</span><strong>{running.length ? `${running.length} game${running.length === 1 ? "" : "s"} detected` : "Waiting for a game"}</strong><p>{running.length ? "Sessions stay active when you switch to another app." : "Launch a game and it will appear here automatically."}</p></div>{running.length > 0 && <div className="games-live__sessions">{running.map(s => <span className="games-live__session" key={`${s.gameId}-${s.pid}`}><StatusDot state="live" />{icons.get(s.gameId) && <img className="games-live__icon" src={icons.get(s.gameId)} alt="" draggable={false} />}<span>{s.name}</span>{s.primary && <small>Primary</small>}</span>)}</div>}</section>
     {error && <div className="games-feedback" role="alert"><span>{error}</span><Button size="sm" onClick={() => void refresh()}>Try again</Button></div>}
     {notice && <p className="settings-note" role="status"><Icon name="check" size={14} />{notice}</p>}
     <div data-shard-slot="games-workspace" className="games-workspace">
@@ -87,16 +98,15 @@ export function GamesPage({ settings, onChange }: Props) {
       <div className="games-library__filters">{view === "games" ? <Segmented value={filter} onChange={setFilter} options={[{ value: "all", label: "All games" }, { value: "discovered", label: "Detected" }, { value: "user", label: "Added by you" }]} /> : <p>These executables are never automatically treated as games.</p>}<Button size="sm" variant="ghost" icon={<Icon name={view === "games" ? "refresh" : "plus"} size={14} />} disabled={busy} onClick={() => view === "games" ? void refresh() : open("exclude")}>{view === "games" ? "Refresh" : "Exclude app"}</Button></div>
       {loading ? <p className="games-loading" role="status">Loading games…</p> : view === "games" ? visible.length ? <ul className="games__list games-list">{visible.map(game => {
         const active = running.some(s => s.gameId === game.id || game.executables.includes(s.exe));
-        return <li data-shard-component="game" data-running={!!active} className="games__row game-entry" key={game.id}><span className="game-entry__icon"><Icon name="box" size={20} /></span><div className="game-entry__identity"><strong title={game.name}>{game.name}</strong><span title={game.executables.join(", ")}>{game.executables.join(", ") || "No executable configured"}</span></div><span className="game-entry__origin">{game.source === "user" ? "Added by you" : "Detected"}</span>{active && <span className="game-entry__running"><StatusDot state="live" />Running</span>}<Button size="sm" variant="ghost" disabled={busy} aria-label={`Exclude ${game.name}`} onClick={() => excludeGame(game)}>Exclude</Button></li>;
+        return <li data-shard-component="game" data-running={!!active} className="games__row game-entry" key={game.id}><GameIcon src={icons.get(game.id)} /><div className="game-entry__identity"><strong title={game.name}>{game.name}</strong><span title={game.executables.join(", ")}>{game.executables.join(", ") || "No executable configured"}</span></div><span className="game-entry__origin">{game.source === "user" ? "Added by you" : "Detected"}</span>{active && <span className="game-entry__running"><StatusDot state="live" />Running</span>}<Button size="sm" variant="ghost" disabled={busy} aria-label={`Exclude ${game.name}`} onClick={() => excludeGame(game)}>Exclude</Button></li>;
       })}</ul> : <EmptyState icon={<Icon name="box" size={28} />} title={q || filter !== "all" ? "No matching games" : "Your next game starts here"}>{q || filter !== "all" ? "Try another search or filter." : "Play a game to detect it automatically, or add its executable with Add game."}</EmptyState> : visibleIgnored.length ? <ul className="games__list games-list">{visibleIgnored.map(exe => <li data-shard-component="game" data-excluded="true" className="games__row game-entry" key={exe}><span className="game-entry__icon"><Icon name="x" size={18} /></span><div className="game-entry__identity"><strong>{exe}</strong><span>Excluded from automatic detection</span></div><Button size="sm" variant="ghost" disabled={busy} aria-label={`Restore ${exe}`} onClick={() => void run(() => invoke("game.unignoreExe", { exe }), `${exe} can be detected again.`)}>Restore</Button></li>)}</ul> : <EmptyState icon={<Icon name="check" size={26} />} title={q ? "No matching apps" : "Nothing excluded"}>{q ? "Try a different executable name." : "Exclude utilities here if you don’t want them treated as games."}</EmptyState>}
     </Card>
     <div data-shard-component="utility-rail" data-shard-slot="games-options" className="games-options utility-rail"><Card title="Automatic recording" sub="Record full sessions in addition to saving replay clips.">
       <SwitchRow title="Record game sessions" description="Start with the first game and stop after the last one closes." checked={settings.game.autoRecord} onChange={autoRecord => patch({ autoRecord })} />
-      <SettingRow title="Stop delay" description="Extra recording time after the final game closes."><NumberControl label="Recording stop delay" value={settings.game.graceSeconds} min={0} max={300} unit="sec" onChange={graceSeconds => patch({ graceSeconds })} /></SettingRow>
     </Card><Card title="Game detection" sub="Only games that qualify live appear in your list."><p className="games-explainer">Games are recognized from their running processes and windows. Adding one manually creates an explicit match; excluding an app takes priority.</p><details className="detection-details"><summary>Diagnostics</summary><SwitchRow title="Detailed detection logs" description="Write detection decisions to the developer console." checked={settings.game.verboseDetection} onChange={verboseDetection => patch({ verboseDetection })} /></details></Card></div>
     </div>
     <Modal open={dialog !== null} onClose={busy ? undefined : () => setDialog(null)} title={dialog === "add" ? "Add a game" : "Exclude an app"} sub={dialog === "add" ? "Create an explicit match for a game you play." : "Keep an executable out of automatic game detection."} size="sm" foot={<><Button disabled={busy} onClick={() => setDialog(null)}>Cancel</Button><Button variant="primary" type="submit" form="game-management-form" loading={busy} disabled={!executables.trim() || (dialog === "add" && !name.trim())}>{dialog === "add" ? "Add game" : "Exclude app"}</Button></>}>
-      <form id="game-management-form" className="game-form" onSubmit={event => { event.preventDefault(); submit(); }}>{dialog === "add" && <Field label="Game name"><input className="input" aria-label="Game name" placeholder="e.g. VRChat" value={name} onChange={e => setName(e.target.value)} autoFocus /></Field>}<Field label="Executable" hint="Use executable filenames, separated by commas. For games, choose the game itself rather than its launcher."><div className="game-form__executable"><input className="input" aria-label="Executable" placeholder="game.exe" value={executables} onChange={e => setExecutables(e.target.value)} /><ProcessPickerButton label="Browse" onPick={exe => { const current = executables.split(",").map(s => s.trim().toLowerCase()).filter(Boolean); setExecutables([...new Set([...current, exe.toLowerCase()])].join(", ")); if (!name.trim()) setName(exe.replace(/\.exe$/i, "")); }} /></div></Field>{formError && <p role="alert" className="form-error">{formError}</p>}</form>
+      <form id="game-management-form" className="game-form" onSubmit={event => { event.preventDefault(); submit(); }}>{dialog === "add" && <Field label="Game name"><input className="input" aria-label="Game name" placeholder="e.g. VRChat" value={name} onChange={e => setName(e.target.value)} autoFocus /></Field>}<Field label="Executable" hint="Use executable filenames, separated by commas. For games, choose the game itself rather than its launcher."><div className="game-form__executable"><input className="input" aria-label="Executable" placeholder={window.shard.platform === "linux" ? "game" : "game.exe"} value={executables} onChange={e => setExecutables(e.target.value)} /><ProcessPickerButton label="Browse" onPick={exe => { const current = executables.split(",").map(s => s.trim().toLowerCase()).filter(Boolean); setExecutables([...new Set([...current, exe.toLowerCase()])].join(", ")); if (!name.trim()) setName(exe.replace(/\.exe$/i, "")); }} /></div></Field>{formError && <p role="alert" className="form-error">{formError}</p>}</form>
     </Modal>
   </div>;
 }

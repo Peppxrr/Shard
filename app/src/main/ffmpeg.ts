@@ -1,5 +1,5 @@
-// ffmpeg.ts — spawns the bundled ffmpeg/ffprobe for probing, thumbnails,
-// editor previews/waveforms, and the export pipeline. Never blocks the main thread.
+// ffmpeg.ts — spawns the bundled (or, off Windows, system) ffmpeg/ffprobe for
+// probing, thumbnails, editor previews/waveforms, and the export pipeline. Never blocks the main thread.
 import { spawn } from "./bundled-processes";
 import path from "node:path";
 import { TimelinePreviews } from "./timeline-previews";
@@ -9,11 +9,17 @@ import { app } from "electron";
 import { existsSync, statSync, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { AudioTrackInfo, ExportEncoderInfo, WaveformData } from "../shared/contracts";
+import { resolveFfmpegTool, type FfmpegTool } from "./ffmpeg-path";
 
-// Editor/export tools live in core-bin/ffmpeg with their own FFmpeg DLLs.
-export function ffmpegBin(): string {
-  const packaged = path.join(process.resourcesPath ?? "", "core-bin");
-  return path.join(existsSync(packaged) ? packaged : path.join(app.getAppPath(), "resources", "core-bin"), "ffmpeg");
+// Editor/export tools live in core-bin/ffmpeg with their own FFmpeg DLLs. The
+// dev runner's CF_CORE_BIN core-bin is checked first, like the core itself.
+export function ffmpegTool(tool: FfmpegTool): string {
+  const coreBins = [
+    ...(process.env.CF_CORE_BIN ? [process.env.CF_CORE_BIN] : []),
+    path.join(process.resourcesPath ?? "", "core-bin"),
+    path.join(app.getAppPath(), "resources", "core-bin"),
+  ];
+  return resolveFfmpegTool(tool, coreBins.map(bin => path.join(bin, "ffmpeg")));
 }
 
 const EXPORT_CPU_ENCODERS: Omit<ExportEncoderInfo, "preferred">[] = [
@@ -79,7 +85,8 @@ async function activeGpuVendor(): Promise<ExportEncoderInfo["vendor"] | ""> {
 }
 
 function probeExportEncoder(encoder: ExportEncoderInfo["id"]): Promise<boolean> {
-  const exe = path.join(ffmpegBin(), "ffmpeg.exe");
+  let exe: string;
+  try { exe = ffmpegTool("ffmpeg"); } catch { return Promise.resolve(false); }
   const { promise, resolve } = Promise.withResolvers<boolean>();
   const child = spawn(exe, [
     "-hide_banner", "-loglevel", "error",
@@ -122,7 +129,7 @@ function fileSize(p: string): number {
 }
 
 export async function ffprobeAsync(file: string): Promise<ProbeResult> {
-  const exe = path.join(ffmpegBin(), "ffprobe.exe");
+  const exe = ffmpegTool("ffprobe");
   const out = await runAsync(exe, [
     "-v", "error",
     "-select_streams", "v:0",
@@ -162,7 +169,7 @@ export async function makeThumbnailAsync(src: string, dir: string): Promise<stri
   try { await fs.mkdir(dir, { recursive: true }); } catch { return null; }
   const base = path.basename(src, path.extname(src));
   const out = path.join(dir, `${base}.jpg`);
-  const exe = path.join(ffmpegBin(), "ffmpeg.exe");
+  const exe = ffmpegTool("ffmpeg");
   return new Promise((resolve) => {
     const child = spawn(exe, ["-y", "-ss", "1", "-i", src, "-vframes", "1", "-vf", "scale=320:-2", "-q:v", "4", out], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
     child.on("error", () => resolve(null));
@@ -177,7 +184,7 @@ export async function makeThumbnailAsync(src: string, dir: string): Promise<stri
 // audio-relative index. Export uses the absolute index to avoid FFmpeg's
 // `a:N` selector ambiguity when video and subtitle streams are present.
 export async function probeAudioTracks(file: string): Promise<AudioTrackInfo[]> {
-  const exe = path.join(ffmpegBin(), "ffprobe.exe");
+  const exe = ffmpegTool("ffprobe");
   const out = await runAsync(exe, [
     "-v", "error",
     "-select_streams", "a",
@@ -259,7 +266,7 @@ async function extractAudioPreview(file: string, streamIndex: number, key: strin
   return runEditorPreparation("audio", signal, async () => {
     const temporary = `${output}.${randomUUID()}.tmp.m4a`;
     try {
-      const executable = path.join(ffmpegBin(), "ffmpeg.exe");
+      const executable = ffmpegTool("ffmpeg");
       const child = spawn(executable, [
         "-y", "-v", "error", "-threads", "1", "-filter_threads", "1",
         "-i", file, "-map", `0:${streamIndex}`, "-vn",
@@ -379,7 +386,7 @@ export function generateWaveform(
 }
 
 function extractWaveform(file: string, streamIndex: number, duration: number, points: number, cacheKey: string, signal: AbortSignal): Promise<WaveformData> {
-  const exe = path.join(ffmpegBin(), "ffmpeg.exe");
+  const exe = ffmpegTool("ffmpeg");
   const child = spawn(exe, [
     "-v", "error", "-threads", "1", "-filter_threads", "1",
     "-i", file,
@@ -524,7 +531,7 @@ export async function removeEditorMedia(file: string): Promise<void> {
 let timelinePreviews: TimelinePreviews | undefined;
 export function editorTimelinePreviews(): TimelinePreviews {
   return timelinePreviews ??= new TimelinePreviews(
-    path.join(app.getPath("temp"), "shard-editor-frames"), path.join(ffmpegBin(), "ffmpeg.exe"));
+    path.join(app.getPath("temp"), "shard-editor-frames"), ffmpegTool("ffmpeg"));
 }
 
 function audioTrackName(tags: { title?: string; name?: string; handler_name?: string; language?: string } | undefined, index: number): string {

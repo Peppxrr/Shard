@@ -6,11 +6,14 @@
 
 <p align="center">
   <strong>Save the moment you just played.</strong><br>
-  A local-first game clipper for Windows with an instant replay buffer, a real clip editor and size-limited exports.
+  A local-first game clipper for Windows (and, very early, Linux) with an instant replay buffer, a real clip editor and size-limited exports.
 </p>
 
 > [!WARNING]
 > Shard is developed with extensive AI assistance and is still early software. Expect bugs and rough edges, and please [report problems](https://github.com/Peppxrr/Shard/issues).
+
+> [!CAUTION]
+> **Linux support is a very early preview.** The Linux AppImage is experimental, tested on only a few setups (Fedora, KDE Plasma on Wayland), and can be very buggy or missing features that work on Windows. Use it to try Shard and report issues, not as a dependable recorder yet. See [Linux](docs/LINUX.md) for setup and known gaps.
 
 <p align="center">
   <a href="https://github.com/Peppxrr/Shard/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Peppxrr/Shard?label=download&color=4c7dff"></a>
@@ -88,6 +91,8 @@ It is built on OBS Studio's capture engine, including OBS's official signed Game
 
 Settings, the library and your clips live in `%APPDATA%\Shard` unless you choose another clips folder, and they are kept when Shard updates.
 
+**Linux (very early preview):** an unsigned `Shard-<version>.AppImage` is built by the [Linux build](https://github.com/Peppxrr/Shard/actions/workflows/linux.yml) workflow. Expect bugs, missing features and manual setup steps; read [Linux](docs/LINUX.md) first.
+
 ## Privacy
 
 Shard is local-first:
@@ -101,7 +106,7 @@ Shard is local-first:
 
 Shard is young (0.1.x) and under active development; expect rough edges and please [report bugs](https://github.com/Peppxrr/Shard/issues).
 
-- Windows only. The interface is in English.
+- Windows is the supported platform. Linux (Wayland, KDE Plasma) is a very early preview that is likely to be buggy and underdeveloped; see [Linux](docs/LINUX.md) for setup and known gaps. The interface is in English.
 - Some games block capture hooks, often because of anti-cheat. Shard uses window capture for those where Windows allows it, and never tries to bypass anti-cheat.
 - Intel Quick Sync is available for exports; recording on Intel-only systems uses the CPU encoders.
 - Builds are not code-signed yet (see [Releasing](docs/RELEASING.md#signing)).
@@ -137,6 +142,8 @@ npm run package
 ```
 
 The build applies Shard's OBS patch, stages the core and its runtime under `app/resources/core-bin/`, and verifies the pinned FFmpeg download and the official OBS payload. Do not rebuild or re-sign the OBS hook/helper files. Installer and portable builds are written to `app/release/`; `npm run size-report` breaks down their size. In an existing clone, run `git submodule update --init --recursive` first.
+
+Linux (Fedora + RPM Fusion): `sudo bash scripts/linux/install-deps-fedora.sh`, `bash scripts/linux/build.sh`, then `npm ci && npm run package:linux` in `app/` for an AppImage. Details in [Linux](docs/LINUX.md).
 
 ## Development
 

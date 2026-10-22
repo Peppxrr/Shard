@@ -44,9 +44,10 @@ public:
   void restart();
 
   // Live capture-activity signal (fed by the source watchdog): while true the
-  // ring buffers; after 15 s of false it stops and frees its RAM, and
-  // restarts when capture returns.
+  // ring buffers; after the configured grace of false activity it stops and
+  // frees its RAM, and restarts when capture returns.
   void setCaptureActive(bool active);
+  void setStopDelay(int seconds) { stopDelaySeconds_.store(seconds); }
 
   // Queue a save of the last durationSec (0 = save everything buffered).
   // Returns the request id, or 0 when no replay buffer is running (nothing
@@ -110,6 +111,7 @@ private:
 
   std::atomic<bool> active_{false};
   std::atomic<bool> muxing_{false};
+  std::atomic<int> stopDelaySeconds_{15};
 
   mutable std::mutex lifecycleMtx_;
   ReplayActivityGrace activityGrace_;
