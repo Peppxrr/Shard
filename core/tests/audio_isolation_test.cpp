@@ -243,6 +243,27 @@ void testProcessTrees()
   plan = planAudioIsolation(AudioProcessForest(desktopProcesses()), {"spotify.exe"}, {{true, {300, 301}}});
   CHECK(pids(plan.desktopRoots[0]) == V({300}));
 
+  // Process loopback stops at direct children: Steam's capture does not hear
+  // the game its launcher started, so the game gets its own capture.
+  processes = desktopProcesses();
+  processes.push_back(proc(600, 50, "steam.exe", 60));
+  processes.push_back(proc(610, 600, "launcher.exe", 61));
+  processes.push_back(proc(620, 610, "game.exe", 62));
+  plan = planAudioIsolation(AudioProcessForest(processes), {"spotify.exe"}, {{true, {600, 620}}, {true, {620}}});
+  CHECK(pids(plan.desktopRoots[0]) == V({600, 620}));
+  CHECK(plan.desktopRoots[1].empty());
+  CHECK(plan.overlaps.empty());
+  // With the launcher rendering too, it covers its direct child only while
+  // it is itself captured; Steam covers the launcher, not the game.
+  plan = planAudioIsolation(AudioProcessForest(processes), {"spotify.exe"}, {{true, {620, 610, 600}}});
+  CHECK(pids(plan.desktopRoots[0]) == V({600, 620}));
+  // Isolating the launcher's parent keeps the deeper game on that app's track.
+  plan = planAudioIsolation(AudioProcessForest(processes), {"steam.exe"}, {{true, {101, 620}}});
+  CHECK(pids(plan.desktopRoots[0]) == V({101}));
+  CHECK(pids(plan.appRoots.at("steam.exe")) == V({600, 620}));
+  CHECK(plan.excluded.size() == 1 && plan.excluded[0].isolatedExe == "steam.exe");
+  CHECK(plan.overlaps.empty());
+
   // Session owners that exited before the snapshot and idle/system PIDs are skipped.
   plan = planAudioIsolation(AudioProcessForest(desktopProcesses()), {"spotify.exe"}, {{true, {0, 4, 12345, 400}}});
   CHECK(pids(plan.desktopRoots[0]) == V({400}));
@@ -252,8 +273,9 @@ void testOverlapIsReported()
 {
   // explorer.exe owns a session and is Spotify's parent: its tree capture
   // would also contain Spotify, which is surfaced as degraded isolation.
+  // Discord's audio utility is explorer's grandchild, outside that capture.
   const auto plan = planAudioIsolation(AudioProcessForest(desktopProcesses()), {"spotify.exe"}, {{true, {50, 101}}});
-  CHECK(pids(plan.desktopRoots[0]) == V({50}));
+  CHECK(pids(plan.desktopRoots[0]) == V({50, 101}));
   CHECK(plan.overlaps.size() == 1);
   CHECK(plan.overlaps[0].outer.pid == 50 && plan.overlaps[0].inner.pid == 200);
   CHECK(plan.overlaps[0].outerTrack == "desktop:0" && plan.overlaps[0].innerTrack == "app:spotify.exe");
@@ -285,6 +307,27 @@ void testEndpoints()
   CHECK(pids(plan.appRoots.at("discord.exe")) == V({100}));
 }
 
+void testTrackTitles()
+{
+  // Titles follow the configured rows, so a reorder changes them.
+  auto spotify = app("spotify.exe", true);
+  auto voicemeeter = device("output", "vm");
+  voicemeeter.name = " Voicemeeter Input ";
+  CHECK(audioTrackTitles({}) == std::vector<std::string>({"Playback Mix"}));
+  CHECK(audioTrackTitles({voicemeeter, spotify}) ==
+        std::vector<std::string>({"Playback Mix", "Voicemeeter Input", "App: spotify.exe"}));
+  CHECK(audioTrackTitles({spotify, voicemeeter}) != audioTrackTitles({voicemeeter, spotify}));
+  // Disabled rows keep their track; unnamed rows get a readable default.
+  auto mic = device("input", "mic", false);
+  mic.name.clear();
+  CHECK(audioTrackTitles({mic})[1] == "Microphone");
+  // Rows past the fifth share the last track.
+  std::vector<AudioSourceConfig> rows;
+  for (const char* id : {"a", "b", "c", "d", "e", "f"})
+    rows.push_back(device("output", id));
+  CHECK(audioTrackTitles(rows) == std::vector<std::string>({"Playback Mix", "a", "b", "c", "d", "e + f"}));
+}
+
 } // namespace
 
 int main()
@@ -298,6 +341,7 @@ int main()
   testProcessTrees();
   testOverlapIsReported();
   testEndpoints();
+  testTrackTitles();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

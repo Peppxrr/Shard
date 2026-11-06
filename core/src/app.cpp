@@ -3,6 +3,7 @@
 #include "audio_isolation_capture.h"
 #include "encoders.h"
 #include "log.h"
+#include "video_levels.h"
 #include "x265_encoder.h"
 
 #include <obs-module.h>
@@ -151,6 +152,10 @@ bool App::resetVideo(uint32_t captureWidth, uint32_t captureHeight)
     lastError_ = "obs_reset_video failed: " + std::to_string(ret);
     return false;
   }
+  // libobs zero-initializes the HDR->SDR levels and only the OBS frontend
+  // normally sets them. They survive later resets, but setting them after
+  // every successful reset keeps the first one covered without extra state.
+  applyVideoColorLevels();
   return true;
 }
 

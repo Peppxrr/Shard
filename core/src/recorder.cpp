@@ -1,5 +1,6 @@
 #include "recorder.h"
 
+#include "audio_isolation.h"
 #include "log.h"
 #include "perf_monitor.h"
 #include "priority_task.h"
@@ -125,12 +126,11 @@ bool Recorder::startWithVideoEncoder(const std::string& videoId)
   // Allocate one encoder for each configured row, even while that row is
   // disabled. Source toggles then change the live mix without splitting the
   // recording or restarting its output.
-  const int audioTracks = 1 + std::min(static_cast<int>(config_.audioSources.size()), 5);
-  for (int track = 0; track < audioTracks; track++) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "rec-audio-%d", track);
+  // ffmpeg-mux writes each encoder name as its stream title.
+  const auto titles = audioTrackTitles(config_.audioSources);
+  for (size_t track = 0; track < titles.size(); track++) {
     obs_data_t* audioSettings = encoders_.audioSettings();
-    obs_encoder_t* aenc = obs_audio_encoder_create("ffmpeg_aac", name, audioSettings, track, nullptr);
+    obs_encoder_t* aenc = obs_audio_encoder_create("ffmpeg_aac", titles[track].c_str(), audioSettings, track, nullptr);
     obs_data_release(audioSettings);
     if (!aenc) {
       releaseOutput();

@@ -197,10 +197,23 @@ obs_source_t* createHookSource()
   obs_data_set_bool(s, "anti_cheat_hook", true);
   obs_data_set_int(s, "hook_rate", 1);
   obs_data_set_bool(s, "shard_gc_diagnostics", gameCaptureDiagnostics());
+  // Deterministic base; setHookColorSpace promotes HDR10 surfaces when the
+  // target display is in HDR mode.
+  obs_data_set_string(s, "rgb10a2_space", "srgb");
   obs_data_set_string(s, "window", "::");
   obs_source_t* source = obs_source_create("game_capture", "game-capture", s, nullptr);
   obs_data_release(s);
   return source;
+}
+
+void setHookColorSpace(obs_source_t* hook, bool displayHdr)
+{
+  if (!hook)
+    return;
+  obs_data_t* d = obs_data_create();
+  obs_data_set_string(d, "rgb10a2_space", displayHdr ? "2100pq" : "srgb");
+  obs_source_update(hook, d);
+  obs_data_release(d);
 }
 
 obs_source_t* createWindowSource(obs_source_t*)

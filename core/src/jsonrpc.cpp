@@ -1,5 +1,6 @@
 #include "jsonrpc.h"
 
+#include "audio_isolation.h"
 #include "log.h"
 #include "platform/global_shortcuts.h"
 
@@ -222,7 +223,7 @@ nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
       params.contains("capture") && params["capture"].contains("monitor") &&
       params["capture"]["monitor"].is_number_integer() &&
       params["capture"]["monitor"].get<int>() != config_.capture.monitor;
-  const size_t oldAudioTrackCount = 1 + std::min<size_t>(config_.audioSources.size(), 5);
+  const auto oldAudioTracks = audioTrackTitles(config_.audioSources);
   // Detect resolution/fps changes before applying (they need obs_reset_video).
   bool resChanged = false;
   if (params.contains("video")) {
@@ -242,8 +243,10 @@ nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
   }
 
   auto touched = config_.applyPartial(params);
-  const size_t newAudioTrackCount = 1 + std::min<size_t>(config_.audioSources.size(), 5);
-  const bool audioTrackCountChanged = oldAudioTrackCount != newAudioTrackCount;
+  // Clips name their audio streams by row. Adding, removing, reordering or
+  // swapping a row's device moves sources between tracks, so already buffered
+  // packets would carry the wrong names.
+  const bool audioTrackLayoutChanged = audioTrackTitles(config_.audioSources) != oldAudioTracks;
   config_.save();
   const bool fullRestart = resChanged || monitorChanged;
   if (fullRestart)
@@ -262,9 +265,9 @@ nlohmann::json Rpc::methodConfigSet(const nlohmann::json& params)
       if (!fullRestart) {
         sources_.applyAudioSources();
         // Enabled/gain changes only replace the live source mix. Preserve the
-        // ring and an active recording; a structural row-count change still
-        // needs fresh output track bindings.
-        if (audioTrackCountChanged)
+        // ring and an active recording; a changed row-to-track layout still
+        // needs fresh output tracks and titles.
+        if (audioTrackLayoutChanged)
           restartCaptureOutputs();
       }
     } else if (key == "video") {

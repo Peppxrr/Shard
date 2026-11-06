@@ -127,6 +127,9 @@ private:
   void createWindowCaptureLocked();
   void refreshTargetWindowLocked();
   void refreshCaptureDisplayLocked(uint64_t nowMs);
+  // Re-apply the game_capture 10-bit color-space hint when the target display
+  // changes between SDR and HDR. The hook source is not recreated.
+  void applyHookColorSpaceLocked();
   std::string colorDiagnosticsLocked() const;
   void recreateGameCaptureLocked();
   void recreateWindowCaptureLocked();
@@ -202,6 +205,7 @@ private:
   CaptureDisplayState captureDisplay_;
   uintptr_t captureDisplayWindow_ = 0;
   uint64_t lastDisplayQueryMs_ = 0;
+  std::optional<bool> hookColorSpaceHdr_; // last value applied to gameSource_
   std::function<void(bool)> captureActivityCb_;
 
   std::vector<obs_source_t*> audioSources_;

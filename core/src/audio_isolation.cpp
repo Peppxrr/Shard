@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 
 namespace shard {
 
@@ -44,12 +45,65 @@ AudioProcessKey keyOf(const AudioProcess& process)
   return {process.pid, process.createTime};
 }
 
+// Session owners that need their own capture so each is heard exactly once.
+// An owner is skipped only when its direct parent is captured: one of
+// `fixedRoots` or another kept owner (process loopback stops at children).
+std::vector<const AudioProcess*> uncoveredOwners(const AudioProcessForest& forest,
+                                                 const std::vector<const AudioProcess*>& owners,
+                                                 const std::set<AudioProcessKey>& fixedRoots)
+{
+  std::set<AudioProcessKey> ownerKeys;
+  for (const AudioProcess* owner : owners)
+    ownerKeys.insert(keyOf(*owner));
+  std::map<AudioProcessKey, bool> kept;
+  const std::function<bool(const AudioProcess&)> keep = [&](const AudioProcess& process) {
+    const AudioProcessKey key = keyOf(process);
+    if (const auto it = kept.find(key); it != kept.end())
+      return it->second;
+    kept[key] = true; // provisional; breaks parent cycles from unknown creation times
+    bool captured = fixedRoots.count(key) > 0;
+    if (const AudioProcess* parent = forest.parentOf(process); parent && !captured) {
+      const AudioProcessKey parentKey = keyOf(*parent);
+      captured = fixedRoots.count(parentKey) || (ownerKeys.count(parentKey) && keep(*parent));
+    }
+    kept[key] = !captured;
+    return !captured;
+  };
+  std::vector<const AudioProcess*> out;
+  for (const AudioProcess* owner : owners) {
+    if (keep(*owner))
+      out.push_back(owner);
+  }
+  return out;
+}
+
 } // namespace
 
 uint32_t audioMixersForRow(size_t configuredIndex)
 {
   const size_t track = std::min<size_t>(configuredIndex + 1, 5);
   return (1u << 0) | (1u << static_cast<unsigned>(track));
+}
+
+std::vector<std::string> audioTrackTitles(const std::vector<AudioSourceConfig>& sources)
+{
+  // "Playback Mix" is what the app already recognizes as the master track.
+  std::vector<std::string> titles{"Playback Mix"};
+  for (size_t row = 0; row < sources.size(); row++) {
+    const auto& source = sources[row];
+    std::string name = source.name;
+    const auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+    name.erase(name.begin(), std::find_if(name.begin(), name.end(), notSpace));
+    name.erase(std::find_if(name.rbegin(), name.rend(), notSpace).base(), name.end());
+    if (name.empty())
+      name = source.kind == "input" ? "Microphone" : source.kind == "output" ? "System audio" : "Application audio";
+    const size_t track = std::min<size_t>(row + 1, 5);
+    if (track < titles.size())
+      titles[track] += " + " + name;
+    else
+      titles.push_back(name);
+  }
+  return titles;
 }
 
 std::string isolationExeFromWindow(const std::string& window)
@@ -128,15 +182,12 @@ const AudioProcess* AudioProcessForest::parentOf(const AudioProcess& process) co
   return parent;
 }
 
-bool AudioProcessForest::isAncestor(const AudioProcess& ancestor, const AudioProcess& process) const
+bool AudioProcessForest::loopbackIncludes(const AudioProcess& root, const AudioProcess& process) const
 {
-  const AudioProcess* current = parentOf(process);
-  for (int hop = 0; current && hop < kMaxAncestorHops; hop++) {
-    if (keyOf(*current) == keyOf(ancestor))
-      return true;
-    current = parentOf(*current);
-  }
-  return false;
+  if (keyOf(root) == keyOf(process))
+    return true;
+  const AudioProcess* parent = parentOf(process);
+  return parent && keyOf(*parent) == keyOf(root);
 }
 
 const AudioProcess* AudioProcessForest::isolatedOwner(const AudioProcess& process,
@@ -182,12 +233,11 @@ IsolationPlan planAudioIsolation(const AudioProcessForest& forest, const std::ve
   for (auto& [exe, keys] : plan.appRoots)
     std::sort(keys.begin(), keys.end());
 
-  struct Candidate {
-    size_t row;
-    const AudioProcess* process;
-  };
-  std::vector<Candidate> candidates;
+  std::map<const AudioProcess*, size_t> candidateRows;
+  std::vector<const AudioProcess*> candidates;
+  std::map<std::string, std::vector<const AudioProcess*>> appSessions;
   std::set<uint32_t> claimed;
+  std::set<uint32_t> appClaimed;
   plan.desktopRoots.resize(desktops.size());
   for (size_t row = 0; row < desktops.size(); row++) {
     if (!desktops[row].available)
@@ -201,27 +251,40 @@ IsolationPlan planAudioIsolation(const AudioProcessForest& forest, const std::ve
         continue; // exited between session enumeration and the process snapshot
       if (const AudioProcess* owner = forest.isolatedOwner(*process, isolated)) {
         plan.excluded.push_back({row, keyOf(*process), process->exe, owner->exe});
+        if (appClaimed.insert(pid).second)
+          appSessions[owner->exe].push_back(process);
         continue;
       }
-      if (claimed.insert(pid).second)
-        candidates.push_back({row, process});
+      if (claimed.insert(pid).second) {
+        candidateRows[process] = row;
+        candidates.push_back(process);
+      }
     }
   }
-  for (const auto& candidate : candidates) {
-    const bool covered = std::any_of(candidates.begin(), candidates.end(), [&](const Candidate& other) {
-      return other.process != candidate.process && forest.isAncestor(*other.process, *candidate.process);
-    });
-    if (covered)
-      continue;
-    plan.desktopRoots[candidate.row].push_back(keyOf(*candidate.process));
-    roots.push_back({candidate.process, "desktop:" + std::to_string(candidate.row)});
+  for (const AudioProcess* process : uncoveredOwners(forest, candidates, {})) {
+    const size_t row = candidateRows[process];
+    plan.desktopRoots[row].push_back(keyOf(*process));
+    roots.push_back({process, "desktop:" + std::to_string(row)});
   }
   for (auto& keys : plan.desktopRoots)
     std::sort(keys.begin(), keys.end());
+  // An isolated app's own captures hear only their direct children. A session
+  // owner deeper in the tree it launched (a launcher's game) gets its own
+  // capture on the app's track instead of being lost to both tracks.
+  for (const auto& [exe, sessions] : appSessions) {
+    auto& keys = plan.appRoots[exe];
+    const std::set<AudioProcessKey> exeRoots(keys.begin(), keys.end());
+    for (const AudioProcess* process : uncoveredOwners(forest, sessions, exeRoots)) {
+      keys.push_back(keyOf(*process));
+      roots.push_back({process, "app:" + exe});
+    }
+    std::sort(keys.begin(), keys.end());
+  }
 
   for (const auto& outer : roots) {
     for (const auto& inner : roots) {
-      if (outer.track == inner.track || !forest.isAncestor(*outer.process, *inner.process))
+      if (outer.track == inner.track || outer.process == inner.process ||
+          !forest.loopbackIncludes(*outer.process, *inner.process))
         continue;
       plan.overlaps.push_back({keyOf(*outer.process), outer.process->exe, outer.track, keyOf(*inner.process),
                                inner.process->exe, inner.track});

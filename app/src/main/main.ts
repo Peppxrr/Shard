@@ -634,27 +634,36 @@ function probeClipTracks(clipId: string): Promise<AudioTrackInfo[]> {
   const identity = `${clip.path}:${stat.mtimeMs}:${stat.size}`;
   if (cached?.identity === identity) return cached.tracks;
   const pending = probeAudioTracks(clip.path).then((probed) => {
-    // Configured rows keep stable mix indexes while disabled so live toggles do
-    // not restart the ring. Use the same stable row order when naming streams.
-    const configuredSources = getSettings().audio.sources.slice(0, 5);
+    const sources = getSettings().audio.sources;
     const nativeCapture = clip.source !== "edited" && clip.importedFrom !== "medal";
     const sourceTracks = nativeCapture && probed.length > 1 ? probed.slice(1) : probed;
-    const tracks = sourceTracks.map((track, index) => identifyAudioTrack(track, nativeCapture ? configuredSources[index] : undefined, sourceTracks.length));
-    return tracks;
+    // The core titles each stream with the row it recorded, so a clip keeps
+    // its names after rows are reordered. Older captures only carry encoder
+    // names, and the current row order may not match the order they were
+    // recorded with, so give those generic names rather than a wrong source.
+    const legacyTitles = nativeCapture && sourceTracks.every(track => LEGACY_TRACK_TITLE.test(track.name));
+    return sourceTracks.map((track, index) => {
+      if (legacyTitles) return identifyAudioTrack({ ...track, name: `Audio ${index + 1}` }, undefined, sourceTracks.length);
+      if (!nativeCapture) return identifyAudioTrack(track, undefined, sourceTracks.length);
+      const source = sources.find(row => sourceTrackName(row) === track.name);
+      return source ? { ...track, kind: source.kind } : track;
+    });
   });
   editorProbeCache.set(clipId, { identity, tracks: pending });
   void pending.catch(() => { if (editorProbeCache.get(clipId)?.tracks === pending) editorProbeCache.delete(clipId); });
   return pending;
 }
 
+// Encoder names written by cores before streams were titled by source.
+const LEGACY_TRACK_TITLE = /^(?:ring|rec)-audio-\d+$/i;
+
+// Matches the core's audioTrackTitles() for one row.
+function sourceTrackName(source: AudioSourceConfig): string {
+  return source.name.trim() || (source.kind === "input" ? "Microphone" : source.kind === "output" ? "System audio" : "Application audio");
+}
+
 function identifyAudioTrack(track: AudioTrackInfo, source: AudioSourceConfig | undefined, trackCount: number): AudioTrackInfo {
-  if (source) {
-    return {
-      ...track,
-      name: source.name.trim() || (source.kind === "input" ? "Microphone" : source.kind === "output" ? "System audio" : "Application audio"),
-      kind: source.kind,
-    };
-  }
+  if (source) return { ...track, name: sourceTrackName(source), kind: source.kind };
   if (trackCount === 1 && track.name.startsWith("Audio ")) return { ...track, name: "System audio", kind: "output" };
   return track;
 }

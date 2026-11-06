@@ -373,6 +373,12 @@ obs_source_t* createHookSource()
   return source;
 }
 
+void setHookColorSpace(obs_source_t*, bool)
+{
+  // vkcapture frames carry their own color-space metadata; there is no
+  // 10-bit swapchain interpretation setting to adjust.
+}
+
 obs_source_t* createWindowSource(obs_source_t* desktop)
 {
   return desktop ? obs_source_get_ref(desktop) : nullptr;

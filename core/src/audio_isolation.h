@@ -32,6 +32,13 @@ namespace shard {
 // fifth share mix 5), matching the replay ring/recorder track allocation.
 uint32_t audioMixersForRow(size_t configuredIndex);
 
+// Stream title of each replay/recording audio track, in track order: the
+// master mix, then one per configured row (rows sharing mix 5 are joined).
+// Clips carry these titles so the editor names tracks by what was recorded
+// rather than by the current row order. A changed list means the row-to-track
+// layout changed, which needs fresh outputs.
+std::vector<std::string> audioTrackTitles(const std::vector<AudioSourceConfig>& sources);
+
 // Lowercase basename of the executable named by an OBS window descriptor
 // ("class:title:exe", with ':' and '#' encoded as #3A / #22). Empty when the
 // descriptor names no executable (an App audio row with no app chosen yet).
@@ -79,8 +86,11 @@ public:
   // The live parent, or nullptr when the parent exited (its PID may already
   // belong to a younger, unrelated process).
   const AudioProcess* parentOf(const AudioProcess& process) const;
-  // True when `ancestor` is a strict ancestor of `process`.
-  bool isAncestor(const AudioProcess& ancestor, const AudioProcess& process) const;
+  // True when a PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE capture of
+  // `root` also hears `process`. Windows includes only the target and its
+  // direct children, not grandchildren: a Steam -> launcher -> game chain is
+  // silent from Steam's capture while the launcher's capture hears the game.
+  bool loopbackIncludes(const AudioProcess& root, const AudioProcess& process) const;
   // Nearest process on the chain (self first) whose exe is in `exes`.
   const AudioProcess* isolatedOwner(const AudioProcess& process, const std::set<std::string>& exes) const;
   const std::vector<AudioProcess>& processes() const { return processes_; }
@@ -98,12 +108,14 @@ struct EndpointSessions {
 
 struct IsolationPlan {
   // Process trees to capture for each isolated exe: every process of that exe
-  // whose ancestors are not the same exe (all instances, restarts, helpers).
+  // whose ancestors are not the same exe (all instances, restarts, helpers),
+  // plus any session owner it launched that those captures do not include.
   std::map<std::string, std::vector<AudioProcessKey>> appRoots;
   // Process trees to capture for each filtered Desktop row (same order as the
-  // `desktops` input). A session owned by a descendant of another captured
-  // session process is already inside that tree and is not captured twice; a
-  // process with sessions on several filtered endpoints goes to the first row.
+  // `desktops` input). A session owner whose direct parent is already captured
+  // is inside that capture and is not captured twice; deeper descendants get
+  // their own capture. A process with sessions on several filtered endpoints
+  // goes to the first row.
   std::vector<std::vector<AudioProcessKey>> desktopRoots;
 
   struct Excluded {

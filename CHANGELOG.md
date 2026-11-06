@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13
+
+- Fixed HDR games looking washed out or blown out in clips.
+- Fixed audio from some games, such as BeamNG.drive launched through Steam, not being recorded when an App audio source is kept off Desktop audio.
+- Clip audio tracks now keep their source names, so reordering audio sources no longer mislabels tracks in the editor. Clips saved before this update show generic track names.
 ## 0.1.12
 
 - **Very early Linux preview.** An experimental Linux AppImage (Wayland, tested on Fedora with KDE Plasma) is now built alongside Windows. Expect bugs and missing features; see [Linux](docs/LINUX.md).

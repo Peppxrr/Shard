@@ -71,7 +71,9 @@ no SDR setting added to the Game Capture payload. It also checks
 loading-screen tolerance, visible WGC takeover, recreation of a
 black hook, frozen-content hook takeover against animated WGC, recovery after
 hook movement returns, independent probes when WGC dimensions disappear,
-and downstream scene rebinding without healthy hook recreation. Pure native
+downstream scene rebinding without healthy hook recreation, the SDR/HDR video
+levels and Game Capture 10-bit color-space hint, and that an scRGB FP16 source
+is tone-mapped into the SDR canvas instead of saturating. Pure native
 tests simulate long outages/cooldowns, stale/unknown probes, static menus,
 wake coalescing, desktop escalation and adapter-index/LUID selection without
 waiting minutes. The existing

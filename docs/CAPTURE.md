@@ -22,16 +22,34 @@ On Windows, startup enumerates DXGI adapters and selects a D3D11-capable hardwar
 
 Desktop capture uses OBS `monitor_capture` with WGC selected and resolves the configured monitor to the device identifier expected by the modern monitor source.
 
-Shard currently records Rec.709 SDR. Both WGC `window_capture` and modern
+Shard records Rec.709 SDR. Both WGC `window_capture` and modern
 `monitor_capture` intentionally set OBS 32.2.1's boolean `force_sdr=true`, on HDR
 and SDR displays alike. The staged `libobs-winrt` selects an SDR-compatible BGRA8
 frame pool at capture initialization instead of an HDR FP16 surface. Creation,
 retargeting, retries, recreation and full video-source rebuilds preserve this
-setting; Game Capture settings and the signed hook payload are unchanged. This
-does not add HDR recording or HDR metadata.
+setting. This does not add HDR recording or HDR metadata.
+
+SDR output does not mean every source is already SDR: Game Capture's injected
+hook can receive an HDR10 (Rec.2100 PQ) or scRGB FP16 swapchain. libobs tonemaps
+those into the SDR canvas, but only after `obs_set_video_levels()` supplies the
+SDR white level and HDR nominal peak. libobs zero-initializes both, and the OBS
+frontend is what normally sets them; Shard embeds libobs directly and must call
+`applyVideoColorLevels()` after every successful `obs_reset_video()`. Without it,
+the `80 / white` and `10000 / white` conversion multipliers are infinite, which
+turns HDR sources into white or NaN instead of a tone-mapped image.
+
+Windows Game Capture also needs to know how to read a 10-bit
+`DXGI_FORMAT_R10G10B10A2_UNORM` swapchain. Shard sets `rgb10a2_space=srgb` on SDR
+displays and `2100pq` while the target display is in HDR mode; 8-bit and FP16
+surfaces ignore the setting. The hint is re-applied when the target display
+changes HDR state and does not recreate the hook. This assumes a 10-bit surface
+on an HDR display is PQ, which is the standard game HDR10 format; OBS cannot
+recover the swapchain color space from the signed hook payload, so the display
+state is the available signal. The signed hook/injection payload itself is never
+modified.
 
 Capture-health/recovery snapshots include `target_monitor`, `target_monitor_hdr`,
-`target_monitor_advanced_color`, `wgc_force_sdr`, and
+`target_monitor_advanced_color`, `wgc_force_sdr`, `hook_rgb10a2_space`, and
 `output_color_space=Rec709/SDR`. Window subjects use `MonitorFromWindow` on the
 captured HWND, not the primary/configured desktop monitor. OBS's `get_hooked`
 procedure reports metadata from its acquired window; Shard resolves this uniquely
@@ -107,7 +125,7 @@ Multi-source audio depends on separate OBS mixes and one audio encoder per used 
 
 ## Per-application audio isolation
 
-Mix 0 is the master; configured audio row `i` uses mix `min(i + 1, 5)`. An App audio row (`kind: "process"`) with `excludeFromDesktop: true` is an isolated app, and its audio must exist on exactly one row mix while mix 0 still contains it once. The app always saves App audio rows with the flag set (older settings are upgraded on load); the core still treats a row without it as the original OBS `wasapi_process_output_capture` window-based capture, where the app is also heard in Desktop audio.
+Mix 0 is the master; configured audio row `i` uses mix `min(i + 1, 5)`. Each output track's stream title is its row's source name (`audioTrackTitles`, track 0 `Playback Mix`), so the editor names a clip's tracks by what was recorded. Clips from older cores carry `ring-audio-N`/`rec-audio-N` titles and are named from the current row order. Adding, removing, reordering or swapping a row changes the titles and restarts the ring and an active recording, like any other track-layout change; enable/gain changes do not. An App audio row (`kind: "process"`) with `excludeFromDesktop: true` is an isolated app, and its audio must exist on exactly one row mix while mix 0 still contains it once. The app always saves App audio rows with the flag set (older settings are upgraded on load); the core still treats a row without it as the original OBS `wasapi_process_output_capture` window-based capture, where the app is also heard in Desktop audio.
 
 Never build the Desktop track by subtracting an app capture from an endpoint capture. Independent streams differ in buffering, clocks, resampling and gain, so cancellation leaves artifacts. `PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` is also unsuitable: it excludes one tree from a system-wide capture that is not tied to an endpoint, so it also contains VoiceMeeter's own re-rendered mix and cannot exclude a second app.
 
@@ -115,7 +133,8 @@ When at least one enabled isolated app exists, `audio_isolation_capture.*` owns 
 
 - Shard registers `shard_process_loopback_capture`, a PID-addressed process-loopback source (`PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`, Windows 10 19041+, the same gate as OBS app capture). It needs no window, so tray-hidden apps and Chromium/Electron audio helper processes work.
 - An isolated row captures every process tree rooted at a process with the row's executable (all instances; restarts and PID changes are followed by executable and creation time).
-- A Desktop row enumerates shared-mode sessions on its endpoint (`IAudioSessionManager2`/`IAudioSessionControl2`) and captures the tree of each session owner unless the owner or an ancestor is an isolated executable. A session already inside another captured tree is not captured twice, and a process with sessions on several filtered endpoints goes to the first row.
+- A Desktop row enumerates shared-mode sessions on its endpoint (`IAudioSessionManager2`/`IAudioSessionControl2`) and captures the tree of each session owner unless the owner or an ancestor is an isolated executable. A process with sessions on several filtered endpoints goes to the first row.
+- `INCLUDE_TARGET_PROCESS_TREE` reaches only the target and its direct children, not grandchildren (measured: a capture of `steam.exe` is silent for a game that Steam's launcher started, while the launcher's capture hears it). A session owner is therefore skipped only when its direct parent is already captured; deeper descendants get their own capture. Isolated apps follow the same rule: a session owner inside an isolated app's tree that the app's own captures do not reach is captured on the app's track.
 - OBS mixes the per-tree sources onto mix 0 and the row mix. One controller thread reconciles about once per second and immediately on `IAudioSessionNotification::OnSessionCreated`. Sources are added/removed in the scene only; encoders, the ring and recordings are not restarted by application or session churn.
 
 The routing decisions live in `audio_isolation.*` and are covered by `shard_audio_isolation_tests`.

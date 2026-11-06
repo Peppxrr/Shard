@@ -236,12 +236,30 @@ void SourceManager::refreshTargetWindowLocked()
             static_cast<unsigned long>(subject_.pid));
 }
 
+void SourceManager::applyHookColorSpaceLocked()
+{
+  if (!gameSource_) {
+    hookColorSpaceHdr_.reset();
+    return;
+  }
+  // A failed display query is unknown, not SDR. Keep the last working hint
+  // rather than misreading a PQ surface as sRGB on a transient API failure.
+  if (!captureDisplay_.hdr.has_value())
+    return;
+  const bool hdr = *captureDisplay_.hdr;
+  if (hookColorSpaceHdr_.has_value() && *hookColorSpaceHdr_ == hdr)
+    return;
+  capture::setHookColorSpace(gameSource_, hdr);
+  hookColorSpaceHdr_ = hdr;
+}
+
 void SourceManager::refreshCaptureDisplayLocked(uint64_t nowMs)
 {
   if (subject_.kind == Subject::Kind::None) {
     captureDisplay_ = {};
     captureDisplayWindow_ = 0;
     lastDisplayQueryMs_ = 0;
+    applyHookColorSpaceLocked();
     return;
   }
   captureDisplayWindow_ = subject_.kind == Subject::Kind::Window
@@ -251,6 +269,7 @@ void SourceManager::refreshCaptureDisplayLocked(uint64_t nowMs)
   if (monitor == captureDisplay_.monitor && lastDisplayQueryMs_ && nowMs - lastDisplayQueryMs_ < 5000) return;
   captureDisplay_ = capture::queryCaptureDisplay(monitor);
   lastDisplayQueryMs_ = nowMs;
+  applyHookColorSpaceLocked();
   // Always-forced SDR means moving displays or toggling HDR doesn't change
   // WGC's BGRA8 format. OBS follows the window; do not reset any source/output.
 }
@@ -263,12 +282,16 @@ std::string SourceManager::colorDiagnosticsLocked() const
   obs_data_t* settings = source ? obs_source_get_settings(source) : nullptr;
   const bool forceSdr = settings && obs_data_get_bool(settings, "force_sdr");
   if (settings) obs_data_release(settings);
+  obs_data_t* hookSettings = gameSource_ ? obs_source_get_settings(gameSource_) : nullptr;
+  const std::string hookSpace = hookSettings ? obs_data_get_string(hookSettings, "rgb10a2_space") : "";
+  if (hookSettings) obs_data_release(hookSettings);
   std::ostringstream line;
   line << " target_monitor_hwnd=0x" << std::hex << captureDisplayWindow_ << std::dec
        << " target_monitor=" << captureDisplay_.name
        << " target_monitor_hdr=" << state(captureDisplay_.hdr)
        << " target_monitor_advanced_color=" << state(captureDisplay_.advancedColor)
        << " wgc_force_sdr=" << (forceSdr ? "true" : "false")
+       << " hook_rgb10a2_space=" << (hookSpace.empty() ? "n/a" : hookSpace)
        << " output_color_space=Rec709/SDR";
   return line.str();
 }
@@ -392,6 +415,11 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
 void SourceManager::createGameCaptureLocked()
 {
   gameSource_ = capture::createHookSource();
+  // Windows creates the hook with the SDR 10-bit hint. A rebuild can reuse a
+  // display state queried moments ago (the query is throttled), so apply it
+  // now rather than leaving an HDR10 game read as sRGB until the next query.
+  hookColorSpaceHdr_ = false;
+  applyHookColorSpaceLocked();
 }
 
 void SourceManager::recreateGameCaptureLocked()

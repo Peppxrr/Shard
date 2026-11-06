@@ -58,6 +58,11 @@ void persistDesktopState(obs_source_t* desktop, const Config& config);
 
 // Preferred game backend; nullptr when the platform/runtime has none.
 obs_source_t* createHookSource();
+// Tell a 10-bit Game Capture surface how to interpret its pixels. Windows
+// game_capture defaults to sRGB; on an HDR display a Rec.2100 PQ surface must
+// be named explicitly so libobs tonemaps it into Shard's SDR canvas. 8-bit and
+// FP16 surfaces ignore this setting. No-op on platforms without game_capture.
+void setHookColorSpace(obs_source_t* hook, bool displayHdr);
 // Window fallback layered under the hook. `desktop` is the live desktop
 // source (Linux returns a new reference to it). May return nullptr.
 obs_source_t* createWindowSource(obs_source_t* desktop);

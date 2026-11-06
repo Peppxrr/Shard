@@ -127,8 +127,11 @@ async function main() {
 
   // Cover the old playable-but-black/silent regression in this same capture
   // run, so callers do not need a separate selftest + manual content probe.
-  const streams = spawnSync(path.join(coreBin, "ffmpeg", "ffprobe.exe"), ["-v", "error", "-show_entries", "stream=codec_type", "-of", "json", clip.path], { encoding: "utf8" });
+  const streams = spawnSync(path.join(coreBin, "ffmpeg", "ffprobe.exe"), ["-v", "error", "-show_entries", "stream=codec_type:stream_tags=title,name", "-of", "json", clip.path], { encoding: "utf8" });
   assert(streams.status === 0 && JSON.parse(streams.stdout).streams.some(s => s.codec_type === "audio"), "clip has an audio track");
+  // The editor names tracks from these titles, not from the current row order.
+  const audioTitles = JSON.parse(streams.stdout).streams.filter(s => s.codec_type === "audio").map(s => s.tags?.title ?? s.tags?.name);
+  assert(audioTitles[0] === "Playback Mix", `clip audio streams carry source titles (got ${audioTitles.join(", ")})`);
   const content = spawnSync(path.join(coreBin, "ffmpeg", "ffmpeg.exe"), ["-hide_banner", "-ss", "1", "-i", clip.path,
     "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-frames:v", "3", "-an", "-f", "null", "-"], { encoding: "utf8" });
   const luma = [...content.stderr.matchAll(/lavfi\.signalstats\.YAVG=([\d.]+)/g)].map(m => Number(m[1]));

@@ -2,11 +2,13 @@
 // nonzero dimensions while the hook paints black, reproducing the failure
 // without changing or injecting the official signed OBS hook payload.
 #include "sources.h"
+#include "video_levels.h"
 #include <windows.h>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <vector>
 
 namespace {
 std::atomic<bool> hookContent{false};
@@ -16,6 +18,8 @@ std::atomic<bool> windowAnimated{false};
 std::atomic<bool> windowSized{true};
 std::atomic<int> hookCreates{0};
 std::atomic<int> outputColor{0};
+std::atomic<int> centerRed{-1};
+gs_texture_t* hdrTexture = nullptr;
 struct Source { bool hook; };
 bool realCaptureProperties = false;
 std::atomic<int> invalidCaptureSettings{0};
@@ -72,7 +76,39 @@ void registerSource(const char* id, bool hook)
 void frame(void*, video_data* data)
 {
   const uint8_t* p = data->data[0] + 36 * data->linesize[0] + 64 * 4;
+  centerRed = p[0];
   outputColor = (p[0] > 200 || p[2] > 200) ? 1 : p[1] > 200 ? 2 : 0;
+}
+void renderHdr(void*, gs_effect_t*)
+{
+  if (!hdrTexture) {
+    std::vector<float> pixels(128 * 72 * 4, 1.0f);
+    const uint8_t* data[1] = {reinterpret_cast<const uint8_t*>(pixels.data())};
+    hdrTexture = gs_texture_create(128, 72, GS_RGBA16F, 1, data, 0);
+  }
+  if (!hdrTexture) return;
+  gs_effect_t* effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+  gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), hdrTexture);
+  while (gs_effect_loop(effect, "Draw")) gs_draw_sprite(hdrTexture, 0, 0, 0);
+}
+enum gs_color_space hdrColorSpace(void*, size_t, const enum gs_color_space*)
+{
+  return GS_CS_709_SCRGB;
+}
+void registerHdrSource()
+{
+  obs_source_info info = {};
+  info.id = "hdr_capture_fixture";
+  info.type = OBS_SOURCE_TYPE_INPUT;
+  info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW;
+  info.get_name = [](void*) { return "HDR tonemap fixture"; };
+  info.create = [](obs_data_t*, obs_source_t*) -> void* { return new Source{false}; };
+  info.destroy = [](void* p) { delete static_cast<Source*>(p); };
+  info.get_width = [](void*) -> uint32_t { return 128; };
+  info.get_height = [](void*) -> uint32_t { return 72; };
+  info.video_render = renderHdr;
+  info.video_get_color_space = hdrColorSpace;
+  obs_register_source(&info);
 }
 bool waitColor(int expected, int seconds)
 {
@@ -81,6 +117,37 @@ bool waitColor(int expected, int seconds)
     pause(100);
   }
   return false;
+}
+void require(bool value, const char* description);
+void testHdrTonemap(shard::App& app)
+{
+  require(obs_get_video_sdr_white_level() == shard::kSdrWhiteLevelNits,
+          "SDR white level is initialized for HDR tonemapping");
+  require(obs_get_video_hdr_nominal_peak_level() == shard::kHdrNominalPeakLevelNits,
+          "HDR nominal peak is initialized for HDR tonemapping");
+  obs_scene_t* scene = obs_scene_create("hdr-fixture");
+  require(scene != nullptr, "create HDR fixture scene");
+  obs_set_output_source(0, obs_scene_get_source(scene));
+  obs_source_t* source = obs_source_create("hdr_capture_fixture", "hdr-capture", nullptr, nullptr);
+  require(source != nullptr, "create HDR fixture source");
+  obs_sceneitem_t* item = obs_scene_add(scene, source);
+  obs_source_release(source);
+  require(item != nullptr, "add HDR fixture item");
+  obs_sceneitem_crop crop = {};
+  crop.right = 1; // Force the intermediate color-managed item texture.
+  obs_sceneitem_set_crop(item, &crop);
+  centerRed = -1;
+  obs_add_raw_video_callback(nullptr, frame, nullptr);
+  for (int i = 0; i < 30 && centerRed < 0; ++i) pause(100);
+  obs_remove_raw_video_callback(frame, nullptr);
+  require(centerRed >= 30 && centerRed <= 220,
+          "scRGB HDR source is tone-mapped into the SDR canvas instead of saturating");
+  obs_set_output_source(0, obs_scene_get_source(app.scene()));
+  obs_scene_release(scene);
+  obs_enter_graphics();
+  gs_texture_destroy(hdrTexture);
+  hdrTexture = nullptr;
+  obs_leave_graphics();
 }
 void require(bool value, const char* description)
 {
@@ -119,7 +186,10 @@ struct SourceManagerCaptureTestAccess {
     require(sources.captureDisplay_.monitor == reinterpret_cast<uintptr_t>(
                 MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)),
             "display diagnostics select the live target HWND monitor");
-    require(sources.colorDiagnosticsLocked().find("wgc_force_sdr=true output_color_space=Rec709/SDR") != std::string::npos,
+    const std::string diagnostics = sources.colorDiagnosticsLocked();
+    require(diagnostics.find("wgc_force_sdr=true") != std::string::npos &&
+                diagnostics.find("hook_rgb10a2_space=srgb") != std::string::npos &&
+                diagnostics.find("output_color_space=Rec709/SDR") != std::string::npos,
             "display diagnostics report actual SDR settings");
   }
   static void monitorRetry(SourceManager& sources) {
@@ -130,6 +200,22 @@ struct SourceManagerCaptureTestAccess {
     obs_data_release(settings);
     sources.retryMonitorCaptureLocked();
     requireSdr(sources.monitorSource_);
+  }
+  static void hdrHookColorSpace(SourceManager& sources) {
+    std::lock_guard<std::mutex> lock(sources.sourceMutex_);
+    const auto space = [&] {
+      auto* settings = obs_source_get_settings(sources.gameSource_);
+      const std::string value = settings ? obs_data_get_string(settings, "rgb10a2_space") : "";
+      obs_data_release(settings);
+      return value;
+    };
+    require(space() == "srgb", "Game Capture starts in the SDR 10-bit color space");
+    sources.captureDisplay_.hdr = true;
+    sources.applyHookColorSpaceLocked();
+    require(space() == "2100pq", "HDR displays promote 10-bit Game Capture to Rec.2100 PQ");
+    sources.captureDisplay_.hdr = false;
+    sources.applyHookColorSpaceLocked();
+    require(space() == "srgb", "returning to SDR restores the sRGB 10-bit hint");
   }
 };
 
@@ -154,6 +240,7 @@ bool App::init()
   info.colorspace = VIDEO_CS_709;
   info.range = VIDEO_RANGE_FULL;
   if (obs_reset_video(&info) != OBS_VIDEO_SUCCESS) return false;
+  applyVideoColorLevels();
   if (realCaptureProperties) {
     obs_add_module_path((config_.coreBinDir + "/obs-plugins/64bit").c_str(),
                         (config_.coreBinDir + "/data/obs-plugins/%module%").c_str());
@@ -163,6 +250,7 @@ bool App::init()
     registerSource("game_capture", true);
     registerSource("window_capture", false);
     registerSource("monitor_capture", false);
+    registerHdrSource();
   }
   scene_ = obs_scene_create("fixture");
   obs_set_output_source(0, obs_scene_get_source(scene_));
@@ -183,7 +271,9 @@ bool App::resetVideo(uint32_t width, uint32_t height)
   obs_get_video_info(&info);
   info.base_width = info.output_width = baseWidth_ = width;
   info.base_height = info.output_height = baseHeight_ = height;
-  return obs_reset_video(&info) == OBS_VIDEO_SUCCESS;
+  if (obs_reset_video(&info) != OBS_VIDEO_SUCCESS) return false;
+  applyVideoColorLevels();
+  return true;
 }
 }
 
@@ -233,6 +323,7 @@ int main(int argc, char** argv)
     sources.setGameSubject("cs2.exe", "Synthetic CS2", "Shard capture fixture",
                            "ShardCaptureRecoveryFixture", GetCurrentProcessId());
     shard::SourceManagerCaptureTestAccess::windowLifecycle(sources);
+    shard::SourceManagerCaptureTestAccess::hdrHookColorSpace(sources);
     // A title-only change keeps the live target; a complete video-source
     // rebuild retargets it. Both must leave SDR asserted.
     sources.setGameSubject("cs2.exe", "Synthetic CS2", "Retarget fixture",
@@ -296,6 +387,7 @@ int main(int argc, char** argv)
     sources.stopWatchdog();
   }
   require(invalidCaptureSettings == 0, "watchdog recovery preserves SDR WGC settings");
+  testHdrTonemap(app);
   DestroyWindow(target);
   std::puts("PASS: capture backend GPU integration");
 }

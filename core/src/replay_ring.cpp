@@ -1,5 +1,6 @@
 #include "replay_ring.h"
 
+#include "audio_isolation.h"
 #include "log.h"
 #include "mux.h"
 #include "perf_monitor.h"
@@ -254,12 +255,11 @@ bool ReplayRing::startWithVideoEncoderLocked(const std::string& videoId)
   // Allocate one encoder for each configured row, even while that row is
   // disabled. Its stable mix can then be silenced/re-enabled live without
   // restarting this output and discarding the replay buffer.
-  const int audioTracks = 1 + std::min(static_cast<int>(config_.audioSources.size()), 5);
-  for (int track = 0; track < audioTracks; track++) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "ring-audio-%d", track);
+  // The save mux writes each encoder name as its stream title.
+  const auto titles = audioTrackTitles(config_.audioSources);
+  for (size_t track = 0; track < titles.size(); track++) {
     obs_data_t* audioSettings = encoders_.audioSettings();
-    obs_encoder_t* aenc = obs_audio_encoder_create("ffmpeg_aac", name, audioSettings, track, nullptr);
+    obs_encoder_t* aenc = obs_audio_encoder_create("ffmpeg_aac", titles[track].c_str(), audioSettings, track, nullptr);
     obs_data_release(audioSettings);
     if (!aenc) {
       stopLocked();
