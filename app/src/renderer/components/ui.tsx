@@ -189,7 +189,7 @@ interface ModalProps {
   title?: ReactNode;
   sub?: ReactNode;
   size?: "sm" | "md" | "lg" | "full";
-  variant?: "clip-viewer" | "medal-import" | "export-result";
+  variant?: "editor" | "clip-viewer" | "medal-import" | "export-result";
   children: ReactNode;
   foot?: ReactNode;
   closeOnBackdrop?: boolean;
@@ -197,6 +197,8 @@ interface ModalProps {
 export function Modal({ open, onClose, title, sub, size = "md", variant, children, foot, closeOnBackdrop = true }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  // Variant dialogs own focus so a shortcut cannot activate the view behind
+  // them after they open.
   useEffect(() => {
     if (!open || !variant) return;
     const previousFocus = document.activeElement as HTMLElement | null;

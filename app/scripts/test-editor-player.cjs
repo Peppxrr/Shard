@@ -44,6 +44,21 @@ app.whenReady().then(async () => {
     await mouse("mouseUp",to,["alt"]);
     await wait(100);
   };
+  // Space is the editor's play/pause shortcut even when a toolbar control was
+  // the last thing clicked; it must not activate that control again.
+  await click('[aria-label="Mute"]');
+  await until("!!document.querySelector('[aria-label=\"Unmute\"]')");
+  const space = () => {
+    win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Space" });
+    win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Space" });
+  };
+  space();
+  await until("!!document.querySelector('[aria-label=\"Pause (Space)\"]') && document.querySelector('video').currentTime > 0.05");
+  assert.equal(await js("!!document.querySelector('[aria-label=\"Unmute\"]')"), true, "Space must not activate the focused mute button");
+  space();
+  await until("!!document.querySelector('[aria-label=\"Play (Space)\"]') && document.querySelector('video').paused");
+  await click('[aria-label="Unmute"]');
+  await until("!!document.querySelector('[aria-label=\"Mute\"]')");
   await click('[data-clip-track="video"]');
   await until("!!document.querySelector('[data-trim-edge=start]')");
   const beforeTrim = await js("(()=>{const r=document.querySelector('.timeline__ruler').getBoundingClientRect();return{x:Math.round(r.x+2),y:Math.round(r.y+r.height/2)}})()");

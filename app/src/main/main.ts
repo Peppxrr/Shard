@@ -9,6 +9,7 @@ import { existsSync, readFileSync, statSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ThemeStore } from "./themes";
+import { DEV_MEDIA_SCHEME, registerDevMediaProtocol } from "./dev-media";
 import { CoreClient } from "./core-client";
 import { loadSettings, getSettings, saveSettings, seedGamesJson } from "./settings";
 import { HotkeyManager, enableGlobalShortcutsPortal } from "./hotkeys";
@@ -135,7 +136,13 @@ async function listLinuxProcesses(): Promise<ProcessEntry[]> {
 
 
 // Registered before app readiness; local theme assets also work on Vite's HTTP origin.
-protocol.registerSchemesAsPrivileged([{ scheme: "shard-theme", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
+const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+protocol.registerSchemesAsPrivileged([
+  { scheme: "shard-theme", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
+  ...(devServerUrl
+    ? [{ scheme: DEV_MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]
+    : []),
+]);
 let themes: ThemeStore;
 
 let win: BrowserWindow | null = null;
@@ -241,6 +248,7 @@ async function main(): Promise<void> {
       } });
     } catch { return new Response("Theme resource unavailable", { status: 404 }); }
   });
+  if (devServerUrl) registerDevMediaProtocol();
   await trackJob(themes.startWatching()).catch(error => console.warn("[themes] Watch failed", error));
   if (!shutdown.acceptingWork) { themes.close(); return; }
 

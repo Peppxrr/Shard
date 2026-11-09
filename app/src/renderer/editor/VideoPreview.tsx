@@ -412,8 +412,10 @@ export function formatEditorTime(seconds: number, precise = false): string {
 }
 
 export function mediaFileUrl(filePath: string): string {
-  if (/^(?:https?|file|blob|data):/i.test(filePath)) return filePath;
+  if (/^(?:https?|file|shard-media|data|blob):/i.test(filePath)) return filePath;
   const normalized = filePath.replace(/\\/g, "/");
+  // Vite serves the renderer over HTTP, where Chromium blocks file:// media.
+  if (import.meta.env.DEV) return `shard-media://media/?path=${encodeURIComponent(normalized)}`;
   const prefix = normalized.startsWith("/") ? "file://" : "file:///";
   return encodeURI(`${prefix}${normalized}`).replace(/#/g, "%23").replace(/\?/g, "%3F");
 }

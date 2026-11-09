@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.14
+
+- Fixed Space in the editor: it now always plays and pauses, even right after clicking a toolbar button, and can no longer reopen the clip viewer behind the editor.
+- Themes can now target the full-screen editor with `data-shard-modal="editor"`.
+
 ## 0.1.13
 
 - Fixed HDR games looking washed out or blown out in clips.

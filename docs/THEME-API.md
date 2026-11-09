@@ -34,7 +34,7 @@ Use `[data-shard-component="<value>"]` with these values:
 | `select` | Button with `aria-expanded="true|false"`, native disabled state |
 | `select-menu` | Dropdown listbox; options use `aria-selected` |
 | `context-menu` | Player/editor context menu |
-| `modal` | Dialog overlay; `data-shard-modal="clip-viewer"` identifies the clip preview dialog; `data-shard-modal="export-result"` identifies the finished export dialog |
+| `modal` | Dialog overlay; `data-shard-modal="clip-viewer"` identifies the clip preview dialog; `data-shard-modal="editor"` identifies the full-screen editor workspace; `data-shard-modal="export-result"` identifies the finished export dialog |
 | `toast` | `data-shard-state="info|ok|error"` |
 | `empty` | Empty-state content |
 | `theme-picker` | Theme selection/options area |

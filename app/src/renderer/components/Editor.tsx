@@ -502,7 +502,6 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
         event.preventDefault();
         redo();
       } else if (event.code === "Space") {
-        if (target?.closest("button")) return;
         event.preventDefault();
         togglePlayback();
       } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -620,7 +619,10 @@ export function Editor({ clip: originalClip, onClose, onExport, onOpenExport }: 
   const dismissExport = useCallback(() => setExportProgress(null), []);
 
   return (
-    <Modal open onClose={onClose} closeOnBackdrop={false} size="full">
+    // Focus containment matters: after the clip viewer closes, the library
+    // control that opened it holds focus. Without moving focus into the
+    // editor, Space would re-activate that control and reopen the viewer.
+    <Modal open onClose={onClose} closeOnBackdrop={false} size="full" variant="editor">
       <div data-shard-page="editor" data-playing={playing} className="editor editor-workspace">
         <header data-shard-slot="toolbar" className="editor-header">
           <Button variant="ghost" size="sm" icon={<Icon name="back" size={15} />} onClick={onClose}>Library</Button>
