@@ -75,7 +75,7 @@ if (command === "notes") {
   // files list containing only exclusion globs silently re-enables **/*,
   // duplicating the ~282 MiB runtime inside app.asar.
   const accidentalResource = listPackage(archive)
-    .map(file => file.replaceAll("\\", "/").replace(/^\\/+/, ""))
+    .map(file => file.replaceAll("\\", "/").replace(/^\/+/, ""))
     .find(file => file === "resources" || file.startsWith("resources/"));
   assert.equal(accidentalResource, undefined, `Staged resources leaked into app.asar: ${accidentalResource}`);
   assert.ok(statSync(archive).size < 32 * 1024 * 1024,
