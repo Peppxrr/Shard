@@ -5,7 +5,7 @@ import { createReadStream, readFileSync, writeFileSync, mkdirSync, statSync } fr
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import yaml from "js-yaml";
-import { extractFile } from "@electron/asar";
+import { extractFile, listPackage } from "@electron/asar";
 
 const appRoot = resolve(import.meta.dirname, "..");
 const root = resolve(appRoot, "..");
@@ -71,6 +71,15 @@ if (command === "notes") {
   assert.equal(feed.repo, "Shard");
   assert.ok(!feed.token && !feed.private, "Public clients must not embed credentials");
   const archive = join(resources, "app.asar");
+  // resources/core-bin is separately staged through extraResources. A platform
+  // files list containing only exclusion globs silently re-enables **/*,
+  // duplicating the ~282 MiB runtime inside app.asar.
+  const accidentalResource = listPackage(archive)
+    .map(file => file.replaceAll("\\", "/").replace(/^\/+/, ""))
+    .find(file => file === "resources" || file.startsWith("resources/"));
+  assert.equal(accidentalResource, undefined, `Staged resources leaked into app.asar: ${accidentalResource}`);
+  assert.ok(statSync(archive).size < 32 * 1024 * 1024,
+    "app.asar exceeds 32 MiB; investigate bundled dependencies or duplicate runtime files");
   const packaged = JSON.parse(extractFile(archive, "package.json").toString());
   assert.equal(packaged.version, version);
   assert.ok(packaged.dependencies["electron-updater"]);
