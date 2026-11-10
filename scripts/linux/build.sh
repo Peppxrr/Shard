@@ -50,6 +50,19 @@ done
 
 if [[ $clean == 1 ]]; then
   case "$build_dir" in "$root"/*) rm -rf -- "$build_dir" ;; *) echo "refusing to clean $build_dir" >&2; exit 1 ;; esac
+else
+  # A moved or renamed checkout leaves absolute paths in CMakeCache.txt and
+  # CMake then refuses to configure. The build tree is generated state.
+  cache="$build_dir/CMakeCache.txt"
+  if [[ -f "$cache" ]]; then
+    recorded="$(sed -n 's/^CMAKE_CACHEFILE_DIR:INTERNAL=//p' "$cache" | head -1)"
+    expected="$(realpath -m -- "$build_dir")"
+    if [[ -n "$recorded" && "$recorded" != "$expected" ]]; then
+      case "$build_dir" in "$root"/*) ;; *) echo "refusing to reset $build_dir" >&2; exit 1 ;; esac
+      echo "==> Discarding $build_dir (CMake cache was created in $recorded)" >&2
+      rm -rf -- "$build_dir"
+    fi
+  fi
 fi
 
 obs_version="$(node -e 'process.stdout.write(require(process.argv[1]).obs.version)' "$root/runtime-dependencies.json" 2>/dev/null ||

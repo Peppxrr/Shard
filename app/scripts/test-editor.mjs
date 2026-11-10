@@ -11,11 +11,13 @@ import { resolveFfmpegTool } from "../src/main/ffmpeg-path.ts";
 import { existsSync, statSync } from "node:fs";
 import "./test-playback-diagnostics.mjs";
 
+// Resolve against the app directory, not the caller's working directory.
+const appRoot = path.resolve(import.meta.dirname, "..");
 const editorCacheDirectory = await mkdtemp(path.join(os.tmpdir(), "shard-editor-cache-test-"));
 registerHooks({ resolve(specifier, context, next) {
   if (["./bundled-processes", "./timeline-previews", "./editor-preparation", "./waveform-cache", "./ffmpeg-path", "../shared/timeline-export", "../../shared/timeline-export"].includes(specifier)) specifier += ".ts";
   if (specifier === "electron") return {
-    url: `data:text/javascript,${encodeURIComponent(`export const app = { getPath: () => ${JSON.stringify(editorCacheDirectory)}, getAppPath: () => process.cwd() };`)}`,
+    url: `data:text/javascript,${encodeURIComponent(`export const app = { getPath: () => ${JSON.stringify(editorCacheDirectory)}, getAppPath: () => ${JSON.stringify(appRoot)} };`)}`,
     shortCircuit: true,
   };
   return next(specifier, context);
@@ -389,7 +391,7 @@ assert.deepEqual(
 
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "Shard Editor Ω "));
 // The staged core-bin build, then the pinned vendor build (system FFmpeg off Windows).
-const ffmpegDirs = [path.resolve("resources/core-bin/ffmpeg"), path.resolve("../vendor/ffmpeg/bin")];
+const ffmpegDirs = [path.join(appRoot, "resources/core-bin/ffmpeg"), path.resolve(appRoot, "../vendor/ffmpeg/bin")];
 const ffmpeg = resolveFfmpegTool("ffmpeg", ffmpegDirs);
 const ffprobe = resolveFfmpegTool("ffprobe", ffmpegDirs);
 const ffmpegDir = path.dirname(ffmpeg);

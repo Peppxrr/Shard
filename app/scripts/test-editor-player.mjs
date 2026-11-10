@@ -6,7 +6,7 @@ import path from "node:path";
 import electron from "electron";
 import { resolveFfmpegTool } from "../src/main/ffmpeg-path.ts";
 
-const app = process.cwd();
+const app = path.resolve(import.meta.dirname, "..");
 const temporary = path.resolve(app, "../tmp");
 await mkdir(temporary, { recursive: true });
 const fixture = await mkdtemp(path.join(temporary, "editor-player-test-"));

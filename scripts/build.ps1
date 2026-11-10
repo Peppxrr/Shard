@@ -5,6 +5,7 @@
 #   powershell -File scripts/build.ps1 -Clean     # wipe build dirs first
 #   powershell -File scripts/build.ps1 -SkipApp   # core only (no electron app)
 #   powershell -File scripts/build.ps1 -Config Debug   # debug core -> app/resources/core-bin-dev
+#   powershell -File scripts/build.ps1 -BuildDir <dir> # alternate CMake build tree
 #
 # Staging: Release lands in app/resources/core-bin (used by the packaged app
 # and the e2e/selftest runners); Debug lands in app/resources/core-bin-dev
@@ -17,7 +18,8 @@ param(
   [ValidateSet("Release", "Debug")]
   [string]$Config = "Release",
   [switch]$Clean,
-  [switch]$SkipApp
+  [switch]$SkipApp,
+  [string]$BuildDir
 )
 $ErrorActionPreference = "Stop"
 
@@ -25,7 +27,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $pinsPath = Join-Path $root "runtime-dependencies.json"
 $pins = Get-Content $pinsPath -Raw | ConvertFrom-Json
 $coreDir = Join-Path $root "core"
-$buildDir = Join-Path $root "build_x64"
+$buildDir = if ($BuildDir) { [IO.Path]::GetFullPath($BuildDir) } else { Join-Path $root "build_x64" }
 if ($Config -eq "Debug") {
   $stageDir = Join-Path $root "app/resources/core-bin-dev"
 } else {
@@ -133,12 +135,52 @@ function Invoke-ObsPatch([string]$Path, [string]$Label) {
 
 Invoke-ObsPatch $obsPatch "OBS Game Capture"
 
+$x86Dir = Join-Path $root "core/build_x86"
+
+# Directory.Delete removes a junction itself; Remove-Item -Recurse would follow
+# it into the target's contents. Dangling junctions have no Test-Path result,
+# so probe with Get-Item.
+function Remove-GeneratedDirectory([string]$Path) {
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  if (-not $item) { return }
+  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($Path) }
+  else { Remove-Item -LiteralPath $Path -Recurse -Force }
+}
+
+# A moved or renamed checkout leaves absolute paths in CMakeCache.txt and CMake
+# then refuses to configure ("current CMakeCache.txt directory ... is
+# different"). Build trees are generated state, so drop them and start over.
+function Reset-StaleCMakeCache([string]$Directory) {
+  $cache = Join-Path $Directory "CMakeCache.txt"
+  if (-not (Test-Path -LiteralPath $cache -PathType Leaf)) { return }
+  # Only a configured build tree is disposable; never a source tree.
+  if (-not (Test-Path -LiteralPath (Join-Path $Directory "CMakeFiles") -PathType Container)) { return }
+  $prefix = "CMAKE_CACHEFILE_DIR:INTERNAL="
+  $recorded = $null
+  foreach ($line in [IO.File]::ReadAllLines($cache)) {
+    if ($line.StartsWith($prefix, [StringComparison]::Ordinal)) {
+      $recorded = $line.Substring($prefix.Length).Trim()
+      break
+    }
+  }
+  if (-not $recorded) { return }
+  $actual = [IO.Path]::GetFullPath($Directory)
+  $moved = try { [IO.Path]::GetFullPath($recorded) } catch { $null }
+  if ($moved -and $moved.Replace('\', '/') -ieq $actual.Replace('\', '/')) { return }
+  Write-Host "==> Discarding $Directory (CMake cache belongs to $recorded)"
+  Remove-GeneratedDirectory $Directory
+}
+
 if ($Clean) {
-  foreach ($target in @($buildDir, (Join-Path $root "build_x86"))) {
+  foreach ($target in @($buildDir, $x86Dir)) {
     $resolved = [IO.Path]::GetFullPath($target)
     if (-not $resolved.StartsWith([IO.Path]::GetFullPath($root) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe build cleanup: $resolved" }
-    if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+    Remove-GeneratedDirectory $resolved
   }
+} else {
+  # Reset before setup-obs-links recreates the x86 junction into core/build_x86.
+  Reset-StaleCMakeCache $buildDir
+  Reset-StaleCMakeCache $x86Dir
 }
 
 # Build into a fresh sibling so retired DLLs/data cannot survive a dependency

@@ -13,9 +13,11 @@ const { TimelinePreviews } = await import("../src/main/timeline-previews.ts");
 const { ownedProcesses } = await import("../src/main/bundled-processes.ts");
 const { resolveFfmpegTool } = await import("../src/main/ffmpeg-path.ts");
 
+// Resolve against the app directory, not the caller's working directory.
+const appRoot = path.resolve(import.meta.dirname, "..");
 // The staged core-bin build, then the pinned vendor build (system FFmpeg off Windows).
-const executable = resolveFfmpegTool("ffmpeg", [path.resolve("resources/core-bin/ffmpeg"), path.resolve("../vendor/ffmpeg/bin")]);
-const parent = path.resolve("../tmp");
+const executable = resolveFfmpegTool("ffmpeg", [path.join(appRoot, "resources/core-bin/ffmpeg"), path.resolve(appRoot, "../vendor/ffmpeg/bin")]);
+const parent = path.resolve(appRoot, "../tmp");
 await fs.mkdir(parent, { recursive: true });
 const root = await fs.mkdtemp(path.join(parent, "timeline-preview-test-"));
 const cache = path.join(root, "cache");
