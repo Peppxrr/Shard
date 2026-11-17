@@ -51,12 +51,12 @@ export function listExportEncoders(): Promise<ExportEncoderInfo[]> {
 }
 
 async function detectExportEncoders(): Promise<ExportEncoderInfo[]> {
-  const preferredVendor = await activeGpuVendor();
-  const detected: Omit<ExportEncoderInfo, "preferred">[] = [];
-  for (const encoder of EXPORT_GPU_ENCODERS) {
-    if (await probeExportEncoder(encoder.id))
-      detected.push(encoder);
-  }
+  // Probes run together: one at a time cost seconds before the first export.
+  const [preferredVendor, available] = await Promise.all([
+    activeGpuVendor(),
+    Promise.all(EXPORT_GPU_ENCODERS.map((encoder) => probeExportEncoder(encoder.id))),
+  ]);
+  const detected = EXPORT_GPU_ENCODERS.filter((_, index) => available[index]);
   const codecOrder = { h264: 0, hevc: 1, av1: 2 } as const;
   detected.sort((a, b) => {
     const aPrimary = a.vendor === preferredVendor ? 0 : 1;
@@ -111,6 +111,7 @@ export interface ProbeResult {
   height: number;
   fps: number | null;
   sizeBytes: number;
+  videoCodec: string;
 }
 
 function parseRate(rate: unknown): number | null {
@@ -133,7 +134,7 @@ export async function ffprobeAsync(file: string): Promise<ProbeResult> {
   const out = await runAsync(exe, [
     "-v", "error",
     "-select_streams", "v:0",
-    "-show_entries", "format=duration:stream=width,height,r_frame_rate",
+    "-show_entries", "format=duration:stream=codec_name,width,height,r_frame_rate",
     "-of", "json",
     file,
   ]);
@@ -147,6 +148,7 @@ export async function ffprobeAsync(file: string): Promise<ProbeResult> {
     height: Number(stream.height ?? 0),
     fps,
     sizeBytes: fileSize(file),
+    videoCodec: String(stream.codec_name ?? ""),
   };
 }
 

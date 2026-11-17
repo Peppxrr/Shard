@@ -7,7 +7,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import type { ClipRecord, EditorExportProject, EditorTimelineClip, ExportProgress, ExportResult, ExportSettings } from "../shared/contracts";
 import { ffmpegTool, ffprobeAsync, listExportEncoders, probeAudioTracks } from "./ffmpeg";
-import { buildVideoEncoderArgs, pickExportResolution as pickResolution } from "./export-video";
+import { buildHardwareDecodeArgs, buildVideoEncoderArgs, pickExportResolution as pickResolution } from "./export-video";
 import { editorDir } from "./library";
 import {
   buildExportAudioOutputs,
@@ -47,7 +47,12 @@ export class ExportManager extends EventEmitter {
       await fs.access(clip.path);
       const sourceDuration = clip.durationMs / 1000;
       const videoClips = validateTimelineClips(project.videoClips, sourceDuration, "Video");
-      const tracks = resolveExportAudioTracks(await probeAudioTracks(clip.path), project.audioTracks, sourceDuration);
+      // Independent probes overlap; the encoder list is usually cached already
+      // (detection starts when the editor opens).
+      const [audioStreams, sourceProbe, supportedEncoders] = await Promise.all([
+        probeAudioTracks(clip.path), ffprobeAsync(clip.path), listExportEncoders(),
+      ]);
+      const tracks = resolveExportAudioTracks(audioStreams, project.audioTracks, sourceDuration);
       const totalDur = exportTimelineDuration(videoClips, tracks);
 
       const outDir = editorDir();
@@ -55,7 +60,6 @@ export class ExportManager extends EventEmitter {
       const base = path.basename(clip.path, path.extname(clip.path));
       outFile = await availableOutputPath(outDir, `${base}-edited`, ".mp4");
 
-      const sourceProbe = await ffprobeAsync(clip.path);
       const sourceRes = { w: sourceProbe.width || clip.width || 1920, h: sourceProbe.height || clip.height || 1080 };
       const fps = sourceProbe.fps && sourceProbe.fps > 0 ? sourceProbe.fps : (clip.fps || 30);
       let resolution = pickResolution(settings.resolution, sourceRes);
@@ -69,7 +73,7 @@ export class ExportManager extends EventEmitter {
       let actualMb = 0;
       let previousBytes: number | null = null;
       let runs = 0;
-      const supportedEncoders = await listExportEncoders();
+      let decodeArgs = buildHardwareDecodeArgs(sourceProbe.videoCodec);
       let videoEncoder = settings.encoder === "auto"
         ? (supportedEncoders.find((encoder) => encoder.preferred)?.id ?? "libx264")
         : (supportedEncoders.find((encoder) => encoder.id === settings.encoder)?.id ?? "libx264");
@@ -100,10 +104,22 @@ export class ExportManager extends EventEmitter {
             fps,
             bitrate,
             videoEncoder,
+            decodeArgs,
             totalDur,
             runs,
           );
         } catch (error) {
+          if (this.cancelled) break;
+          // GPU decoding is an optimization; any failure retries in software
+          // before the encoder fallback is considered.
+          if (decodeArgs.length) {
+            console.warn("[editor][export] hardware decoding failed; retrying with software decoding", { decodeArgs, error });
+            decodeArgs = [];
+            runs--;
+            await fs.unlink(outFile).catch(() => {});
+            this.emitProgress(clip.id, "Retrying with software decoding", 0, 0, totalDur);
+            continue;
+          }
           if (settings.encoder === "auto" && videoEncoder !== "libx264" && !usedAutoFallback) {
             console.warn("[editor][export] hardware encoder failed; retrying with x264", { videoEncoder, error });
             usedAutoFallback = true;
@@ -195,6 +211,7 @@ export class ExportManager extends EventEmitter {
     fps: number,
     bitrateKbps: number,
     videoEncoder: string,
+    decodeArgs: string[],
     totalDur: number,
     attempt: number,
   ): Promise<void> {
@@ -212,10 +229,15 @@ export class ExportManager extends EventEmitter {
     await this.spawnWithProgress(
       [
         "-y",
+        ...decodeArgs,
+        ...graph.inputArgs,
         "-i",
         clip.path,
         "-progress",
         "pipe:1",
+        // Default 0.5 s: the first progress (the "Encoding" phase) came late.
+        "-stats_period",
+        "0.2",
         "-nostats",
         "-filter_complex",
         graph.filter,

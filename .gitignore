@@ -51,6 +51,7 @@ vs_buildtools.exe
 
 # Fetched by scripts/fetch-ffmpeg.ps1 (pinned SHA-256)
 vendor/ffmpeg/
+vendor/ffmpeg-build/
 
 # Required application branding assets (not generated build output)
 !app/build/

@@ -693,6 +693,8 @@ export interface ShardApi {
   closeWindow(): Promise<void>;
   isWindowMaximized(): Promise<boolean>;
   onWindowMaximized(cb: (maximized: boolean) => void): () => void;
+  // Keeps the window loaded while closed to tray (true while the editor holds unsaved work).
+  retainWindow(retained: boolean): Promise<void>;
   // developer console stream + window toggle (returns new open state)
   onDevConsoleLine(cb: (line: DevConsoleLine) => void): () => void;
   getDevConsoleHistory(): Promise<DevConsoleLine[]>;

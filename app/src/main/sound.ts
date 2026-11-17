@@ -15,6 +15,69 @@ import { getSettings } from "./settings";
 let pendingRendererWin: BrowserWindow | null = null;
 export function setSoundWindow(win: BrowserWindow | null) { pendingRendererWin = win; }
 
+// While the main window is unloaded (closed to tray), a hidden page with no
+// preload plays clip sounds: low latency on every platform, without the main
+// renderer's memory. The sound bytes are sent only when the file changes.
+let soundHost: BrowserWindow | null = null;
+let soundHostReady: Promise<void> | null = null;
+let soundHostKey = "";
+
+export function prepareSoundHost(): void {
+  if (soundHost && !soundHost.isDestroyed()) return;
+  const host = new BrowserWindow({
+    show: false, width: 1, height: 1, frame: false, skipTaskbar: true, focusable: false,
+    title: "Shard sound",
+    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required", backgroundThrottling: false },
+  });
+  soundHost = host;
+  soundHostKey = "";
+  host.on("closed", () => {
+    if (soundHost !== host) return;
+    soundHost = null;
+    soundHostReady = null;
+  });
+  soundHostReady = host.loadURL("data:text/html;charset=utf-8,<!doctype html><title>Shard sound</title>").catch(() => {});
+}
+
+export function closeSoundHost(): void {
+  const host = soundHost;
+  soundHost = null;
+  soundHostReady = null;
+  soundHostKey = "";
+  if (host && !host.isDestroyed()) host.destroy();
+}
+
+const SOUND_MIME: Record<string, string> = {
+  ".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg",
+  ".flac": "audio/flac", ".m4a": "audio/mp4", ".aac": "audio/aac", ".webm": "audio/webm",
+};
+
+async function playInSoundHost(file: string, volume: number): Promise<boolean> {
+  prepareSoundHost();
+  const host = soundHost;
+  if (!host) return false;
+  await soundHostReady;
+  if (host.isDestroyed()) return false;
+  const stat = await fs.stat(file);
+  const key = `${file}|${stat.size}|${stat.mtimeMs}`;
+  let source = "";
+  if (key !== soundHostKey) {
+    const mime = SOUND_MIME[path.extname(file).toLowerCase()] ?? "audio/wav";
+    source = `data:${mime};base64,${(await fs.readFile(file)).toString("base64")}`;
+  }
+  if (host.isDestroyed()) return false;
+  const played = await host.webContents.executeJavaScript(`(() => {
+    const source = ${JSON.stringify(source)};
+    if (source) window.clipSound = new Audio(source);
+    const audio = window.clipSound;
+    if (!audio) return false;
+    audio.pause(); audio.currentTime = 0; audio.volume = ${JSON.stringify(volume)};
+    return audio.play().then(() => true, () => false);
+  })()`, true) as boolean;
+  if (played) soundHostKey = key;
+  return played;
+}
+
 export function playClipSound(): void {
   const s = getSettings().app as unknown as { clipSound: boolean; clipSoundVolume: number; clipSoundPath: string };
   if (!s.clipSound) return;
@@ -48,6 +111,12 @@ async function playSoundFile(customPath: string, volume: number): Promise<void> 
       return;
     } catch {}
   }
+
+  // Main window unloaded: the hidden sound page plays it.
+  try {
+    if (await playInSoundHost(wav, vol)) return;
+  } catch {}
+  if (process.platform !== "win32") return;
 
   // Fallback: fast powershell SoundPlayer (low latency). Use MediaPlayer only if volume !=1
   const psCmd = volume >= 0.99 && volume <= 1.01 ? buildFastSoundPlayerCommand(wav) : buildMediaPlayerCommand(wav, vol);

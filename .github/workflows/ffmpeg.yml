@@ -1,0 +1,78 @@
+name: Editor FFmpeg
+
+# Builds Shard's trimmed editor/export FFmpeg (scripts/ffmpeg) and publishes it
+# as a prerelease asset that runtime-dependencies.json pins by SHA-256. The
+# prerelease is never marked latest, so the in-app updater (which reads the
+# latest release) never sees it. A published revision is never replaced: bump
+# `revision` in scripts/ffmpeg/build-pins.json for a new build.
+on:
+  push:
+    paths: ["scripts/ffmpeg/**", ".github/workflows/ffmpeg.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: editor-ffmpeg
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: powershell
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: meta
+        run: |
+          $pins = Get-Content scripts/ffmpeg/build-pins.json -Raw | ConvertFrom-Json
+          "tag=ffmpeg-$($pins.ffmpeg.version)-$($pins.revision)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+      - name: Build (runner MSYS2)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ffmpeg/build-windows.ps1 -Msys C:\msys64
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ffmpeg-build-logs
+          path: vendor/ffmpeg-build/*.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-ffmpeg
+          if-no-files-found: error
+          path: |
+            vendor/ffmpeg-build/shard-ffmpeg-*.zip
+            vendor/ffmpeg-build/ffmpeg-*.tar.xz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: shard-ffmpeg
+          path: dist
+      - name: Publish prerelease (never latest, never replaced)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "$TAG is already published; bump revision in scripts/ffmpeg/build-pins.json for a new build."
+            exit 0
+          fi
+          sha256sum dist/*
+          gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Editor FFmpeg $TAG" \
+            --notes "Shard's editor/export FFmpeg build (scripts/ffmpeg/build-windows.ps1), with its FFmpeg source tarball. Pinned by SHA-256 in runtime-dependencies.json. Not a Shard app release." \
+            dist/*

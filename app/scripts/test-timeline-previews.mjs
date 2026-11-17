@@ -161,7 +161,7 @@ try {
   assert.equal((await fs.readdir(exhaustedRoot)).length, 0, "over-budget temporary files and empty directories are removed");
 
   const av1 = path.join(root, "moving-av1.mp4");
-  await run(["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=24", "-c:v", "libaom-av1", "-cpu-used", "8", "-threads", "2", "-g", "48", "-crf", "40", av1]);
+  await run(["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=24", "-c:v", "libsvtav1", "-preset", "12", "-g", "48", "-crf", "40", av1]);
   const beforeAv1 = processStarts;
   const av1Start = performance.now();
   let av1FirstMs;

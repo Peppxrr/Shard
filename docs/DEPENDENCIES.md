@@ -27,15 +27,28 @@ The packaged runtime includes its selected pins for diagnosis.
    if upstream renames or adds runtime components. libobs loads every module in
    `obs-plugins/64bit`, so `scripts/build.ps1` stages only the modules the core
    uses and `app/scripts/verify-core-bin.mjs` rejects any other module.
-4. To change the editor/export FFmpeg, update its version, versioned URL, archive
-   directory, SHA-256 and `runtimeDlls` together, then run `scripts/fetch-ffmpeg.ps1`.
-   Use a *shared* build: `ffmpeg.exe` and `ffprobe.exe` then share one copy of the
-   codec libraries. It is staged in `core-bin/ffmpeg`, apart from OBS's FFmpeg
-   DLLs, and must provide the encoders the editor offers (`app/src/main/ffmpeg.ts`)
-   plus dav1d for AV1 previews. The fetch verifies the archive before writing a
-   provenance record; stale or missing provenance blocks packaging. No moving
-   `latest` URLs are used. OBS's own FFmpeg CLI was evaluated as a replacement
-   and rejected: it lacks dav1d, x265 and Quick Sync.
+4. The editor/export FFmpeg is Shard's own trimmed *shared* build (`ffmpeg.exe`
+   and `ffprobe.exe` share one copy of the codec libraries), built by
+   `scripts/ffmpeg/build-windows.ps1`. It keeps FFmpeg's native components and
+   links only the external libraries the editor uses: x264, x265, SVT-AV1,
+   NVENC, AMF and Quick Sync encoders, dav1d for AV1 previews and D3D11VA/DXVA2
+   for hardware decoding (about 68 MB instead of 235 MB for a general-purpose
+   full build). To change it:
+   - edit `scripts/ffmpeg/build-pins.json` (FFmpeg release URL and SHA-256 after
+     checking its signature, MSYS2 base archive, exact MSYS2 codec package
+     versions) and bump `revision`;
+   - run `powershell -File scripts/ffmpeg/build-windows.ps1` (a portable MSYS2
+     under ignored `vendor/ffmpeg-build`, or `-Msys <root>` for an existing one);
+   - publish the printed archive as a GitHub release asset, then update the
+     `ffmpeg` version, URL, archive directory, SHA-256 and `runtimeDlls` in
+     `runtime-dependencies.json` together and run `scripts/fetch-ffmpeg.ps1`;
+   - run the `editor` verification scope.
+   It is staged in `core-bin/ffmpeg`, apart from OBS's FFmpeg DLLs, and must
+   provide the encoders the editor offers (`app/src/main/ffmpeg.ts`). The fetch
+   verifies the archive before writing a provenance record; stale or missing
+   provenance blocks packaging. No moving `latest` URLs are used. OBS's own
+   FFmpeg CLI was evaluated as a replacement and rejected: it lacks dav1d, x265
+   and Quick Sync, and decoded AV1 about 3x slower.
 5. Run `scripts/build.ps1 -Clean` for an OBS/dependency upgrade to discard upstream
    incremental build data, then `npm --prefix app run verify -- release capture`.
    Exercise game hooks, subject switching and minimized capture when OBS changes.

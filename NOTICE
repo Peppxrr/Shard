@@ -26,11 +26,13 @@ fetched at that pinned tag by core/CMakeLists.txt.
 OBS is a trademark of Lain Bailey. Shard is an independent project and is not
 affiliated with or endorsed by the OBS Project.
 
-The editor and export tools in core-bin/ffmpeg are an unmodified shared
-FFmpeg 9.0.1 build from https://www.gyan.dev/ffmpeg/builds/ (GNU GPL v3).
-Its license text and build/source summary are distributed alongside it as
-core-bin/ffmpeg/LICENSE.txt and core-bin/ffmpeg/README.txt. FFmpeg source:
-https://github.com/FFmpeg/FFmpeg
+The editor and export tools in core-bin/ffmpeg are an unmodified FFmpeg 9.0.1
+release built as shared libraries by scripts/ffmpeg/build-windows.ps1 (GNU GPL
+v2 or later). They statically link x264 and x265 (GNU GPL v2 or later), dav1d
+and SVT-AV1 (BSD), Intel libvpl (MIT) and the MinGW-w64 GCC runtime. The
+license text, configuration and exact component versions with their source
+locations are distributed alongside them as core-bin/ffmpeg/LICENSE.txt and
+core-bin/ffmpeg/README.txt. FFmpeg source: https://ffmpeg.org/releases/
 
 UI icons use original SVG assets from:
 Feather Icons v4.29.2 - https://github.com/feathericons/feather

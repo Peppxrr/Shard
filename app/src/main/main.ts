@@ -21,7 +21,7 @@ import { StorageWatchdog } from "./storage";
 import { ExportManager } from "./export";
 import { listExportEncoders, probeAudioTracks, prepareAudioPreview, generateWaveform, editorTimelinePreviews, stopEditorPreviews, resumeEditorPreviews } from "./ffmpeg";
 import { SaveOverlay } from "./overlay";
-import { getDefaultSoundPath, playClipSound, previewClipSound, setSoundWindow } from "./sound";
+import { closeSoundHost, getDefaultSoundPath, playClipSound, prepareSoundHost, previewClipSound, setSoundWindow } from "./sound";
 import { appIcons, gameIcons } from "./app-icons";
 import { DevConsole } from "./dev-console";
 import { regionalLocaleArgument } from "./regional-locale";
@@ -200,11 +200,8 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
-    }
+    // Before startup finishes the first window is still being created.
+    if (applicationStarted && shutdown.acceptingWork) showMainWindow();
   });
   main().catch((e) => {
     console.error("shard main failed:", e);
@@ -338,8 +335,57 @@ async function main(): Promise<void> {
 
 // ---------------------------------------------------------------- window ----
 
+// Close-to-tray first hides the window; once it has stayed hidden this long the
+// window is destroyed so its renderer and GPU memory are released while games
+// run. The tray, second instance and update recovery recreate it on demand.
+const HIDDEN_WINDOW_UNLOAD_MS = 30_000;
+let hiddenWindowUnloadTimer: ReturnType<typeof setTimeout> | null = null;
+// Set by the renderer while it holds state a reload would lose (open editor).
+let windowRetained = false;
+
+function cancelHiddenWindowUnload(): void {
+  if (hiddenWindowUnloadTimer) clearTimeout(hiddenWindowUnloadTimer);
+  hiddenWindowUnloadTimer = null;
+}
+
+function scheduleHiddenWindowUnload(): void {
+  cancelHiddenWindowUnload();
+  hiddenWindowUnloadTimer = setTimeout(unloadHiddenWindow, HIDDEN_WINDOW_UNLOAD_MS);
+}
+
+function unloadHiddenWindow(): void {
+  hiddenWindowUnloadTimer = null;
+  const window = win;
+  if (!window || window.isDestroyed() || window.isVisible() || quitting || !shutdown.acceptingWork) return;
+  // Exports and Medal imports report progress only by push; keep the renderer
+  // that is showing them, and retry once they finish.
+  if (windowRetained || exporter?.busy || libraryImportActive) {
+    scheduleHiddenWindowUnload();
+    return;
+  }
+  devConsole.feed({ t: Date.now(), level: "app", severity: "debug", text: "Hidden main window unloaded to release memory" });
+  win = null;
+  setSoundWindow(null);
+  if (getSettings().app.clipSound) prepareSoundHost();
+  window.destroy();
+}
+
+function showMainWindow(): void {
+  cancelHiddenWindowUnload();
+  if (!win || win.isDestroyed()) {
+    createWindow(); // shown on ready-to-show
+    return;
+  }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
 function createWindow(): void {
-  win = new BrowserWindow({
+  cancelHiddenWindowUnload();
+  windowRetained = false;
+  closeSoundHost();
+  const window = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 980,
@@ -358,30 +404,39 @@ function createWindow(): void {
       additionalArguments: [regionalLocaleArgument()],
     },
   });
-  win.once("ready-to-show", () => win?.show());
-  win.webContents.on("console-message", details => {
+  win = window;
+  window.once("ready-to-show", () => { if (!window.isDestroyed()) window.show(); });
+  window.webContents.on("console-message", details => {
     const severity = details.level === "error" ? "error" : details.level === "warning" ? "warn" : details.level === "debug" ? "debug" : "info";
     devConsole.feed({ t: Date.now(), level: "app", severity,
       text: `[renderer] ${details.message} (${details.sourceId}:${details.lineNumber})` });
   });
-  win.webContents.on("render-process-gone", (_event, details) => {
+  window.webContents.on("render-process-gone", (_event, details) => {
     devConsole.feed({ t: Date.now(), level: "app", severity: "error", text: `Renderer process exited: ${details.reason}; code=${details.exitCode}` });
   });
-  win.on("maximize", () => win?.webContents.send("window:maximized", true));
-  win.on("unmaximize", () => win?.webContents.send("window:maximized", false));
-  setSoundWindow(win);
-  win.on("close", (e) => {
+  window.on("maximize", () => window.webContents.send("window:maximized", true));
+  window.on("unmaximize", () => window.webContents.send("window:maximized", false));
+  setSoundWindow(window);
+  window.on("close", (e) => {
     if (!quitting && getSettings().app.minimizeToTray) {
       e.preventDefault();
-      win?.hide(); // close-to-tray
+      window.hide(); // close-to-tray; unloaded after HIDDEN_WINDOW_UNLOAD_MS
+      scheduleHiddenWindowUnload();
     }
   });
-  win.on("closed", () => { win = null; setSoundWindow(null); }); // full close is supported (tray setting off)
+  window.on("show", cancelHiddenWindowUnload);
+  // Full close is supported (tray setting off). A window unloaded from the
+  // tray may finish closing after its replacement exists.
+  window.on("closed", () => {
+    if (win !== window) return;
+    win = null;
+    setSoundWindow(null);
+  });
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL);
+    window.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
-    win.loadFile(path.join(__dirname, "../../renderer/index.html"));
+    window.loadFile(path.join(__dirname, "../../renderer/index.html"));
   }
 }
 
@@ -563,6 +618,10 @@ function registerIpc(): void {
   handle("window:isMaximized", (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
   });
+  handle("window:retain", (event, retained: unknown) => {
+    if (!win || event.sender !== win.webContents) return;
+    windowRetained = retained === true;
+  });
   // Monitor enumeration that does not depend on the core: the capture
   // settings stay usable while shardcore is still spawning (or unreachable).
   // Primary-first order matches the core's EnumDisplayMonitors result in the
@@ -637,6 +696,8 @@ async function doExport(clipId: string, project: EditorExportProject): Promise<v
 function probeClipTracks(clipId: string): Promise<AudioTrackInfo[]> {
   const clip = library.get(clipId);
   if (!clip) throw new Error("The source clip is no longer in the library");
+  // Opening the editor detects export encoders now, not when Export is pressed.
+  void listExportEncoders().catch(() => {});
   const cached = editorProbeCache.get(clipId);
   const stat = statSync(clip.path);
   const identity = `${clip.path}:${stat.mtimeMs}:${stat.size}`;
@@ -986,13 +1047,13 @@ function setupTray(): void {
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
   tray.setToolTip("Shard");
   const menu = Menu.buildFromTemplate([
-    { label: "Open Shard", click: () => { win?.show(); win?.focus(); } },
+    { label: "Open Shard", click: () => showMainWindow() },
     { label: "Toggle recording", click: () => toggleRecording() },
     { type: "separator" },
     { label: "Quit", click: () => void quit() },
   ]);
   tray.setContextMenu(menu);
-  tray.on("click", () => { win?.show(); win?.focus(); });
+  tray.on("click", () => showMainWindow());
 }
 
 async function toggleRecording(): Promise<void> {

@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { registerHooks } from "node:module";
 
-import { buildVideoEncoderArgs, pickExportResolution } from "../src/main/export-video.ts";
+import { buildHardwareDecodeArgs, buildVideoEncoderArgs, pickExportResolution } from "../src/main/export-video.ts";
 import { resolveFfmpegTool } from "../src/main/ffmpeg-path.ts";
 import { existsSync, statSync } from "node:fs";
 import "./test-playback-diagnostics.mjs";
@@ -372,6 +372,25 @@ assert.equal(exportTimelineDuration(lateVideo, [{ ...earlyAudio, included: false
 const shiftedGraph = buildExportGraph(lateVideo, [{ ...gapAudio, clips: lateVideo }], 320, 180, 60);
 assert(!shiftedGraph.filter.includes("color=") && !shiftedGraph.filter.includes("anullsrc"), "linked clips shifted later export without outer fillers");
 
+// Exports starting late in the source seek the input one second before the
+// earliest cut (video or audio); trims become relative to that point.
+assert.deepEqual(graph.inputArgs, [], "exports near the source start decode from the beginning");
+const lateCut = [{ timelineStart: 0, sourceStart: 12.5, sourceEnd: 14 }];
+const seekGraph = buildExportGraph(lateCut, [{ ...gapAudio, clips: [{ timelineStart: 0, sourceStart: 12.25, sourceEnd: 14 }] }], 320, 180, 60);
+assert.deepEqual(seekGraph.inputArgs, ["-ss", "11.25"]);
+assert.match(seekGraph.filter, /^\[0:v:0\]trim=start=1\.25:end=2\.75,/);
+assert.match(seekGraph.filter, /\[0:1\]atrim=start=1:end=2\.75,/);
+assert.deepEqual(buildExportGraph(lateCut, [], 320, 180, 60, { inputSeek: false }).inputArgs, []);
+assert.match(buildExportGraph(lateCut, [], 320, 180, 60, { inputSeek: false }).filter, /trim=start=12\.5:end=14,/);
+
+assert.deepEqual(buildHardwareDecodeArgs("hevc", "win32"), ["-hwaccel", "d3d11va"]);
+assert.deepEqual(buildHardwareDecodeArgs("av1", "win32"), ["-hwaccel", "d3d11va", "-c:v", "av1"], "AV1 uses the native decoder, which honors -hwaccel");
+assert.deepEqual(buildHardwareDecodeArgs("h264", "linux"), ["-hwaccel", "auto"]);
+assert.deepEqual(buildHardwareDecodeArgs("vp9", "win32"), [], "other codecs keep software decoding");
+const cappedQuality = buildVideoEncoderArgs("libx264", 2000, 60);
+assert.deepEqual(cappedQuality.slice(cappedQuality.indexOf("-crf")), ["-crf", "23", "-maxrate", "2000k", "-bufsize", "4000k"],
+  "CPU quality encodes are capped at the size budget");
+
 assert.throws(() => validateTimelineClips([{ timelineStart: 0, sourceStart: 4, sourceEnd: 2 }], 5, "Video"), /too short/);
 assert.throws(() => validateTimelineClips([{ timelineStart: 0, sourceStart: 0, sourceEnd: 6 }], 5, "Video"), /outside the source clip/);
 assert.throws(() => validateTimelineClips([{ timelineStart: -1, sourceStart: 0, sourceEnd: 1 }], 5, "Video"), /before the timeline/);
@@ -447,6 +466,41 @@ try {
     assert(Math.abs(Number(video.nb_frames) - duration * 60) <= 1);
     assert(statSync(output).size < 2 * 1024 * 1024, "quality output stays far below the 20 MB ceiling");
   }
+  // Input seeking is an optimization only: a late cut decodes to the same
+  // video frames and audio timing as decoding the source from its start.
+  // AAC noise substitution keeps decoder RNG state from the file start, so
+  // samples after any seek differ at noise level (about -100 dBFS here).
+  const seekInput = path.join(tempDir, "seek source.mp4");
+  run(ffmpeg, ["-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=60:duration=9",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=9",
+    "-c:v", "libx264", "-preset", "veryfast", "-g", "120", "-bf", "2", "-c:a", "aac", seekInput]);
+  const seekClips = [{ timelineStart: 0, sourceStart: 5.013, sourceEnd: 7.013 }, { timelineStart: 2, sourceStart: 3.5, sourceEnd: 4.25 }];
+  const seekTracks = [{ streamIndex: 1, audioIndex: 0, name: "Tone", included: true, muted: false, volume: 1, clips: seekClips }];
+  const decodeExport = (seek) => {
+    const seekedGraph = buildExportGraph(seekClips, seekTracks, 320, 180, 60, { inputSeek: seek });
+    assert.equal(seekedGraph.inputArgs.length > 0, seek, "the seek option controls input seeking");
+    const input = [...seekedGraph.inputArgs, "-i", seekInput, "-filter_complex", seekedGraph.filter];
+    const frames = spawnSync(ffmpeg, ["-v", "error", ...input, ...seekedGraph.maps, "-f", "framemd5", "-"],
+      { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    assert.equal(frames.status, 0, frames.stderr);
+    const pcm = spawnSync(ffmpeg, ["-v", "error", ...input, "-map", "[amix]", "-f", "f32le", "pipe:1", "-map", "[v]", "-f", "null", "-"],
+      { maxBuffer: 64 * 1024 * 1024 });
+    assert.equal(pcm.status, 0, String(pcm.stderr));
+    const lines = frames.stdout.split(/\r?\n/).filter(line => line && !line.startsWith("#"));
+    return {
+      video: lines.filter(line => line.startsWith("0,")),
+      audioTiming: lines.filter(line => line.startsWith("1,")).map(line => line.split(",").slice(0, 5).join(",")),
+      samples: new Float32Array(pcm.stdout.buffer, pcm.stdout.byteOffset, pcm.stdout.length / 4),
+    };
+  };
+  const continuous = decodeExport(false);
+  const seeked = decodeExport(true);
+  assert(continuous.video.length > 150 && continuous.samples.length > 200000, "the seek fixture produced frames and samples");
+  assert.deepEqual(seeked.video, continuous.video, "seeked export video frames are bit-identical");
+  assert.deepEqual(seeked.audioTiming, continuous.audioTiming, "seeked export audio frames keep their timing");
+  assert.equal(seeked.samples.length, continuous.samples.length);
+  const sampleError = continuous.samples.reduce((max, value, index) => Math.max(max, Math.abs(value - seeked.samples[index])), 0);
+  assert(sampleError < 1e-4, `seeked export audio differs only at noise level (max ${sampleError})`);
   // Size correction retains cadence while reducing the encoded bitrate.
   const fitted = path.join(tempDir, "size-fitted.mp4");
   run(ffmpeg, ["-y", "-i", sixtyInput, ...buildVideoEncoderArgs("libx264", 150, 60, false), fitted]);

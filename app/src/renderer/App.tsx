@@ -238,6 +238,12 @@ export function App() {
   };
 
   const isDirty = JSON.stringify(settings) !== JSON.stringify(savedSettings);
+  // An open editor or unsaved settings would be lost if main unloads the
+  // window while it sits closed in the tray.
+  const retainWindow = !!editingClip || isDirty;
+  useEffect(() => {
+    void window.shard.retainWindow(retainWindow).catch(() => {});
+  }, [retainWindow]);
 
   const navigateTab = (next: Tab, section = settingsSection) => {
     rememberScroll();

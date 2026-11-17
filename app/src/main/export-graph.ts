@@ -27,7 +27,14 @@ export interface ExportGraph {
   filter: string;
   maps: string[];
   audioOutputs: ExportAudioOutput[];
+  // Options placed before the source's `-i` (input seek); trims are relative to it.
+  inputArgs: string[];
 }
+
+// Exports that start later in the source seek the input to this long before
+// the earliest cut, so FFmpeg decodes from the nearest keyframe there instead
+// of from the start of the file. trim/atrim still make every exact cut.
+const INPUT_SEEK_MARGIN_SEC = 1;
 
 type TimelinePiece = { kind: "gap"; duration: number } | { kind: "clip"; clip: EditorTimelineClip };
 
@@ -131,6 +138,7 @@ export function buildExportGraph(
   width: number,
   height: number,
   fps: number,
+  options: { inputSeek?: boolean } = {},
 ): ExportGraph {
   if (!Number.isInteger(width) || width < 2 || !Number.isInteger(height) || height < 2) {
     throw new Error("The export resolution is invalid");
@@ -140,6 +148,11 @@ export function buildExportGraph(
   const audioTracks = tracks.filter((track) => track.included);
   const duration = exportTimelineDuration(videoClips, audioTracks);
   const { start } = timelineExportRange(videoClips, audioTracks);
+  const earliestSource = Math.min(...[...videoClips, ...audioTracks.flatMap((track) => track.clips)].map((clip) => clip.sourceStart));
+  const seek = options.inputSeek !== false && earliestSource > INPUT_SEEK_MARGIN_SEC * 2
+    ? Math.floor((earliestSource - INPUT_SEEK_MARGIN_SEC) * 1000) / 1000
+    : 0;
+  const sourceTime = (value: number) => ffmpegNumber(value - seek);
   const relativeClips = (clips: readonly EditorTimelineClip[]) => clips.map((clip) => ({
     ...clip, timelineStart: clip.timelineStart - start,
   }));
@@ -153,7 +166,7 @@ export function buildExportGraph(
   videoPieces.forEach((piece, index) => {
     filters.push(piece.kind === "gap"
       ? `color=c=black:s=${size}:r=${ffmpegNumber(fps)}:d=${ffmpegNumber(piece.duration)},setsar=1[vp${index}]`
-      : `[0:v:0]trim=start=${ffmpegNumber(piece.clip.sourceStart)}:end=${ffmpegNumber(piece.clip.sourceEnd)},` +
+      : `[0:v:0]trim=start=${sourceTime(piece.clip.sourceStart)}:end=${sourceTime(piece.clip.sourceEnd)},` +
         `setpts=PTS-STARTPTS,scale=${width}:${height},setsar=1[vp${index}]`);
   });
   filters.push(`${videoPieces.map((_, index) => `[vp${index}]`).join("")}concat=n=${videoPieces.length}:v=1:a=0[v]`);
@@ -170,7 +183,7 @@ export function buildExportGraph(
       const { sourceStart, sourceEnd } = piece.clip;
       // Pad short source reads so later pieces keep their timeline position.
       filters.push(
-        `[0:${track.streamIndex}]atrim=start=${ffmpegNumber(sourceStart)}:end=${ffmpegNumber(sourceEnd)},` +
+        `[0:${track.streamIndex}]atrim=start=${sourceTime(sourceStart)}:end=${sourceTime(sourceEnd)},` +
         `asetpts=PTS-STARTPTS,${audioFormat},apad=whole_dur=${ffmpegNumber(sourceEnd - sourceStart)}${label}`,
       );
     });
@@ -194,7 +207,7 @@ export function buildExportGraph(
   if (audioOutputs.length) maps.push("-map", "[amix]");
   else maps.push("-an");
 
-  return { filter: filters.join(";"), maps, audioOutputs };
+  return { filter: filters.join(";"), maps, audioOutputs, inputArgs: seek > 0 ? ["-ss", ffmpegNumber(seek)] : [] };
 }
 
 // Splits one track into consecutive clip and filler pieces covering 0..duration.

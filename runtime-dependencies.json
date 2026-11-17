@@ -7,9 +7,9 @@
   },
   "ffmpeg": {
     "version": "9.0.1",
-    "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build-shared.zip",
-    "sha256": "6fd54b3b4f49117a307877b570f5e1659090f178973298658b41f5c559b5b5ab",
-    "archiveDirectory": "ffmpeg-9.0.1-full_build-shared",
+    "url": "https://github.com/Peppxrr/Shard/releases/download/ffmpeg-9.0.1-1/shard-ffmpeg-9.0.1-1-win64.zip",
+    "sha256": "163dc316eaf6b53adf7e4e7641a6d866b1e772b1cef359bea0fbb7bbcb495c85",
+    "archiveDirectory": "shard-ffmpeg-9.0.1-1-win64",
     "runtimeDlls": ["avcodec-63.dll", "avdevice-63.dll", "avfilter-12.dll", "avformat-63.dll", "avutil-61.dll", "swresample-7.dll", "swscale-10.dll"]
   }
 }

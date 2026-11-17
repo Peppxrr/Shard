@@ -28,6 +28,9 @@ files:
 # Shard's UI is English; Chromium's other UI translations are never shown.
 electronLanguages:
   - en-US
+# Drops Chromium GPU components the UI never loads (WebGPU shader compiler,
+# SwiftShader); see scripts/after-pack.cjs.
+afterPack: scripts/after-pack.cjs
 extraResources:
   - from: ../NOTICE
     to: NOTICE

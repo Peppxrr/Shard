@@ -25,9 +25,28 @@ export function buildVideoEncoderArgs(
     args.push("-preset", "medium", ...(quality ? ["-global_quality", "23"] : rate));
   } else {
     args.push("-preset", encoder === "libsvtav1" ? "8" : "veryfast");
+    // Capped CRF, like NVENC's capped CQ: quality decides the size unless the
+    // budget is lower, which avoids a whole second size-correction encode.
     args.push(...(quality
-      ? ["-crf", encoder === "libsvtav1" ? "30" : "23"]
+      ? ["-crf", encoder === "libsvtav1" ? "30" : "23", ...rate.slice(2)]
       : rate));
   }
+  return args;
+}
+
+const HARDWARE_DECODED_CODECS = new Set(["h264", "hevc", "av1"]);
+
+// Decodes the source on the GPU; frames are copied back for the CPU filter
+// graph. Decoding is the slowest export stage for HEVC and AV1 captures.
+// Unsupported profiles fall back to software inside FFmpeg; a hard failure
+// (no usable device) makes the export retry without these arguments.
+export function buildHardwareDecodeArgs(codec: string, platform: NodeJS.Platform = process.platform): string[] {
+  if (!HARDWARE_DECODED_CODECS.has(codec)) return [];
+  // Windows: D3D11VA works on every GPU vendor (auto picks CUDA first, which
+  // was slower here). Elsewhere: VAAPI/NVDEC/Vulkan, whichever the FFmpeg has.
+  const args = ["-hwaccel", platform === "win32" ? "d3d11va" : "auto"];
+  // FFmpeg picks libdav1d for AV1 by default, which ignores -hwaccel; the
+  // native decoder is the one that uses it.
+  if (codec === "av1") args.push("-c:v", "av1");
   return args;
 }

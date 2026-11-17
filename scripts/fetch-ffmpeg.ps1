@@ -1,4 +1,5 @@
-# Fetches the pinned shared FFmpeg win64 release (Gyan) into vendor/ffmpeg and
+# Fetches the pinned shared FFmpeg win64 build (Shard's own, made by
+# scripts/ffmpeg/build-windows.ps1 and published as a release asset) into vendor/ffmpeg and
 # verifies its SHA-256 checksum. ffmpeg.exe and ffprobe.exe share one set of
 # FFmpeg DLLs; they are staged in core-bin/ffmpeg, apart from OBS's own
 # FFmpeg DLLs. Re-run to refresh; the checksum is enforced on every fetch.
@@ -41,7 +42,7 @@ foreach ($name in @("ffmpeg.exe", "ffprobe.exe") + @($pins.ffmpeg.runtimeDlls)) 
   if (-not (Test-Path -LiteralPath $source)) { throw "Pinned FFmpeg archive lacks bin/$name" }
   Copy-Item -LiteralPath $source $binDir -Force
 }
-# GPL v3 license text and the build's component/source summary ship with it.
+# The GPL license text and the build's component/source summary ship with it.
 Copy-Item -LiteralPath (Join-Path $inner "LICENSE") (Join-Path $binDir "LICENSE.txt") -Force
 Copy-Item -LiteralPath (Join-Path $inner "README.txt") (Join-Path $binDir "README.txt") -Force
 [IO.File]::WriteAllText((Join-Path $dir "pins.json"), ($pins.ffmpeg | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))

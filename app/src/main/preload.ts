@@ -126,6 +126,7 @@ const api: ShardApi = {
   toggleMaximizeWindow: () => ipcRenderer.invoke("window:toggleMaximize") as Promise<boolean>,
   closeWindow: () => ipcRenderer.invoke("window:close") as Promise<void>,
   isWindowMaximized: () => ipcRenderer.invoke("window:isMaximized") as Promise<boolean>,
+  retainWindow: (retained: boolean) => ipcRenderer.invoke("window:retain", retained) as Promise<void>,
   onWindowMaximized: (cb) => {
     const listener = (_e: unknown, maximized: boolean) => cb(maximized);
     ipcRenderer.on("window:maximized", listener);
