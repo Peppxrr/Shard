@@ -112,6 +112,7 @@ struct FrameSlice {
   uint32_t stalled = 0;  // rendered frames dropped because the encoder queue was full
   double engine3d = -1;    // busiest 3D engine during the interval; < 0 = unknown
   double videoEncode = -1; // busiest video encode engine; < 0 = unknown
+  bool texturePath = false; // a GPU texture (zero-copy hardware) encoder consumed the mix
 };
 
 // `encoding`: an output's encoder is consuming this video mix. Without one
@@ -122,6 +123,7 @@ inline FrameSlice frameSlice(const FrameCounters& previous, const FrameCounters&
   FrameSlice slice;
   slice.startUs = startUs;
   slice.endUs = endUs;
+  slice.texturePath = texturePath;
   slice.rendered = counterDelta(previous.rendered, current.rendered);
   slice.lagged = std::min(slice.rendered, counterDelta(previous.lagged, current.lagged));
   slice.encoded = counterDelta(previous.encoded, current.encoded);
@@ -174,7 +176,11 @@ struct WindowTotals {
 // - encoder-queue stalls: still GPU starvation while a queue filled by it
 //   drains; the encoder when the video encode engine is saturated; GPU
 //   starvation when the 3D engine is (the texture encoder's GPU copy waits
-//   behind the game); otherwise the encoder (e.g. a software encoder).
+//   behind the game). A texture encoder whose video encode engine has
+//   headroom is waiting on the GPU queue even when the once-a-second 3D
+//   average reads below saturation (it smooths over the game's bursts and
+//   the post-starvation drain), so that is GPU starvation too. Otherwise, or
+//   with unknown counters, the encoder (e.g. a software encoder).
 inline void addSlice(WindowTotals& totals, const FrameSlice& slice)
 {
   totals.rendered += slice.rendered;
@@ -193,7 +199,8 @@ inline void addSlice(WindowTotals& totals, const FrameSlice& slice)
   (gpuBusy ? totals.lostGpu : totals.lostRender) += slice.lagged;
   bool stallGpu = false;
   if (slice.stalled) {
-    stallGpu = totals.gpuQueueDraining || (!encodeBusy && gpuBusy);
+    const bool textureWaitsOnGpu = slice.texturePath && slice.engine3d >= 0 && slice.videoEncode >= 0;
+    stallGpu = totals.gpuQueueDraining || (!encodeBusy && (gpuBusy || textureWaitsOnGpu));
     (stallGpu ? totals.lostGpu : totals.lostEncoder) += slice.stalled;
   }
   totals.gpuQueueDraining = slice.stalled && stallGpu;

@@ -122,6 +122,19 @@ int main()
                                             slice(500, 15, 0, 12, 35, 20), slice(750, 15, 0, 12, 35, 20)});
   assert(drainedThenEncoder.lostGpu == 10 && drainedThenEncoder.lostEncoder == 24);
   assert(classifyFrameLoss(drainedThenEncoder) == PerfCause::EncoderOverloaded);
+  // A zero-copy hardware encoder with its encode engine idle is waiting on the
+  // GPU queue, even when the once-a-second 3D average dips below saturation
+  // (measured in BeamNG: 76-89 % 3D, 3-5 % NVENC) or a drain outlives a clean
+  // slice. Without encode-engine counters it stays the encoder.
+  const auto texture = [](FrameSlice s) { s.texturePath = true; return s; };
+  WindowTotals textureBursts = totals({texture(slice(0, 15, 0, 6, 86, 4)), texture(slice(250, 15, 0, 0, 80, 4)),
+                                       texture(slice(500, 15, 0, 9, 30, 4))});
+  assert(textureBursts.lostGpu == 15 && textureBursts.lostEncoder == 0);
+  assert(classifyFrameLoss(textureBursts) == PerfCause::GpuStarved);
+  assert(classifyFrameLoss(totals({texture(slice(0, 300, 0, 120, 30, 95))})) == PerfCause::EncoderOverloaded);
+  assert(classifyFrameLoss(totals({texture(slice(0, 300, 0, 120, 30))})) == PerfCause::EncoderOverloaded);
+  assert(frameSlice({0, 0, 0, 0}, {15, 0, 0, 0}, true, 0, true, 0, 250000).texturePath);
+  assert(!frameSlice({0, 0, 0, 0}, {15, 0, 0, 0}, false, 0, true, 0, 250000).texturePath);
 
   assert(perfCauseHint(PerfCause::GpuStarved, false).find("Recording priority") != std::string::npos);
   assert(perfCauseHint(PerfCause::GpuStarved, true).find("Recording priority") == std::string::npos);

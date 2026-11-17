@@ -9,6 +9,19 @@ namespace shard {
 
 enum class CaptureFrameContent { Unknown, Black, Content };
 
+// The signed Windows graphics hook latches whichever swap chain of the process
+// presents first after injection, and keeps it while another swap chain keeps
+// presenting in between. Games that pop UI out into separate OS windows (ImGui
+// viewports such as BeamNG.drive mod utilities) can therefore leave the hook on
+// a tool window. Reject the hook only when it latched a different window that
+// is smaller than Shard's target, so a Shard mis-target never demotes a hook
+// that holds the real game surface. Unknown windows (0) never reject.
+inline bool captureHookOnSecondaryWindow(uintptr_t hookedWindow, uintptr_t targetWindow,
+                                         uint64_t hookedArea, uint64_t targetArea) noexcept
+{
+  return hookedWindow && targetWindow && hookedWindow != targetWindow && hookedArea < targetArea;
+}
+
 inline const char* captureFrameContentName(CaptureFrameContent content) noexcept
 {
   switch (content) {

@@ -129,6 +129,7 @@ private:
   void refreshCaptureDisplayLocked(uint64_t nowMs);
   // Re-apply the game_capture 10-bit color-space hint when the target display
   // changes between SDR and HDR. The hook source is not recreated.
+  void refreshHookWindowLocked();
   void applyHookColorSpaceLocked();
   std::string colorDiagnosticsLocked() const;
   void recreateGameCaptureLocked();
@@ -174,6 +175,9 @@ private:
   int wgcRetryCount_ = 0;
   bool windowNoFramesReported_ = false;
   bool windowSuppressedForMinimize_ = false;
+  // The hook latched another (smaller) window of the subject's process; WGC
+  // stays selected until the hook reports the target window again.
+  bool hookOnSecondaryWindow_ = false;
   // Which backend is currently exposed (scene layer order). Not persisted.
   enum class ActiveBackend { None, Hook, Wgc } activeBackend_ = ActiveBackend::None;
   // All probe access is under sourceMutex_. GPU objects are used only with

@@ -464,6 +464,11 @@ export interface RecordingPriorityStatus {
   coreElevated: boolean; // the running core is elevated
   gpuPriority: "set" | "failed" | "unknown"; // libobs result; only "set" + elevated means active
   gpuVendor: string | null; // running core's adapter vendor ("intel": libobs skips GPU priority); null = no core reported yet
+  // Hardware-accelerated GPU scheduling on the running core's adapter. libobs
+  // then asks for High GPU priority, which needs no administrator rights, so
+  // Recording priority adds nothing; Realtime is used only with HAGS off.
+  // null = no core reported yet or unknown.
+  hags: boolean | null;
   busy: boolean; // install/remove in progress (UAC prompt may be open)
   message: string | null; // last error/fallback, plain English
 }

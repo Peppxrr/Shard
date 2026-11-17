@@ -564,6 +564,12 @@ std::optional<uintptr_t> acquiredWindow(obs_source_t*, uint32_t)
   return std::nullopt;
 }
 
+// vkcapture attaches per process, not per window; nothing to compare.
+std::optional<uintptr_t> hookedWindow(obs_source_t*)
+{
+  return std::nullopt;
+}
+
 // Display identity = 1 + index in listMonitors() order; 0 when unknown.
 uintptr_t displayForTarget(bool windowSubject, uintptr_t window, int monitorIndex)
 {

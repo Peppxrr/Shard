@@ -38,6 +38,7 @@ interface LiveSession {
   elevated: boolean;
   gpuPriority: RecordingPriorityStatus["gpuPriority"];
   gpuVendor: string;
+  hags: boolean | null;
 }
 
 export class RecordingPriority extends EventEmitter {
@@ -63,6 +64,7 @@ export class RecordingPriority extends EventEmitter {
       coreElevated: session?.elevated ?? false,
       gpuPriority: session?.gpuPriority ?? "unknown",
       gpuVendor: session?.gpuVendor ?? null,
+      hags: session?.hags ?? null,
       busy: this.busy,
       message: this.message,
     };
@@ -71,11 +73,12 @@ export class RecordingPriority extends EventEmitter {
   // A core became ready (`session`) or went away (null). Publishes on change.
   noteCoreSession(session: PerfSession | null): void {
     const next: LiveSession | null = session
-      ? { elevated: session.elevated, gpuPriority: session.gpuPriority, gpuVendor: session.adapter.vendor }
+      ? { elevated: session.elevated, gpuPriority: session.gpuPriority, gpuVendor: session.adapter.vendor, hags: session.hags }
       : null;
     const previous = this.session;
     if (previous === next || (previous && next && previous.elevated === next.elevated &&
-      previous.gpuPriority === next.gpuPriority && previous.gpuVendor === next.gpuVendor)) return;
+      previous.gpuPriority === next.gpuPriority && previous.gpuVendor === next.gpuVendor &&
+      previous.hags === next.hags)) return;
     this.session = next;
     this.publish();
   }

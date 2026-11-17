@@ -115,6 +115,10 @@ WindowSceneCrop windowSceneCrop(uintptr_t window, uint32_t sourceWidth, uint32_t
 // Window the window source actually acquired (uniquely within pid); nullopt
 // before acquisition or when ambiguous/unsupported.
 std::optional<uintptr_t> acquiredWindow(obs_source_t* window, uint32_t pid);
+// Top-level window whose swap chain the hook actually latched while it is
+// capturing; nullopt when not capturing or unsupported (Linux vkcapture is
+// addressed per process and has no window to compare).
+std::optional<uintptr_t> hookedWindow(obs_source_t* hook);
 // Display identity for a window subject (its window) or the desktop index.
 uintptr_t displayForTarget(bool windowSubject, uintptr_t window, int monitorIndex);
 // Name/HDR/advanced-color state of a display from displayForTarget.

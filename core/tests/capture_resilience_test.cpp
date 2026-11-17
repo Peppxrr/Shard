@@ -466,6 +466,16 @@ int main()
   assert(!schedule.consumeDue(3601000));
   assert(schedule.consumeDue(3601500));
 
+  // BeamNG-style pop-out tool window: the hook latched a smaller secondary
+  // window of the game process, so WGC on the real target must take over.
+  assert(shard::captureHookOnSecondaryWindow(0x2002, 0x1001, 330ull * 260, 2048ull * 1080));
+  // Same window, unknown windows, or a hook on the larger surface (Shard's own
+  // target may be the wrong one) never demote the hook.
+  assert(!shard::captureHookOnSecondaryWindow(0x1001, 0x1001, 2048ull * 1080, 2048ull * 1080));
+  assert(!shard::captureHookOnSecondaryWindow(0, 0x1001, 0, 2048ull * 1080));
+  assert(!shard::captureHookOnSecondaryWindow(0x2002, 0, 330ull * 260, 0));
+  assert(!shard::captureHookOnSecondaryWindow(0x2002, 0x1001, 2560ull * 1440, 1280ull * 720));
+  assert(!shard::captureHookOnSecondaryWindow(0x2002, 0x1001, 1920ull * 1080, 1920ull * 1080));
   assert(captureHookRetryDelayMs(0) == 3000);
   assert(captureHookRetryDelayMs(19) == 3000);
   assert(captureHookRetryDelayMs(20) == 15000);

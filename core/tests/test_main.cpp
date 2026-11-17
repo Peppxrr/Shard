@@ -4,6 +4,7 @@
 #include "detector.h"
 #include "game_registry.h"
 #include "game_session.h"
+#include "game_util.h"
 #include "launchers.h"
 
 #include <nlohmann/json.hpp>
@@ -947,6 +948,89 @@ static void testSteamDiscovery()
   CHECK(registry.discoveredGames().empty());
 }
 
+// Real libraryfolders.vdf nests an "apps" block inside every library. The
+// closing braces must not re-parent later libraries, or every game outside
+// the first library loses its launcher identity and is never detected.
+static void testSteamSecondaryLibraries()
+{
+  TestDir dir("steam-libraries");
+  const fs::path steamRoot = dir.root / "Steam";
+  const fs::path secondRoot = dir.root / "SteamLibrary";
+  const std::string escapedSteam = jsonEscape(steamRoot.string());
+  const std::string escapedSecond = jsonEscape(secondRoot.string());
+  writeFile(steamRoot / "steamapps" / "libraryfolders.vdf",
+            "\"libraryfolders\"\n{\n"
+            "\t\"0\"\n\t{\n\t\t\"path\"\t\t\"" + escapedSteam + "\"\n\t\t\"label\"\t\t\"\"\n"
+            "\t\t\"apps\"\n\t\t{\n\t\t\t\"730\"\t\t\"1\"\n\t\t}\n\t}\n"
+            "\t\"1\"\n\t{\n\t\t\"path\"\t\t\"" + escapedSecond + "\"\n\t\t\"label\"\t\t\"}\"\n"
+            "\t\t\"apps\"\n\t\t{\n\t\t\t\"1091500\"\t\t\"1\"\n\t\t\t\"270880\"\t\t\"1\"\n\t\t}\n\t}\n"
+            "}\n");
+  writeFile(steamRoot / "steamapps" / "appmanifest_730.acf",
+            "\"AppState\"\n{\n\t\"appid\"\t\t\"730\"\n\t\"name\"\t\t\"Counter-Strike 2\"\n\t\"installdir\"\t\t"
+            "\"cs2\"\n}\n");
+  writeFile(steamRoot / "steamapps" / "common" / "cs2" / "cs2.exe", "x");
+  // Nested manifest sections must not hide later scalar keys either.
+  writeFile(secondRoot / "steamapps" / "appmanifest_1091500.acf",
+            "\"AppState\"\n{\n\t\"appid\"\t\t\"1091500\"\n\t\"InstalledDepots\"\n\t{\n\t\t\"1091501\"\n\t\t{\n"
+            "\t\t\t\"manifest\"\t\t\"1\"\n\t\t}\n\t}\n\t\"name\"\t\t\"Cyberpunk 2077\"\n"
+            "\t\"installdir\"\t\t\"Cyberpunk 2077\"\n}\n");
+  writeFile(secondRoot / "steamapps" / "common" / "Cyberpunk 2077" / "bin" / "x64" / "Cyberpunk2077.exe", "x");
+  writeFile(secondRoot / "steamapps" / "appmanifest_270880.acf",
+            "\"AppState\"\n{\n\t\"appid\"\t\t\"270880\"\n\t\"name\"\t\t\"American Truck Simulator\"\n"
+            "\t\"installdir\"\t\t\"American Truck Simulator\"\n}\n");
+  writeFile(secondRoot / "steamapps" / "common" / "American Truck Simulator" / "bin" / "win_x64" / "amtrucks.exe", "x");
+  writeFile(secondRoot / "steamapps" / "appmanifest_3329480.acf",
+            "\"AppState\"\n{\n\t\"appid\"\t\t\"3329480\"\n\t\"name\"\t\t\"Face Tracking Tool\"\n"
+            "\t\"installdir\"\t\t\"facetracking\"\n}\n");
+  writeFile(secondRoot / "steamapps" / "common" / "facetracking" / "facetracking.exe", "x");
+  writeSteamAppInfo(steamRoot / "appcache" / "appinfo.vdf",
+                    {{730, "Game"}, {1091500, "Game"}, {270880, "Game"}, {3329480, "Application"}});
+
+  ScanContext ctx;
+  ctx.steamLibraryFile = (steamRoot / "steamapps" / "libraryfolders.vdf").string();
+  ctx.steamAppInfoFile = (steamRoot / "appcache" / "appinfo.vdf").string();
+  const auto games = LauncherDiscovery::scanSteam(ctx);
+  CHECK_EQ(games.size(), (size_t)4);
+  const auto findProduct = [&](const std::string& id) -> const GameDefinition* {
+    const auto it = std::find_if(games.begin(), games.end(),
+                                 [&](const GameDefinition& game) { return game.id == id; });
+    return it == games.end() ? nullptr : &*it;
+  };
+  const GameDefinition* cyberpunk = findProduct("d:steam:1091500");
+  const GameDefinition* trucks = findProduct("d:steam:270880");
+  const GameDefinition* tool = findProduct("d:steam:3329480");
+  CHECK(findProduct("d:steam:730") != nullptr);
+  CHECK(cyberpunk != nullptr);
+  CHECK(trucks != nullptr);
+  CHECK(tool != nullptr);
+  if (tool)
+    CHECK_EQ(tool->productType, std::string("software"));
+  if (!cyberpunk || !trucks)
+    return;
+  CHECK_EQ(cyberpunk->productType, std::string("game"));
+  CHECK_EQ(trucks->name, std::string("American Truck Simulator"));
+
+  // The secondary-library product identifies the real engine process (no
+  // Unity runtime, no paired gaming input) once it renders a capture window.
+  GameRegistry reg;
+  reg.setPath((dir.root / "games.json").string());
+  reg.load();
+  const std::string gamePath =
+      toLower((secondRoot / "steamapps" / "common" / "Cyberpunk 2077" / "bin" / "x64" / "Cyberpunk2077.exe").string());
+  const auto game = detectWith(reg, proc("cyberpunk2077.exe", 1200, 0, gamePath), {}, {},
+                               gameWindow(false, "Cyberpunk 2077 (C) 2020 by CD Projekt RED"), 60000,
+                               graphicsRuntime(), 0, cyberpunk);
+  CHECK_EQ((int)game.decision, (int)DetectionResult::Decision::Detected);
+  CHECK_EQ(game.gameId, std::string("d:steam:1091500"));
+
+  // Application-class products in the same library remain non-games.
+  const std::string toolPath =
+      toLower((secondRoot / "steamapps" / "common" / "facetracking" / "facetracking.exe").string());
+  const auto app = detectWith(reg, proc("facetracking.exe", 1201, 0, toolPath), {}, {}, gameWindow(),
+                              60000, gameInputRuntime(), 5000, tool, 5000);
+  CHECK_EQ((int)app.decision, (int)DetectionResult::Decision::Ignored);
+}
+
 static void testEpicDiscovery()
 {
   TestDir dir("epic");
@@ -1346,6 +1430,7 @@ int main()
     std::printf("ok: session/primary-focus\n");
     // Launchers
     testSteamDiscovery();
+    testSteamSecondaryLibraries();
     std::printf("ok: launcher/steam\n");
     testEpicDiscovery();
     std::printf("ok: launcher/epic\n");

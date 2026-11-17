@@ -543,7 +543,7 @@ index dc4f3c26b..c435aaff6 100644
 +	init_vulkan_registry(false);
  }
 diff --git a/plugins/win-capture/game-capture.c b/plugins/win-capture/game-capture.c
-index 3bf12ef3d..566b6f609 100644
+index 3bf12ef3d..e24e817e8 100644
 --- a/plugins/win-capture/game-capture.c
 +++ b/plugins/win-capture/game-capture.c
 @@ -6,7 +6,11 @@
@@ -600,7 +600,16 @@ index 3bf12ef3d..566b6f609 100644
  	uint32_t cx;
  	uint32_t cy;
  	uint32_t pitch;
-@@ -195,6 +206,12 @@ struct game_capture {
+@@ -140,6 +151,8 @@ struct game_capture {
+ 	enum window_priority priority;
+ 	obs_hotkey_pair_id hotkey_pair;
+ 	volatile long hotkey_window;
++	/* Shard: window whose swap chain the hook actually latched (0 = none). */
++	volatile long hooked_window;
+ 	volatile bool deactivate_hook;
+ 	volatile bool activate_hook_now;
+ 	bool wait_for_target_startup;
+@@ -195,6 +208,12 @@ struct game_capture {
  	PFN_GetWindowDpiAwarenessContext get_window_dpi_awareness_context;
  };
  
@@ -613,7 +622,15 @@ index 3bf12ef3d..566b6f609 100644
  struct graphics_offsets offsets32 = {0};
  struct graphics_offsets offsets64 = {0};
  
-@@ -388,6 +405,7 @@ static void game_capture_destroy(void *data)
+@@ -316,6 +335,7 @@ static void stop_capture(struct game_capture *gc)
+ 	if (gc->hook_stop) {
+ 		SetEvent(gc->hook_stop);
+ 	}
++	os_atomic_set_long(&gc->hooked_window, 0);
+ 	if (gc->global_hook_info) {
+ 		UnmapViewOfFile(gc->global_hook_info);
+ 		gc->global_hook_info = NULL;
+@@ -388,6 +408,7 @@ static void game_capture_destroy(void *data)
  {
  	struct game_capture *gc = data;
  	stop_capture(gc);
@@ -621,7 +638,7 @@ index 3bf12ef3d..566b6f609 100644
  
  	if (gc->audio_source)
  		destroy_audio_source(gc->source, &gc->audio_source);
-@@ -446,6 +464,7 @@ static inline void get_config(struct game_capture_config *cfg, obs_data_t *setti
+@@ -446,6 +467,7 @@ static inline void get_config(struct game_capture_config *cfg, obs_data_t *setti
  	cfg->hook_rate = (enum hook_rate)obs_data_get_int(settings, SETTING_HOOK_RATE);
  	cfg->is_10a2_2100pq = strcmp(obs_data_get_string(settings, SETTING_RGBA10A2_SPACE), "2100pq") == 0;
  	cfg->capture_audio = obs_data_get_bool(settings, SETTING_CAPTURE_AUDIO);
@@ -629,7 +646,29 @@ index 3bf12ef3d..566b6f609 100644
  }
  
  static inline int s_cmp(const char *str1, const char *str2)
-@@ -676,28 +695,43 @@ static inline bool is_64bit_windows(void)
+@@ -523,10 +545,12 @@ static void game_capture_get_hooked(void *data, calldata_t *cd)
+ 		calldata_set_string(cd, "title", gc->title.array);
+ 		calldata_set_string(cd, "class", gc->class.array);
+ 		calldata_set_string(cd, "executable", gc->executable.array);
++		calldata_set_int(cd, "window", os_atomic_load_long(&gc->hooked_window));
+ 	} else {
+ 		calldata_set_string(cd, "title", "");
+ 		calldata_set_string(cd, "class", "");
+ 		calldata_set_string(cd, "executable", "");
++		calldata_set_int(cd, "window", 0);
+ 	}
+ }
+ 
+@@ -614,7 +638,7 @@ static void *game_capture_create(obs_data_t *settings, obs_source_t *source)
+ 
+ 	proc_handler_t *ph = obs_source_get_proc_handler(source);
+ 	proc_handler_add(ph,
+-			 "void get_hooked(out bool hooked, out string title, out string class, out string executable)",
++			 "void get_hooked(out bool hooked, out string title, out string class, out string executable, out int window)",
+ 			 game_capture_get_hooked, gc);
+ 
+ 	signal_handler_connect(sh, "rename", rename_audio_source, &gc->audio_source);
+@@ -676,28 +700,43 @@ static inline bool is_64bit_windows(void)
  #endif
  }
  
@@ -683,7 +722,7 @@ index 3bf12ef3d..566b6f609 100644
  	gc->is_app = is_app(gc->target_process);
  	if (gc->is_app) {
  		gc->app_sid = get_app_sid(gc->target_process);
-@@ -737,6 +771,8 @@ static inline bool init_texture_mutexes(struct game_capture *gc)
+@@ -737,6 +776,8 @@ static inline bool init_texture_mutexes(struct game_capture *gc)
  		}
  		return false;
  	}
@@ -692,7 +731,7 @@ index 3bf12ef3d..566b6f609 100644
  
  	return true;
  }
-@@ -799,6 +835,7 @@ static inline bool init_hook_info(struct game_capture *gc)
+@@ -799,6 +840,7 @@ static inline bool init_hook_info(struct game_capture *gc)
  	gc->global_hook_info->UNUSED_use_scale = false;
  	gc->global_hook_info->allow_srgb_alias = true;
  	reset_frame_interval(gc);
@@ -700,7 +739,7 @@ index 3bf12ef3d..566b6f609 100644
  
  	obs_enter_graphics();
  	if (!gs_shared_texture_available()) {
-@@ -826,6 +863,7 @@ static inline bool init_pipe(struct game_capture *gc)
+@@ -826,6 +868,7 @@ static inline bool init_pipe(struct game_capture *gc)
  		warn("init_pipe: failed to start pipe");
  		return false;
  	}
@@ -708,7 +747,7 @@ index 3bf12ef3d..566b6f609 100644
  
  	return true;
  }
-@@ -837,78 +875,425 @@ static inline int inject_library(HANDLE process, const wchar_t *dll)
+@@ -837,78 +880,425 @@ static inline int inject_library(HANDLE process, const wchar_t *dll)
  				  0x12897dd89168789a, "GbfkDaezbp~X", 0x76aff7238788f7db);
  }
  
@@ -1163,7 +1202,7 @@ index 3bf12ef3d..566b6f609 100644
  	free(command_line_w);
  	bfree(inject_path_w);
  	bfree(hook_dll_w);
-@@ -921,23 +1306,49 @@ static inline bool inject_hook(struct game_capture *gc)
+@@ -921,23 +1311,49 @@ static inline bool inject_hook(struct game_capture *gc)
  {
  	bool matching_architecture;
  	bool success = false;
@@ -1221,7 +1260,7 @@ index 3bf12ef3d..566b6f609 100644
  
  #ifdef _WIN64
  	matching_architecture = gc->process_is_64bit;
-@@ -1047,6 +1458,8 @@ static bool init_hook(struct game_capture *gc)
+@@ -1047,6 +1463,8 @@ static bool init_hook(struct game_capture *gc)
  		if (!inject_hook(gc)) {
  			return false;
  		}
@@ -1230,7 +1269,7 @@ index 3bf12ef3d..566b6f609 100644
  	}
  	if (!init_texture_mutexes(gc)) {
  		return false;
-@@ -1057,13 +1470,19 @@ static bool init_hook(struct game_capture *gc)
+@@ -1057,13 +1475,19 @@ static bool init_hook(struct game_capture *gc)
  	if (!init_events(gc)) {
  		return false;
  	}
@@ -1251,7 +1290,7 @@ index 3bf12ef3d..566b6f609 100644
  	return true;
  }
  
-@@ -1175,17 +1594,18 @@ static void try_hook(struct game_capture *gc)
+@@ -1175,17 +1599,18 @@ static void try_hook(struct game_capture *gc)
  
  	if (gc->next_window) {
  		gc->thread_id = GetWindowThreadProcessId(gc->next_window, &gc->process_id);
@@ -1276,7 +1315,17 @@ index 3bf12ef3d..566b6f609 100644
  			gc->error_acquiring = true;
  			return;
  		}
-@@ -1688,6 +2108,7 @@ static void check_foreground_window(struct game_capture *gc, float seconds)
+@@ -1298,6 +1723,9 @@ static inline enum capture_result init_capture_data(struct game_capture *gc)
+ 		return CAPTURE_FAIL;
+ 	}
+ 
++	/* Shard: the signed hook latches the first swap chain to present, which
++	 * can be a secondary (tool/overlay) window of the same process. */
++	os_atomic_set_long(&gc->hooked_window, (long)gc->global_hook_info->window);
+ 	return CAPTURE_SUCCESS;
+ }
+ 
+@@ -1688,6 +2116,7 @@ static void check_foreground_window(struct game_capture *gc, float seconds)
  	}
  }
  
@@ -1284,7 +1333,7 @@ index 3bf12ef3d..566b6f609 100644
  static void game_capture_tick(void *data, float seconds)
  {
  	struct game_capture *gc = data;
-@@ -1744,19 +2165,30 @@ static void game_capture_tick(void *data, float seconds)
+@@ -1744,19 +2173,30 @@ static void game_capture_tick(void *data, float seconds)
  
  		GetExitCodeProcess(gc->injector_process, &exit_code);
  		close_handle(&gc->injector_process);
@@ -1321,7 +1370,7 @@ index 3bf12ef3d..566b6f609 100644
  		enum capture_result result = init_capture_data(gc);
  
  		if (result == CAPTURE_SUCCESS)
-@@ -1764,6 +2196,11 @@ static void game_capture_tick(void *data, float seconds)
+@@ -1764,6 +2204,11 @@ static void game_capture_tick(void *data, float seconds)
  		else
  			debug("init_capture_data failed");
  
@@ -1333,7 +1382,7 @@ index 3bf12ef3d..566b6f609 100644
  		// If capture was successful, send a hooked signal
  		if (gc->capturing) {
  			if (gc->config.mode == CAPTURE_MODE_ANY) {
-@@ -1785,6 +2222,9 @@ static void game_capture_tick(void *data, float seconds)
+@@ -1785,6 +2230,9 @@ static void game_capture_tick(void *data, float seconds)
  			if (gc->audio_source) {
  				reconfigure_audio_source(gc->audio_source, gc->window);
  			}

@@ -58,11 +58,18 @@ std::string inferProductTypeFromName(const std::string& nameLower)
 
 namespace {
 
+// Brace tokens are structural; a quoted "{" or "}" is ordinary text.
+struct VdfToken {
+  enum class Kind { Text, Open, Close };
+  Kind kind = Kind::Text;
+  std::string text;
+};
+
 // Tolerant VDF/ACF tokenizer: quoted strings ("a b" with \\ escapes) and bare
 // tokens; braces are returned as their own tokens.
-std::vector<std::string> tokenizeVdf(const std::string& text)
+std::vector<VdfToken> tokenizeVdf(const std::string& text)
 {
-  std::vector<std::string> out;
+  std::vector<VdfToken> out;
   size_t i = 0;
   const size_t n = text.size();
   while (i < n) {
@@ -72,7 +79,7 @@ std::vector<std::string> tokenizeVdf(const std::string& text)
       continue;
     }
     if (c == '{' || c == '}') {
-      out.emplace_back(1, c);
+      out.push_back({c == '{' ? VdfToken::Kind::Open : VdfToken::Kind::Close, std::string(1, c)});
       i++;
       continue;
     }
@@ -89,14 +96,14 @@ std::vector<std::string> tokenizeVdf(const std::string& text)
         }
       }
       i++; // closing quote
-      out.push_back(tok);
+      out.push_back({VdfToken::Kind::Text, std::move(tok)});
     } else {
       std::string tok;
       while (i < n && !std::isspace((unsigned char)text[i]) && text[i] != '{' && text[i] != '}') {
         tok.push_back(text[i]);
         i++;
       }
-      out.push_back(tok);
+      out.push_back({VdfToken::Kind::Text, std::move(tok)});
     }
   }
   return out;
@@ -124,20 +131,28 @@ struct VdfSection {
   }
 };
 
-VdfSection parseVdfSection(const std::vector<std::string>& toks, size_t& i)
+// A section's closing brace sits where the next key would be. It must end the
+// section there; consuming it as a value of the following pair re-parented
+// every later sibling (Steam library "1" became a child of library "0" after
+// the nested "apps" block, hiding every secondary library).
+VdfSection parseVdfSection(const std::vector<VdfToken>& toks, size_t& i, int depth = 0)
 {
   VdfSection node;
   while (i < toks.size()) {
-    const std::string key = toks[i++];
-    if (i >= toks.size())
-      break;
-    const std::string val = toks[i++];
-    if (val == "{") {
-      node.children.push_back({key, parseVdfSection(toks, i)});
-    } else if (val == "}") {
+    const VdfToken& key = toks[i++];
+    if (key.kind == VdfToken::Kind::Close)
       return node;
+    if (key.kind == VdfToken::Kind::Open || i >= toks.size())
+      break; // malformed: anonymous section or dangling key
+    const VdfToken& val = toks[i++];
+    if (val.kind == VdfToken::Kind::Open) {
+      if (depth >= 64)
+        break;
+      node.children.push_back({key.text, parseVdfSection(toks, i, depth + 1)});
+    } else if (val.kind == VdfToken::Kind::Close) {
+      return node; // malformed: dangling key before a close
     } else {
-      node.values[key] = val;
+      node.values[key.text] = val.text;
     }
   }
   return node;

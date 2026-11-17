@@ -66,8 +66,19 @@ assert.match(serializeDevConsoleLines(records.slice(1, 2)), /\[core\.stdout\] \[
 
 // Recording priority is active only when the elevated core applied libobs
 // GPU priority; anything else enabled is inactive with a stated reason.
-const { recordingPriorityEffect } = loadTs("src/shared/recording-priority.ts");
-const priority = { enabled: true, supported: true, installed: true, current: true, coreElevated: true, gpuPriority: "set", gpuVendor: "nvidia", busy: false, message: null };
+const { recordingPriorityEffect, recordingPriorityLimitedByHags } = loadTs("src/shared/recording-priority.ts");
+const priority = { enabled: true, supported: true, installed: true, current: true, coreElevated: true, gpuPriority: "set", gpuVendor: "nvidia", hags: false, busy: false, message: null };
+// With HAGS on, libobs uses High GPU priority, which a normal core already
+// gets: the setting adds nothing and says so (on or off). Unknown HAGS,
+// no reported core and Intel (no priority call at all) are not flagged.
+assert.equal(recordingPriorityLimitedByHags(priority), false);
+assert.equal(recordingPriorityLimitedByHags({ ...priority, hags: true }), true);
+assert.equal(recordingPriorityLimitedByHags({ ...priority, hags: true, enabled: false, coreElevated: false }), true);
+assert.equal(recordingPriorityLimitedByHags({ ...priority, hags: null }), false);
+assert.equal(recordingPriorityLimitedByHags({ ...priority, hags: true, gpuVendor: null }), false);
+assert.equal(recordingPriorityLimitedByHags({ ...priority, hags: true, gpuVendor: "intel" }), false);
+assert.equal(recordingPriorityLimitedByHags({ ...priority, hags: true, supported: false }), false);
+assert.equal(recordingPriorityLimitedByHags(null), false);
 assert.deepEqual(recordingPriorityEffect(priority), { state: "active", problem: null });
 assert.deepEqual(recordingPriorityEffect({ ...priority, gpuPriority: "failed" }), { state: "inactive", problem: "gpu_priority_failed" });
 assert.deepEqual(recordingPriorityEffect({ ...priority, gpuPriority: "unknown", gpuVendor: "intel" }), { state: "inactive", problem: "gpu_priority_unsupported" });
@@ -102,6 +113,10 @@ if (process.platform === "win32") {
   assert.equal(recordingPriorityEffect(live.status()).state, "active");
   live.noteCoreSession(session(true, "set")); // same session again: no duplicate publish
   assert.deepEqual(published, ["active", "inactive", "inactive", "active"]);
+  assert.equal(live.status().hags, null); // not reported
+  live.noteCoreSession({ ...session(true, "set"), hags: true }); // HAGS reported: published
+  assert.equal(live.status().hags, true);
+  assert.equal(published.length, 5);
 }
 
 // Clip saves stay pending until their own terminal event, however long the

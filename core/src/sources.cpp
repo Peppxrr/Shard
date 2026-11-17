@@ -146,6 +146,7 @@ void SourceManager::applyVideoSourceLocked()
   lastWindowActionMs_ = 0;
   windowNoFramesReported_ = false;
   windowSuppressedForMinimize_ = false;
+  hookOnSecondaryWindow_ = false;
   activeBackend_ = ActiveBackend::None;
 
   // Re-evaluate the subject for the current mode. GameSystem's primary game
@@ -234,6 +235,25 @@ void SourceManager::refreshTargetWindowLocked()
   setWindowTargetLocked(subject_);
   logFormat("capture: game window replaced for pid=%lu; reacquiring capture",
             static_cast<unsigned long>(subject_.pid));
+}
+
+void SourceManager::refreshHookWindowLocked()
+{
+  const std::optional<uintptr_t> hooked = gameSource_ ? capture::hookedWindow(gameSource_) : std::nullopt;
+  const uintptr_t hookedWindow = hooked.value_or(0);
+  const auto area = [](uintptr_t window) -> uint64_t {
+    const auto size = window ? capture::windowClientSize(window) : std::nullopt;
+    return size ? uint64_t{size->width} * size->height : 0;
+  };
+  const bool secondary = hookedWindow && targetWindow_ && hookedWindow != targetWindow_ &&
+                         captureHookOnSecondaryWindow(hookedWindow, targetWindow_, area(hookedWindow),
+                                                      area(targetWindow_));
+  if (secondary == hookOnSecondaryWindow_) return;
+  hookOnSecondaryWindow_ = secondary;
+  logFormat("[GC] ts_ms=%llu stage=HookWindow pid=%lu target_hwnd=0x%llx hooked_hwnd=0x%llx secondary=%s",
+            static_cast<unsigned long long>(duration_ms_now()), static_cast<unsigned long>(subject_.pid),
+            static_cast<unsigned long long>(targetWindow_), static_cast<unsigned long long>(hookedWindow),
+            secondary ? "true" : "false");
 }
 
 void SourceManager::applyHookColorSpaceLocked()
@@ -409,6 +429,7 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
   lastWindowActionMs_ = 0;
   windowNoFramesReported_ = false;
   windowSuppressedForMinimize_ = false;
+  hookOnSecondaryWindow_ = false;
   activeBackend_ = ActiveBackend::None;
 }
 
@@ -819,7 +840,8 @@ void SourceManager::repairSceneLocked()
 void SourceManager::recoverCaptureLocked(bool eligible, bool monitor, uint64_t nowMs)
 {
   const bool hookHealthy = gameSource_ && obs_source_get_width(gameSource_) && obs_source_get_height(gameSource_) &&
-                           hookObservation_.healthy(nowMs) && !backendHealth_.hookRejected();
+                           hookObservation_.healthy(nowMs) && !backendHealth_.hookRejected() &&
+                           !hookOnSecondaryWindow_;
   const bool wgcHealthy = windowSource_ && obs_source_get_width(windowSource_) && obs_source_get_height(windowSource_) &&
                           windowObservation_.healthy(nowMs);
   const bool sourceHealthy = monitor ? monitorSource_ && monitorObservation_.healthy(nowMs) : hookHealthy || wgcHealthy;
@@ -1004,8 +1026,13 @@ void SourceManager::watchdogLoop()
         // Evaluate aging evidence even if the graphics callback stops. Only
         // successful maps update the observations feeding this policy.
         backendHealth_.sample(hookObservation_, windowObservation_, tickMs);
+        refreshHookWindowLocked();
         const bool windowHealthy = usableWindowReady && windowObservation_.healthy(tickMs);
-        const bool hookRejected = backendHealth_.hookRejected();
+        // A hook on a secondary window is excluded like a rejected hook, but
+        // it is not retried: re-injection keeps the hook's latched swap chain.
+        const bool hookRejected = backendHealth_.hookRejected() || hookOnSecondaryWindow_;
+        const char* const hookRejectReason =
+            hookOnSecondaryWindow_ ? "hook_on_secondary_window" : backendHealth_.rejectionReason();
         const bool hookHealthy = gameWidth && gameHeight && !hookRejected && hookObservation_.healthy(tickMs);
         const bool hookProbeStale = hookObservation_.hasPixels && !hookObservation_.fresh(tickMs) &&
                                    tickMs - hookObservation_.observedMs >= 15000;
@@ -1043,7 +1070,7 @@ void SourceManager::watchdogLoop()
 
           if (desired != activeBackend_) {
             if (activeBackend_ != ActiveBackend::None)
-              logRecoveryLocked(hookRejected ? backendHealth_.rejectionReason() : "backend_readiness_changed",
+              logRecoveryLocked(hookRejected ? hookRejectReason : "backend_readiness_changed",
                                 desired == ActiveBackend::Wgc ? "select_wgc" : "select_hook", 0, tickMs);
             activeBackend_ = desired;
             // A black hook still has an opaque texture. Merely naming WGC
@@ -1062,7 +1089,7 @@ void SourceManager::watchdogLoop()
             noteCaptureMethodLocked(capture::methodNames().hook, "hook_frames_ready");
           else
             noteCaptureMethodLocked(capture::methodNames().window,
-                                    hookRejected ? std::string("hook_rejected_") + backendHealth_.rejectionReason()
+                                    hookRejected ? std::string("hook_rejected_") + hookRejectReason
                                     : !gameWidth || !gameHeight ? [&] {
                                         // Platform-specific cause (Linux: game launched without vkcapture).
                                         const std::string why = capture::hookUnavailableReason(subject_.pid);
@@ -1108,11 +1135,12 @@ void SourceManager::watchdogLoop()
           hookRetryCount_ = 0;
         } else if (normalRecoveryAllowed && (!gameWidth || !gameHeight ||
                        backendHealth_.hookRetryJustified(windowObservation_, tickMs)) &&
+                   !hookOnSecondaryWindow_ &&
                    now - lastHookRetry_ >= std::chrono::milliseconds(
                        hookRejected ? 15000 : captureHookRetryDelayMs(hookRetryCount_))) {
           if ((hookRejected && gameWidth && gameHeight) ||
               (!gameWidth && !gameHeight && hookRetryCount_ > 0 && hookRetryCount_ % 5 == 0)) {
-            logRecoveryLocked(hookRejected ? backendHealth_.rejectionReason() : "hook_dimensions_unavailable",
+            logRecoveryLocked(hookRejected ? hookRejectReason : "hook_dimensions_unavailable",
                               "recreate_hook", 2, tickMs);
             recreateGameCaptureLocked();
           } else {
@@ -1194,7 +1222,7 @@ void SourceManager::watchdogLoop()
                << " wgc_visible=" << wgcVisibleWidth << 'x' << wgcVisibleHeight
                << " hook_rejected=" << (hookRejected ? "true" : "false")
                << " hook_reject_reason="
-               << backendHealth_.rejectionReason()
+               << (hookRejected ? hookRejectReason : "none")
                << " selected_backend=" << selectedBackend << " hook_retry_count=" << hookRetryCount_
                << " hook_last_action=" << lastHookAction_ << " hook_last_action_age_ms="
                << ageText(lastHookActionMs_) << " wgc_retry_count=" << wgcRetryCount_

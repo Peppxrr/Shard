@@ -442,6 +442,24 @@ std::optional<uintptr_t> acquiredWindow(obs_source_t* source, uint32_t pid)
   return context.matches == 1 ? reinterpret_cast<uintptr_t>(context.window) : uintptr_t{0};
 }
 
+// Shard's game_capture patch reports the hook's latched swap-chain window in
+// get_hooked. The hook names its shared texture after the root window, so the
+// comparison against Shard's target uses GA_ROOT as well.
+std::optional<uintptr_t> hookedWindow(obs_source_t* hook)
+{
+  if (!hook) return std::nullopt;
+  calldata_t data = {};
+  long long raw = 0;
+  const bool acquired = proc_handler_call(obs_source_get_proc_handler(hook), "get_hooked", &data) &&
+                        calldata_bool(&data, "hooked") && calldata_get_int(&data, "window", &raw);
+  calldata_free(&data);
+  // HWNDs are 32-bit values sign-extended on 64-bit Windows (LongToHandle).
+  const HWND window = reinterpret_cast<HWND>(static_cast<intptr_t>(static_cast<int32_t>(raw)));
+  if (!acquired || !window || !IsWindow(window)) return std::nullopt;
+  const HWND root = GetAncestor(window, GA_ROOT);
+  return reinterpret_cast<uintptr_t>(root ? root : window);
+}
+
 uintptr_t displayForTarget(bool windowSubject, uintptr_t window, int monitorIndex)
 {
   return selectCaptureMonitor(windowSubject, window, monitorIndex,

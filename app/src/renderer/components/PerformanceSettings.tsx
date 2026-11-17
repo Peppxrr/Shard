@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { RecordingPriorityStatus } from "../../shared/contracts";
-import { recordingPriorityEffect, recordingPriorityProblemText } from "../../shared/recording-priority";
+import {
+  HAGS_PRIORITY_TEXT, recordingPriorityEffect, recordingPriorityLimitedByHags, recordingPriorityProblemText,
+} from "../../shared/recording-priority";
 import { Button, Card, Confirm, Icon, Toggle } from "./ui";
 
 export function RecordingPerformanceCard() {
@@ -40,6 +42,7 @@ export function RecordingPerformanceCard() {
 
   const { state, problem } = recordingPriorityEffect(status);
   const staleTask = status?.enabled && status.installed && !status.current;
+  const hagsLimited = recordingPriorityLimitedByHags(status) && state !== "busy";
   return <Card title="Recording performance" sub="Keep recordings smooth when a game maxes out your GPU.">
     <div data-shard-component="recording-priority" data-shard-state={state}>
       <label className="setting-row setting-row--switch">
@@ -50,7 +53,8 @@ export function RecordingPerformanceCard() {
         <Toggle checked={status?.enabled ?? false} disabled={state === "loading" || state === "unsupported" || state === "busy"} onChange={setConfirm} />
       </label>
       {state === "busy" && <p data-shard-slot="priority-status" className="priority-status">Waiting for Windows to approve…</p>}
-      {state === "active" && <p data-shard-slot="priority-status" className="priority-status">Active: recording has GPU priority.</p>}
+      {state === "active" && !hagsLimited && <p data-shard-slot="priority-status" className="priority-status">Active: recording has GPU priority.</p>}
+      {hagsLimited && <p data-shard-slot="priority-hags" role="status" className="priority-status">{HAGS_PRIORITY_TEXT}</p>}
       {status?.message
         ? <p data-shard-slot="priority-message" role="alert" className="form-error">{status.message}</p>
         : problem && <p data-shard-slot="priority-message" role="status" className="priority-status">{recordingPriorityProblemText(problem)}</p>}

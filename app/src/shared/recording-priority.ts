@@ -54,6 +54,18 @@ export function recordingPriorityProblemText(problem: RecordingPriorityProblem):
   return PROBLEM_TEXT[problem];
 }
 
+// With hardware-accelerated GPU scheduling on, libobs-d3d11 requests High
+// (not Realtime) GPU priority, and High needs no administrator rights: a
+// normally started core already gets it, so the elevated launch adds nothing.
+// Intel adapters skip the priority call entirely (reported separately).
+export function recordingPriorityLimitedByHags(status: RecordingPriorityStatus | null): boolean {
+  return !!status && status.supported && status.hags === true && status.gpuVendor !== null && status.gpuVendor !== "intel";
+}
+
+export const HAGS_PRIORITY_TEXT =
+  "Hardware-accelerated GPU scheduling is on, so Windows gives Shard the same GPU priority with or without this setting. " +
+  "To let Recording priority raise it further, turn off Hardware-accelerated GPU scheduling in Windows graphics settings and restart your PC.";
+
 // One flat record in the diagnostics bundle answering "is Recording priority
 // working, and if not, why", next to the capture facts it affects.
 export function recordingPriorityDiagnostics(
@@ -76,6 +88,7 @@ export function recordingPriorityDiagnostics(
     gpuPriority: session?.gpuPriority ?? "unknown",
     gpuVendor: session?.adapter.vendor ?? null,
     hags: session ? session.hags : null,
+    limitedByHags: recordingPriorityLimitedByHags(status),
     processPriority: session?.processPriority ?? null,
     captureMethod: session?.capture.method ?? null,
     encoder: encoder?.encoder ?? null,
