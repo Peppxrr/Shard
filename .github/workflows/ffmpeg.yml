@@ -7,6 +7,9 @@ name: Editor FFmpeg
 # `revision` in scripts/ffmpeg/build-pins.json for a new build.
 on:
   push:
+    # Branch pushes only: path filters are ignored for tag pushes, which would
+    # rebuild FFmpeg for every Shard release tag.
+    branches: ["**"]
     paths: ["scripts/ffmpeg/**", ".github/workflows/ffmpeg.yml"]
   workflow_dispatch:
 
