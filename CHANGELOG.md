@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.15
+
+- Much smaller download and install: the installer is about a third smaller (around 112 MB) and Shard takes about 400 MB on disk. The editor's video tools are now a lean build made for Shard, with the same export encoders, and parts of the app framework Shard never uses are no longer included.
+- Exports start almost immediately and finish faster. Exporting part of a long recording no longer waits while everything before your cut is read, HEVC and AV1 clips are decoded on the GPU, and CPU (x264) exports no longer encode twice to fit the size limit.
+- Shard uses much less memory while it sits in the tray: about 30 seconds after you close the window, it is fully unloaded and reopens in under a second from the tray. An open editor or unsaved settings keep it loaded, and clip saved sounds still play.
+- Fixed clips of BeamNG.drive showing a mod's settings window (such as a graphics utility or CobaltEssentials) instead of the game when the mod opens its own window.
+- Fixed games in secondary Steam library folders not being found.
+- Recording priority now explains when hardware-accelerated GPU scheduling already gives Shard the same GPU priority.
+- The capture runtime is no longer packaged twice.
+
 ## 0.1.14
 
 - Fixed Space in the editor: it now always plays and pauses, even right after clicking a toolbar button, and can no longer reopen the clip viewer behind the editor.

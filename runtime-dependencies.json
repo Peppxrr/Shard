@@ -8,7 +8,7 @@
   "ffmpeg": {
     "version": "9.0.1",
     "url": "https://github.com/Peppxrr/Shard/releases/download/ffmpeg-9.0.1-1/shard-ffmpeg-9.0.1-1-win64.zip",
-    "sha256": "163dc316eaf6b53adf7e4e7641a6d866b1e772b1cef359bea0fbb7bbcb495c85",
+    "sha256": "1a06481240d2ffc06abd608065d3133c21cac512d3249c4fc81634dbcdc10a92",
     "archiveDirectory": "shard-ffmpeg-9.0.1-1-win64",
     "runtimeDlls": ["avcodec-63.dll", "avdevice-63.dll", "avfilter-12.dll", "avformat-63.dll", "avutil-61.dll", "swresample-7.dll", "swscale-10.dll"]
   }
