@@ -591,7 +591,11 @@ void ReplayRing::muxToFile(const std::vector<encoder_packet>& packets, const std
                            std::string& error)
 {
   FfmpegMuxWriter writer(output_, config_.coreBinDir);
-  if (!writer.start(path, "-movflags frag_keyframe+empty_moov use_editlist=1")) {
+  // The mux helper parses "key=value" pairs separated by spaces and drops the
+  // whole string on a malformed pair. A clip is muxed in one pass from memory,
+  // so it is a regular (unfragmented) MP4: fragmenting would disable the edit
+  // list that hides the decode-only keyframe preroll.
+  if (!writer.start(path, "use_editlist=1")) {
     error = writer.lastError();
     success = false;
     return;
