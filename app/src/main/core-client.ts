@@ -17,6 +17,23 @@ const MAX_RESTARTS = 5;
 // unusable; the core is then started normally right away.
 const PRIORITY_FALLBACK_EXIT = 124;
 
+// Core stderr is mirrored to the app's own stderr for terminal debugging. That
+// pipe can close under a running app (the terminal or tool that launched it
+// exits); an unhandled EPIPE then became an uncaught main-process exception on
+// every core line. The developer console and logs do not depend on it.
+let stderrMirrorOpen = true;
+process.stderr.on("error", () => {
+  stderrMirrorOpen = false;
+});
+function mirrorToStderr(text: string): void {
+  if (!stderrMirrorOpen || process.stderr.destroyed || !process.stderr.writable) return;
+  try {
+    process.stderr.write(text);
+  } catch {
+    stderrMirrorOpen = false;
+  }
+}
+
 export interface CoreClientOptions {
   // Start through the Recording priority bridge (elevated core) when true.
   priorityLaunch?: () => boolean;
@@ -131,7 +148,7 @@ export class CoreClient extends EventEmitter {
       }
     });
     const stderr = new CoreLineDecoder(line => {
-      process.stderr.write(`[core] ${line}\n`);
+      mirrorToStderr(`[core] ${line}\n`);
       this.emitCoreOutput(line, "stderr");
     });
     const stdoutStream = this.proc.stdout;
@@ -146,7 +163,7 @@ export class CoreClient extends EventEmitter {
     });
     this.proc.on("error", error => {
       const text = `Core process error: ${error.message}`;
-      process.stderr.write(`[core] ${text}\n`);
+      mirrorToStderr(`[core] ${text}\n`);
       this.emit("log", "core", text, { stream: "stderr", severity: "error" });
     });
     // `close` follows the stdio streams, so finish() sees every last byte.
