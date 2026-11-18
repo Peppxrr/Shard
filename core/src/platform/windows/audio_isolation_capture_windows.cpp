@@ -77,6 +77,26 @@ std::string utf8(const wchar_t* text)
   return out;
 }
 
+// Lowercase basename of this executable, in the process snapshot's format.
+std::string ownExecutableName()
+{
+  std::wstring path(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (!length)
+      return {};
+    if (length < path.size()) {
+      path.resize(length);
+      break;
+    }
+    path.resize(path.size() * 2);
+  }
+  const size_t slash = path.find_last_of(L"\\/");
+  std::wstring name = slash == std::wstring::npos ? path : path.substr(slash + 1);
+  CharLowerW(name.data());
+  return utf8(name.c_str());
+}
+
 std::wstring wide(const std::string& text)
 {
   if (text.empty())
@@ -421,6 +441,10 @@ struct AudioIsolationController::Impl {
   std::vector<RowState> rows;
   std::vector<std::string> isolatedExes;
   std::set<std::string> isolatedSet;
+  // Shard's own core executable. Its process loopback captures register as
+  // sessions on every endpoint they hear, yet capturing a core yields silence:
+  // never attach this core (or another Shard core) as Desktop audio.
+  std::set<std::string> ignoredExes = {ownExecutableName()};
   size_t desktopRows = 0;
   HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   HANDLE wakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -627,8 +651,11 @@ struct AudioIsolationController::Impl {
       }
       DWORD pid = 0;
       // AUDCLNT_S_NO_SINGLE_PROCESS still reports the creating process.
-      if (SUCCEEDED(control2->GetProcessId(&pid)) && pid)
+      if (SUCCEEDED(control2->GetProcessId(&pid)) && pid) {
         result.pids.push_back(pid);
+        if (sessionState == AudioSessionStateActive)
+          result.activePids.push_back(pid);
+      }
     }
     if (systemSounds && !state.systemSoundsReported) {
       state.systemSoundsReported = true;
@@ -673,9 +700,13 @@ struct AudioIsolationController::Impl {
       }
       const AudioProcess* process = forest.find(it->first.pid);
       const bool exited = !process || process->createTime != it->first.createTime;
+      const char* reason = exited ? "exited"
+                           : app  ? "process_tree_changed"
+                           : state.sessionPids.count(it->first.pid) ? "moved_to_playing_endpoint"
+                                                                    : "session_removed";
       logIsolation("info", rowText(state) + (app ? " event=app_process_detached" : " event=desktop_process_detached") +
-                               " exe=" + it->second.exe + " pid=" + std::to_string(it->first.pid) + " reason=" +
-                               (exited ? "exited" : app ? "process_tree_changed" : "session_removed"));
+                               " exe=" + it->second.exe + " pid=" + std::to_string(it->first.pid) +
+                               " reason=" + reason);
       releaseSource(it->second);
       it = state.captures.erase(it);
     }
@@ -717,10 +748,12 @@ struct AudioIsolationController::Impl {
       if (state.sessionPids.count(pid))
         continue;
       const AudioProcess* process = forest.find(pid);
-      const AudioProcess* owner = process ? forest.isolatedOwner(*process, isolatedSet) : nullptr;
+      const bool ignored = process && ignoredExes.count(process->exe);
+      const AudioProcess* owner = process && !ignored ? forest.isolatedOwner(*process, isolatedSet) : nullptr;
       logIsolation("info", rowText(state) + " event=session_added pid=" + std::to_string(pid) +
                                " exe=" + (process ? process->exe : std::string("unknown")) +
-                               " route=" + (owner ? "isolated:" + owner->exe : std::string("desktop")));
+                               " route=" + (ignored ? std::string("ignored:shard_capture")
+                                            : owner ? "isolated:" + owner->exe : std::string("desktop")));
     }
     for (const uint32_t pid : state.sessionPids) {
       if (!now.count(pid))
@@ -822,7 +855,14 @@ struct AudioIsolationController::Impl {
         desktops[state.desktopSlot] = enumerateSessions(state);
     }
     const AudioProcessForest forest(snapshotProcesses());
-    const IsolationPlan plan = planAudioIsolation(forest, isolatedExes, desktops);
+    std::map<AudioProcessKey, size_t> previousRows;
+    for (const auto& state : rows) {
+      if (state.row.kind != IsolationRow::Kind::Desktop)
+        continue;
+      for (const auto& [key, owned] : state.captures)
+        previousRows.emplace(key, state.desktopSlot);
+    }
+    const IsolationPlan plan = planAudioIsolation(forest, isolatedExes, desktops, previousRows, ignoredExes);
 
     for (auto& state : rows) {
       if (state.row.kind == IsolationRow::Kind::App) {

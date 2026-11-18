@@ -203,7 +203,9 @@ const AudioProcess* AudioProcessForest::isolatedOwner(const AudioProcess& proces
 }
 
 IsolationPlan planAudioIsolation(const AudioProcessForest& forest, const std::vector<std::string>& isolatedExes,
-                                 const std::vector<EndpointSessions>& desktops)
+                                 const std::vector<EndpointSessions>& desktops,
+                                 const std::map<AudioProcessKey, size_t>& previousDesktopRows,
+                                 const std::set<std::string>& ignoredExes)
 {
   IsolationPlan plan;
   const std::set<std::string> isolated(isolatedExes.begin(), isolatedExes.end());
@@ -233,15 +235,21 @@ IsolationPlan planAudioIsolation(const AudioProcessForest& forest, const std::ve
   for (auto& [exe, keys] : plan.appRoots)
     std::sort(keys.begin(), keys.end());
 
+  // Every filtered endpoint a session owner appears on, in row order.
+  struct Placement {
+    std::vector<size_t> rows;
+    std::set<size_t> playing;
+  };
+  std::map<const AudioProcess*, Placement> placements;
   std::map<const AudioProcess*, size_t> candidateRows;
   std::vector<const AudioProcess*> candidates;
   std::map<std::string, std::vector<const AudioProcess*>> appSessions;
-  std::set<uint32_t> claimed;
   std::set<uint32_t> appClaimed;
   plan.desktopRoots.resize(desktops.size());
   for (size_t row = 0; row < desktops.size(); row++) {
     if (!desktops[row].available)
       continue;
+    const std::set<uint32_t> active(desktops[row].activePids.begin(), desktops[row].activePids.end());
     for (const uint32_t pid : desktops[row].pids) {
       // 0 = idle/system-sounds aggregate, 4 = System; neither is a capturable tree.
       if (pid <= 4)
@@ -249,17 +257,40 @@ IsolationPlan planAudioIsolation(const AudioProcessForest& forest, const std::ve
       const AudioProcess* process = forest.find(pid);
       if (!process)
         continue; // exited between session enumeration and the process snapshot
+      if (ignoredExes.count(process->exe))
+        continue;
       if (const AudioProcess* owner = forest.isolatedOwner(*process, isolated)) {
         plan.excluded.push_back({row, keyOf(*process), process->exe, owner->exe});
         if (appClaimed.insert(pid).second)
           appSessions[owner->exe].push_back(process);
         continue;
       }
-      if (claimed.insert(pid).second) {
-        candidateRows[process] = row;
+      auto [placement, added] = placements.try_emplace(process);
+      if (added)
         candidates.push_back(process);
+      if (placement->second.rows.empty() || placement->second.rows.back() != row)
+        placement->second.rows.push_back(row);
+      if (active.count(pid))
+        placement->second.playing.insert(row);
+    }
+  }
+  // Process loopback cannot split a process by endpoint, so its whole output
+  // goes to one row. Prefer where it is playing, then where it already was
+  // (no mid-recording track jumps for a new idle session), then the first row.
+  for (const AudioProcess* process : candidates) {
+    const Placement& placement = placements[process];
+    const auto previous = previousDesktopRows.find(keyOf(*process));
+    size_t best = placement.rows.front();
+    int bestScore = -1;
+    for (const size_t row : placement.rows) {
+      const int score = (placement.playing.count(row) ? 2 : 0) +
+                        (previous != previousDesktopRows.end() && previous->second == row ? 1 : 0);
+      if (score > bestScore) {
+        best = row;
+        bestScore = score;
       }
     }
+    candidateRows[process] = best;
   }
   for (const AudioProcess* process : uncoveredOwners(forest, candidates, {})) {
     const size_t row = candidateRows[process];

@@ -104,6 +104,8 @@ private:
 struct EndpointSessions {
   bool available = false;     // endpoint exists and its sessions were enumerated
   std::vector<uint32_t> pids; // owning process of each non-expired session
+  // Owners with a session currently playing on this endpoint (a subset of pids).
+  std::vector<uint32_t> activePids;
 };
 
 struct IsolationPlan {
@@ -114,8 +116,9 @@ struct IsolationPlan {
   // Process trees to capture for each filtered Desktop row (same order as the
   // `desktops` input). A session owner whose direct parent is already captured
   // is inside that capture and is not captured twice; deeper descendants get
-  // their own capture. A process with sessions on several filtered endpoints
-  // goes to the first row.
+  // their own capture. Process loopback hears a process on every endpoint, so
+  // a process with sessions on several filtered endpoints is captured on one
+  // row only: where it is playing, then where it already was, then the first.
   std::vector<std::vector<AudioProcessKey>> desktopRoots;
 
   struct Excluded {
@@ -141,7 +144,14 @@ struct IsolationPlan {
   std::vector<Overlap> overlaps;
 };
 
+// `previousDesktopRows` maps each Desktop capture of the last plan to its row,
+// so an app that also opens an idle session on another endpoint does not jump
+// tracks mid-recording. Session owners whose exe is in `ignoredExes` (Shard's
+// own core: its loopback captures appear as sessions on the endpoints they
+// hear) are never captured as Desktop audio.
 IsolationPlan planAudioIsolation(const AudioProcessForest& forest, const std::vector<std::string>& isolatedExes,
-                                 const std::vector<EndpointSessions>& desktops);
+                                 const std::vector<EndpointSessions>& desktops,
+                                 const std::map<AudioProcessKey, size_t>& previousDesktopRows = {},
+                                 const std::set<std::string>& ignoredExes = {});
 
 } // namespace shard

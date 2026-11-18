@@ -307,6 +307,58 @@ void testEndpoints()
   CHECK(pids(plan.appRoots.at("discord.exe")) == V({100}));
 }
 
+void testMultiEndpointPlacement()
+{
+  // Process loopback hears a process on every endpoint, so it lives on one row.
+  // Row 0 = Voicemeeter AUX, row 1 = Voicemeeter Input (VoiceMeeter strips).
+  const AudioProcessForest forest(desktopProcesses());
+  const auto key = [&](uint32_t pid) { return AudioProcessKey{pid, forest.find(pid)->createTime}; };
+  EndpointSessions aux{true, {400}, {}};
+  const EndpointSessions vmInput{true, {400}, {400}};
+
+  // A game playing on VM Input that also opens an idle session on AUX stays on
+  // VM Input instead of moving its whole audio to the first row.
+  auto plan = planAudioIsolation(forest, {"spotify.exe"}, {aux, vmInput});
+  CHECK(plan.desktopRoots[0].empty());
+  CHECK(pids(plan.desktopRoots[1]) == V({400}));
+
+  // Already captured on VM Input: a new idle AUX session does not move it.
+  plan = planAudioIsolation(forest, {"spotify.exe"}, {aux, {true, {400}, {}}}, {{key(400), 1}});
+  CHECK(plan.desktopRoots[0].empty());
+  CHECK(pids(plan.desktopRoots[1]) == V({400}));
+
+  // The user moved the game to AUX: it follows where it is actually playing.
+  aux.activePids = {400};
+  plan = planAudioIsolation(forest, {"spotify.exe"}, {aux, {true, {400}, {}}}, {{key(400), 1}});
+  CHECK(pids(plan.desktopRoots[0]) == V({400}));
+  CHECK(plan.desktopRoots[1].empty());
+
+  // Playing on both: keep the current row (no flapping).
+  plan = planAudioIsolation(forest, {"spotify.exe"}, {aux, vmInput}, {{key(400), 1}});
+  CHECK(plan.desktopRoots[0].empty());
+  CHECK(pids(plan.desktopRoots[1]) == V({400}));
+
+  // No activity and no history: the first row, as before.
+  plan = planAudioIsolation(forest, {"spotify.exe"}, {{true, {400}, {}}, {true, {400}, {}}});
+  CHECK(pids(plan.desktopRoots[0]) == V({400}));
+  CHECK(plan.desktopRoots[1].empty());
+}
+
+void testShardCoreIgnored()
+{
+  // A Shard core's process loopback captures show up as its own sessions on
+  // every endpoint they hear. The core is never Desktop audio.
+  auto processes = desktopProcesses();
+  processes.push_back(proc(900, 50, "shardcore.exe", 90));
+  processes.push_back(proc(901, 900, "shardcore.exe", 91));
+  const AudioProcessForest forest(processes);
+  const auto plan = planAudioIsolation(forest, {"spotify.exe"}, {{true, {901, 101, 201}, {901, 201}}}, {},
+                                       {"shardcore.exe"});
+  CHECK(pids(plan.desktopRoots[0]) == V({101}));
+  CHECK(pids(plan.appRoots.at("spotify.exe")) == V({200}));
+  CHECK(plan.overlaps.empty());
+}
+
 void testTrackTitles()
 {
   // Titles follow the configured rows, so a reorder changes them.
@@ -341,6 +393,8 @@ int main()
   testProcessTrees();
   testOverlapIsReported();
   testEndpoints();
+  testMultiEndpointPlacement();
+  testShardCoreIgnored();
   testTrackTitles();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
