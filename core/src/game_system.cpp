@@ -182,10 +182,15 @@ void GameSystem::evaluateProcess(uint32_t pid)
   process = monitor_.lookup(pid);
   const auto productHint = productHintForPath(process.path);
   const WindowProbe probe = probeWindow(pid);
+  // A known game that started unfocused may minimize itself before it is ever
+  // captureable; GameDetector decides whether its exact identity qualifies it.
+  const bool knownMinimized = !probe.captureable && probe.minimized && probe.hasWindow &&
+                              registry_.findByExe(process.exe) != nullptr;
   if (!probe.captureable) {
     std::lock_guard<std::mutex> lock(stateMtx_);
     visibleSince_.erase(pid);
-    return;
+    if (!knownMinimized)
+      return;
   }
   const ProcessRuntimeFacts runtime = monitor_.probeRuntime(pid);
 
@@ -198,6 +203,7 @@ void GameSystem::evaluateProcess(uint32_t pid)
   context.window.hasVisibleWindow = probe.hasWindow;
   context.window.title = probe.title;
   context.window.captureable = probe.captureable;
+  context.window.minimized = probe.minimized;
   context.window.fullscreen = probe.fullscreen;
   context.window.foreground = probe.foreground;
   context.window.area = probe.area;
@@ -213,8 +219,10 @@ void GameSystem::evaluateProcess(uint32_t pid)
                           context.nowMs - process.startMs <= kCandidateTimeoutMs;
   {
     std::lock_guard<std::mutex> lock(stateMtx_);
-    const auto [visible, inserted] = visibleSince_.try_emplace(pid, context.nowMs);
-    context.visibleWindowMs = context.nowMs - visible->second;
+    if (probe.captureable) {
+      const auto [visible, inserted] = visibleSince_.try_emplace(pid, context.nowMs);
+      context.visibleWindowMs = context.nowMs - visible->second;
+    }
     if (probe.foreground && observedForegroundPid_ == pid)
       context.foregroundIntentMs = context.nowMs - foregroundSinceMs_;
   }
@@ -342,6 +350,26 @@ void GameSystem::evaluateVisibleProcesses()
   }
   for (uint32_t pid : visible)
     evaluateProcess(pid);
+
+  // Minimized windows of known game executables (a game launched unfocused can
+  // minimize before it ever has a visible surface). Unknown processes still
+  // need a captureable window to qualify.
+  std::set<uint32_t> minimizedKnown;
+  for (const auto& window : platform::listWindows()) {
+    if (!window.minimized || !window.eligible || !window.pid || visible.count(window.pid) ||
+        minimizedKnown.count(window.pid))
+      continue;
+    {
+      std::lock_guard<std::mutex> lock(stateMtx_);
+      if (knownPids_.count(window.pid))
+        continue;
+    }
+    const std::string exe = monitor_.lookup(window.pid).exe;
+    if (!exe.empty() && registry_.findByExe(exe))
+      minimizedKnown.insert(window.pid);
+  }
+  for (uint32_t pid : minimizedKnown)
+    evaluateProcess(pid);
 }
 
 std::string GameSystem::createRuntimeProduct(const ProcessInfo& process, const DetectionResult& result)
@@ -462,6 +490,7 @@ void GameSystem::probeSessions()
       ctx.window.hasVisibleWindow = bestProbe.hasWindow;
       ctx.window.title = bestProbe.title;
       ctx.window.captureable = bestProbe.captureable;
+      ctx.window.minimized = bestProbe.minimized;
       ctx.window.fullscreen = bestProbe.fullscreen;
       ctx.window.foreground = bestProbe.foreground;
       ctx.window.area = bestProbe.area;
@@ -495,6 +524,7 @@ void GameSystem::probeSessions()
   ctx.window.hasVisibleWindow = bestProbe.hasWindow;
   ctx.window.title = bestProbe.title;
   ctx.window.captureable = bestProbe.captureable;
+  ctx.window.minimized = bestProbe.minimized;
   ctx.window.fullscreen = bestProbe.fullscreen;
   ctx.window.foreground = bestProbe.foreground;
   ctx.window.area = bestProbe.area;
@@ -858,6 +888,7 @@ nlohmann::json GameSystem::detectExplain(const nlohmann::json& params) const
   ctx.window.hasVisibleWindow = probe.hasWindow;
   ctx.window.title = probe.title;
   ctx.window.captureable = probe.captureable;
+  ctx.window.minimized = probe.minimized;
   ctx.window.fullscreen = probe.fullscreen;
   ctx.window.foreground = probe.foreground;
   ctx.window.area = probe.area;

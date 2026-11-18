@@ -146,6 +146,12 @@ void SourceManager::applyVideoSourceLocked()
   lastWindowActionMs_ = 0;
   windowNoFramesReported_ = false;
   windowSuppressedForMinimize_ = false;
+  hookSuppressedForMinimize_ = false;
+  if (gameSource_) obs_source_set_enabled(gameSource_, true);
+  rejectedHookRetries_ = 0;
+  rejectedHookRetriesExhausted_ = false;
+  minimizedDesktopFallback_.reset();
+  setDesktopFallbackLocked(false);
   hookOnSecondaryWindow_ = false;
   activeBackend_ = ActiveBackend::None;
 
@@ -256,6 +262,56 @@ void SourceManager::refreshHookWindowLocked()
             secondary ? "true" : "false");
 }
 
+void SourceManager::applyMinimizedLayersLocked(bool minimized, bool hookRejected)
+{
+  const CaptureSubjectLayers layers = captureSubjectLayers(minimized, hookRejected);
+  const bool changed = windowSuppressedForMinimize_ != !layers.wgc || hookSuppressedForMinimize_ != !layers.hook;
+  windowSuppressedForMinimize_ = !layers.wgc;
+  hookSuppressedForMinimize_ = !layers.hook;
+  if (windowItem_ && obs_sceneitem_visible(windowItem_) != layers.wgc)
+    obs_sceneitem_set_visible(windowItem_, layers.wgc);
+  // Disable rendering rather than hiding the scene item: a hidden game_capture
+  // stops capturing, which would drop the hook and the hooked-window evidence
+  // that keeps a secondary-window hook rejected.
+  if (gameSource_ && obs_source_enabled(gameSource_) != layers.hook)
+    obs_source_set_enabled(gameSource_, layers.hook);
+  if (!changed) return;
+  logFormat("[GC] ts_ms=%llu stage=MinimizedLayers minimized=%s hook_rejected=%s hook_visible=%s wgc_visible=%s pid=%lu",
+            static_cast<unsigned long long>(duration_ms_now()), minimized ? "true" : "false",
+            hookRejected ? "true" : "false", layers.hook ? "true" : "false", layers.wgc ? "true" : "false",
+            static_cast<unsigned long>(subject_.pid));
+}
+
+void SourceManager::setDesktopFallbackLocked(bool on)
+{
+  if (desktopFallbackForMinimize_ == on) return;
+  desktopFallbackForMinimize_ = on;
+  if (monitorItem_) {
+    // Raise the desktop over the game layers rather than disabling the hook:
+    // a disabled source renders nothing, so its probe could not see it recover.
+    if (on) obs_sceneitem_set_order(monitorItem_, OBS_ORDER_MOVE_TOP);
+    obs_sceneitem_set_visible(monitorItem_, on || subject_.kind == Subject::Kind::Monitor);
+    fillFrame(monitorItem_);
+  }
+  logFormat("[GC] ts_ms=%llu stage=MinimizedDesktopFallback active=%s pid=%lu",
+            static_cast<unsigned long long>(duration_ms_now()), on ? "true" : "false",
+            static_cast<unsigned long>(subject_.pid));
+}
+
+void SourceManager::applyRememberedHookRejectionLocked()
+{
+  hookRejectionMemory_.prune([this](uint32_t pid) { return pidAlive(pid); });
+  if (subject_.kind != Subject::Kind::Window || !targetWindow_) return;
+  const auto kind = hookRejectionMemory_.find(subject_.pid, subject_.exe, targetWindow_);
+  if (kind == CaptureBackendHealth::Rejection::None) return;
+  backendHealth_.rememberRejection(kind, duration_ms_now());
+  rejectedHookRetries_ = kRejectedHookRetries;
+  rejectedHookRetriesExhausted_ = true;
+  logFormat("[GC] ts_ms=%llu stage=HookRejectionRemembered pid=%lu hwnd=0x%llx reason=%s",
+            static_cast<unsigned long long>(duration_ms_now()), static_cast<unsigned long>(subject_.pid),
+            static_cast<unsigned long long>(targetWindow_), backendHealth_.rejectionReason());
+}
+
 void SourceManager::applyHookColorSpaceLocked()
 {
   if (!gameSource_) {
@@ -323,6 +379,10 @@ void SourceManager::applySubjectLocked()
   if (showGame) {
     setWindowTargetLocked(subject_);
     targetWindow_ = capture::findSubjectWindow(subject_);
+    applyRememberedHookRejectionLocked();
+  } else {
+    minimizedDesktopFallback_.reset();
+    setDesktopFallbackLocked(false);
   }
   lastDisplayQueryMs_ = 0;
   refreshCaptureDisplayLocked(duration_ms_now());
@@ -429,6 +489,12 @@ void SourceManager::setWindowTargetLocked(const Subject& s)
   lastWindowActionMs_ = 0;
   windowNoFramesReported_ = false;
   windowSuppressedForMinimize_ = false;
+  hookSuppressedForMinimize_ = false;
+  if (gameSource_) obs_source_set_enabled(gameSource_, true);
+  rejectedHookRetries_ = 0;
+  rejectedHookRetriesExhausted_ = false;
+  minimizedDesktopFallback_.reset();
+  setDesktopFallbackLocked(false);
   hookOnSecondaryWindow_ = false;
   activeBackend_ = ActiveBackend::None;
 }
@@ -462,6 +528,7 @@ void SourceManager::recreateGameCaptureLocked()
   gameSource_ = nullptr;
   createGameCaptureLocked();
   if (gameSource_) {
+    obs_source_set_enabled(gameSource_, !hookSuppressedForMinimize_);
     gameItem_ = obs_scene_add(app_.scene(), gameSource_);
     retryGameCaptureLocked();
     fillFrame(gameItem_);
@@ -522,10 +589,14 @@ void SourceManager::sampleCaptureFrames(void* data)
   if (now - self.lastProbeMs_ < 500) return;
   const uint64_t stagedMs = self.lastProbeMs_;
   self.lastProbeMs_ = now;
-  if (self.subject_.kind == Subject::Kind::Window && self.windowSuppressedForMinimize_) {
-    self.probeHookPending_ = self.probeWindowPending_ = self.probeScenePending_ = false;
-    self.hookObservation_ = self.windowObservation_ = self.sceneObservation_ = {};
-    return;
+  // A minimized target has no WGC surface, and the composed output may be the
+  // auto-mode desktop. Keep observing only the hook, which can keep presenting
+  // while minimized; its observations decide the desktop fallback. A sample
+  // with unknown WGC can never create a new hook rejection.
+  const bool minimizedWindow = self.subject_.kind == Subject::Kind::Window && self.windowSuppressedForMinimize_;
+  if (minimizedWindow) {
+    self.probeWindowPending_ = self.probeScenePending_ = false;
+    self.windowObservation_ = self.sceneObservation_ = {};
   }
   constexpr uint32_t width = 64, height = 36;
   if (!self.probeRender_) self.probeRender_ = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
@@ -570,10 +641,17 @@ void SourceManager::sampleCaptureFrames(void* data)
     gs_stage_texture(surface, gs_texrender_get_texture(self.probeRender_));
     return true;
   };
-  self.probeHookPending_ = stage(self.subject_.kind == Subject::Kind::Monitor
-                                   ? self.monitorSource_ : self.gameSource_, self.probeHook_);
-  self.probeWindowPending_ = self.subject_.kind == Subject::Kind::Window &&
+  // A suppressed (disabled) hook renders nothing; leave it unobserved.
+  if (minimizedWindow && self.hookSuppressedForMinimize_) {
+    self.probeHookPending_ = false;
+    self.hookObservation_ = {};
+  } else {
+    self.probeHookPending_ = stage(self.subject_.kind == Subject::Kind::Monitor
+                                     ? self.monitorSource_ : self.gameSource_, self.probeHook_);
+  }
+  self.probeWindowPending_ = self.subject_.kind == Subject::Kind::Window && !minimizedWindow &&
                             stage(self.windowSource_, self.probeWindow_);
+  if (minimizedWindow) return;
 
   // Observe the real video mix AFTER composition, not another rendering of
   // the scene. Only this path needs a new tiny readback; fingerprints reuse
@@ -827,7 +905,7 @@ void SourceManager::repairSceneLocked()
   // healthy target or disturbing audio, replay packets or recording outputs.
   obs_set_output_source(0, obs_scene_get_source(app_.scene()));
   const bool monitor = subject_.kind == Subject::Kind::Monitor;
-  if (monitorItem_) obs_sceneitem_set_visible(monitorItem_, monitor);
+  if (monitorItem_) obs_sceneitem_set_visible(monitorItem_, monitor || desktopFallbackForMinimize_);
   if (gameItem_) obs_sceneitem_set_visible(gameItem_, !monitor && subject_.kind == Subject::Kind::Window);
   if (windowItem_) obs_sceneitem_set_visible(windowItem_, !monitor && !windowSuppressedForMinimize_);
   fillFrame(monitorItem_);
@@ -835,6 +913,7 @@ void SourceManager::repairSceneLocked()
   fillWindowFrameLocked();
   if (activeBackend_ == ActiveBackend::Wgc && windowItem_) obs_sceneitem_set_order(windowItem_, OBS_ORDER_MOVE_TOP);
   else if (activeBackend_ == ActiveBackend::Hook && gameItem_) obs_sceneitem_set_order(gameItem_, OBS_ORDER_MOVE_TOP);
+  if (desktopFallbackForMinimize_ && monitorItem_) obs_sceneitem_set_order(monitorItem_, OBS_ORDER_MOVE_TOP);
 }
 
 void SourceManager::recoverCaptureLocked(bool eligible, bool monitor, uint64_t nowMs)
@@ -1003,20 +1082,6 @@ void SourceManager::watchdogLoop()
         refreshTargetWindowLocked();
         refreshCaptureDisplayLocked(tickMs);
         const bool minimized = subjectWindowMinimized(subject_);
-        if (windowSuppressedForMinimize_ != minimized) {
-          windowSuppressedForMinimize_ = minimized;
-          // WGC retains its last compositor frame for some minimized games.
-          // Hide that opaque layer so the still-running graphics hook is the
-          // only game surface rendered until the window is restored.
-          if (windowItem_)
-            obs_sceneitem_set_visible(windowItem_, !minimized);
-          const char* diagnostics = std::getenv("SHARD_GAME_CAPTURE_DIAGNOSTICS");
-          if (diagnostics && *diagnostics && std::string(diagnostics) != "0") {
-            logFormat("[GC] ts_ms=%llu stage=WindowLayer minimized=%s wgc_visible=%s pid=%lu",
-                      static_cast<unsigned long long>(duration_ms_now()), minimized ? "true" : "false",
-                      minimized ? "false" : "true", static_cast<unsigned long>(subject_.pid));
-          }
-        }
         const uint32_t windowWidth = windowSource_ ? obs_source_get_width(windowSource_) : 0;
         const uint32_t windowHeight = windowSource_ ? obs_source_get_height(windowSource_) : 0;
         const uint32_t gameWidth = gameSource_ ? obs_source_get_width(gameSource_) : 0;
@@ -1033,6 +1098,12 @@ void SourceManager::watchdogLoop()
         const bool hookRejected = backendHealth_.hookRejected() || hookOnSecondaryWindow_;
         const char* const hookRejectReason =
             hookOnSecondaryWindow_ ? "hook_on_secondary_window" : backendHealth_.rejectionReason();
+        applyMinimizedLayersLocked(minimized, hookRejected);
+        // Auto mode: a minimized game whose hook shows no frames (rejected,
+        // detached, black or unobserved) yields to the desktop until it does.
+        const bool hookShowsFrames = !hookSuppressedForMinimize_ && !hookRejected && gameWidth && gameHeight &&
+                                     hookObservation_.healthy(tickMs);
+        setDesktopFallbackLocked(minimizedDesktopFallback_.update(mode == "auto", minimized, hookShowsFrames, tickMs));
         const bool hookHealthy = gameWidth && gameHeight && !hookRejected && hookObservation_.healthy(tickMs);
         const bool hookProbeStale = hookObservation_.hasPixels && !hookObservation_.fresh(tickMs) &&
                                    tickMs - hookObservation_.observedMs >= 15000;
@@ -1079,13 +1150,17 @@ void SourceManager::watchdogLoop()
               obs_sceneitem_set_order(windowItem_, OBS_ORDER_MOVE_TOP);
             else if (desired == ActiveBackend::Hook && gameItem_)
               obs_sceneitem_set_order(gameItem_, OBS_ORDER_MOVE_TOP);
+            if (desktopFallbackForMinimize_ && monitorItem_)
+              obs_sceneitem_set_order(monitorItem_, OBS_ORDER_MOVE_TOP);
             const char* backendStr = desired == ActiveBackend::Hook ? "hook" : "wgc";
             logFormat("[GC] ts_ms=%llu stage=BackendSwitch backend=%s game=%ux%u wgc=%ux%u pid=%lu black_hook=%s",
                       static_cast<unsigned long long>(duration_ms_now()), backendStr, gameWidth, gameHeight,
                       windowWidth, windowHeight, static_cast<unsigned long>(subject_.pid),
                       hookRejected ? "true" : "false");
           }
-          if (desired == ActiveBackend::Hook)
+          if (desktopFallbackForMinimize_) {
+            // The desktop fallback is noted below.
+          } else if (desired == ActiveBackend::Hook)
             noteCaptureMethodLocked(capture::methodNames().hook, "hook_frames_ready");
           else
             noteCaptureMethodLocked(capture::methodNames().window,
@@ -1104,7 +1179,8 @@ void SourceManager::watchdogLoop()
             lastWindowRetry_ = now;
           if (lastHookRetry_.time_since_epoch().count() == 0)
             lastHookRetry_ = now;
-          noteCaptureMethodLocked("none", minimized ? "game_minimized" : "waiting_for_first_frame");
+          if (!desktopFallbackForMinimize_)
+            noteCaptureMethodLocked("none", minimized ? "game_minimized" : "waiting_for_first_frame");
 
           if (!minimized && !recoveryState.displaySleeping() &&
               now - captureHealthyAt_ >= kNoFramesDelay && !windowNoFramesReported_) {
@@ -1114,6 +1190,8 @@ void SourceManager::watchdogLoop()
             windowNoFramesReported_ = true;
           }
         }
+        if (desktopFallbackForMinimize_)
+          noteCaptureMethodLocked(capture::methodNames().desktop, "game_minimized_no_frames");
         // Keep the fallback ready even while the hook works. OBS compatibility
         // JSON flags select which capture method a warning applies to; they
         // are not a list of titles that prohibit WGC.
@@ -1133,23 +1211,39 @@ void SourceManager::watchdogLoop()
         if (hookHealthy) {
           lastHookRetry_ = now;
           hookRetryCount_ = 0;
+          rejectedHookRetries_ = 0;
+          rejectedHookRetriesExhausted_ = false;
         } else if (normalRecoveryAllowed && (!gameWidth || !gameHeight ||
                        backendHealth_.hookRetryJustified(windowObservation_, tickMs)) &&
                    !hookOnSecondaryWindow_ &&
                    now - lastHookRetry_ >= std::chrono::milliseconds(
                        hookRejected ? 15000 : captureHookRetryDelayMs(hookRetryCount_))) {
-          if ((hookRejected && gameWidth && gameHeight) ||
-              (!gameWidth && !gameHeight && hookRetryCount_ > 0 && hookRetryCount_ % 5 == 0)) {
-            logRecoveryLocked(hookRejected ? hookRejectReason : "hook_dimensions_unavailable",
-                              "recreate_hook", 2, tickMs);
-            recreateGameCaptureLocked();
+          // A rejected hook gets a bounded number of attempts. Afterwards it
+          // stays attached and can only regain preference by showing content;
+          // the window is remembered so switching back starts on WGC.
+          const bool rejectedByHealth = backendHealth_.hookRejected();
+          if (rejectedByHealth && !captureRejectedHookRetryAllowed(rejectedHookRetries_)) {
+            if (!rejectedHookRetriesExhausted_) {
+              rejectedHookRetriesExhausted_ = true;
+              logRecoveryLocked(hookRejectReason, "hook_retries_exhausted", 0, tickMs);
+              hookRejectionMemory_.remember(subject_.pid, subject_.exe, targetWindow_, backendHealth_.rejection());
+            }
           } else {
-            logRecoveryLocked("hook_dimensions_unavailable", "retry_hook", 0, tickMs);
-            retryGameCaptureLocked();
+            if ((hookRejected && gameWidth && gameHeight) ||
+                (!gameWidth && !gameHeight && hookRetryCount_ > 0 && hookRetryCount_ % 5 == 0)) {
+              logRecoveryLocked(hookRejected ? hookRejectReason : "hook_dimensions_unavailable",
+                                "recreate_hook", 2, tickMs);
+              recreateGameCaptureLocked();
+            } else {
+              logRecoveryLocked("hook_dimensions_unavailable", "retry_hook", 0, tickMs);
+              retryGameCaptureLocked();
+            }
+            if (rejectedByHealth)
+              ++rejectedHookRetries_;
+            if (hookRetryCount_ < 1000000)
+              hookRetryCount_++;
           }
           lastHookRetry_ = now;
-          if (hookRetryCount_ < 1000000)
-            hookRetryCount_++;
         }
 
         obs_sceneitem_crop wgcCrop = {};
@@ -1184,6 +1278,7 @@ void SourceManager::watchdogLoop()
                   << windowWidth << 'x' << windowHeight << '|' << captureFrameContentName(windowObservation_.content) << '|'
                   << wgcCrop.left << ',' << wgcCrop.top << ',' << wgcCrop.right << ',' << wgcCrop.bottom << '|'
                   << clientWidth << 'x' << clientHeight << '|' << hookRejected << '|'
+                  << rejectedHookRetries_ << '|' << desktopFallbackForMinimize_ << '|'
                   << selectedBackend << '|' << hookRetryCount_ << ':' << lastHookAction_ << '|'
                   << wgcRetryCount_ << ':' << lastWindowAction_ << '|'
                   << hookHealthy << '|' << windowHealthy << '|' << hookProbeStale << '|'
@@ -1223,6 +1318,9 @@ void SourceManager::watchdogLoop()
                << " hook_rejected=" << (hookRejected ? "true" : "false")
                << " hook_reject_reason="
                << (hookRejected ? hookRejectReason : "none")
+               << " rejected_hook_retries=" << rejectedHookRetries_
+               << (rejectedHookRetriesExhausted_ ? "/exhausted" : "")
+               << " desktop_fallback=" << (desktopFallbackForMinimize_ ? "true" : "false")
                << " selected_backend=" << selectedBackend << " hook_retry_count=" << hookRetryCount_
                << " hook_last_action=" << lastHookAction_ << " hook_last_action_age_ms="
                << ageText(lastHookActionMs_) << " wgc_retry_count=" << wgcRetryCount_

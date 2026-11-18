@@ -476,6 +476,85 @@ int main()
   assert(!shard::captureHookOnSecondaryWindow(0x2002, 0, 330ull * 260, 0));
   assert(!shard::captureHookOnSecondaryWindow(0x2002, 0x1001, 2560ull * 1440, 1280ull * 720));
   assert(!shard::captureHookOnSecondaryWindow(0x2002, 0x1001, 1920ull * 1080, 1920ull * 1080));
+
+  // A visible target keeps both layers; the selected backend's order decides.
+  assert(shard::captureSubjectLayers(false, false).hook && shard::captureSubjectLayers(false, false).wgc);
+  assert(shard::captureSubjectLayers(false, true).hook && shard::captureSubjectLayers(false, true).wgc);
+  // Minimized: WGC has no surface, and a healthy or not-yet-judged hook keeps
+  // its last presented frame as the game surface.
+  assert(shard::captureSubjectLayers(true, false).hook && !shard::captureSubjectLayers(true, false).wgc);
+  // Minimized Blender (black OpenGL hook rejected for WGC): never expose the
+  // rejected texture, which encoded as a black frame with one timeline strip.
+  assert(!shard::captureSubjectLayers(true, true).hook && !shard::captureSubjectLayers(true, true).wgc);
+
+  // A rejected hook gets three attempts (enough for loading screens), then
+  // stops; Blender's black OpenGL hook was recreated 70 times before.
+  assert(shard::captureRejectedHookRetryAllowed(0));
+  assert(shard::captureRejectedHookRetryAllowed(2));
+  assert(!shard::captureRejectedHookRetryAllowed(3));
+  assert(!shard::captureRejectedHookRetryAllowed(70));
+
+  {
+    using Rejection = shard::CaptureBackendHealth::Rejection;
+    shard::CaptureHookRejectionMemory memory;
+    memory.remember(18164, "blender.exe", 0xc2642, Rejection::Black);
+    memory.remember(18164, "blender.exe", 0xc2642, Rejection::Black); // No duplicate.
+    memory.remember(0, "x.exe", 1, Rejection::Black);                  // Invalid keys ignored.
+    memory.remember(5, "x.exe", 0, Rejection::Black);
+    memory.remember(6, "x.exe", 1, Rejection::None);
+    assert(memory.size() == 1);
+    assert(memory.find(18164, "blender.exe", 0xc2642) == Rejection::Black);
+    // A replaced window (splash -> game) or a reused pid starts unproven.
+    assert(memory.find(18164, "blender.exe", 0x9999) == Rejection::None);
+    assert(memory.find(18164, "other.exe", 0xc2642) == Rejection::None);
+    memory.remember(20508, "beamng.drive.x64.exe", 0x42, Rejection::Frozen);
+    memory.prune([](uint32_t pid) { return pid != 18164; });
+    assert(memory.find(18164, "blender.exe", 0xc2642) == Rejection::None);
+    assert(memory.find(20508, "beamng.drive.x64.exe", 0x42) == Rejection::Frozen);
+
+    // A remembered rejection selects WGC at once, and the hook keeps its
+    // normal way back: two seconds of content.
+    shard::CaptureBackendHealth remembered;
+    remembered.rememberRejection(Rejection::Black, 1000);
+    assert(remembered.hookRejected());
+    assert(remembered.rejection() == Rejection::Black);
+    assert(std::string(remembered.rejectionReason()) == "hook_black_while_wgc_content_for_3s");
+    remembered.sample(shard::CaptureFrameContent::Content, shard::CaptureFrameContent::Content, 1500);
+    remembered.sample(shard::CaptureFrameContent::Content, shard::CaptureFrameContent::Content, 2500);
+    assert(remembered.hookRejected());
+    remembered.sample(shard::CaptureFrameContent::Content, shard::CaptureFrameContent::Content, 3500);
+    assert(!remembered.hookRejected());
+    assert(remembered.rejection() == Rejection::None);
+    shard::CaptureBackendHealth frozen;
+    frozen.rememberRejection(Rejection::Frozen, 1000);
+    assert(std::string(frozen.rejectionReason()) == "hook_frozen_while_wgc_changing");
+    frozen.rememberRejection(Rejection::None, 1000);
+    assert(frozen.rejection() == Rejection::Frozen);
+    shard::CaptureBackendHealth degraded;
+    degraded.rememberRejection(Rejection::Degraded, 1000);
+    assert(degraded.rejection() == Rejection::Degraded);
+  }
+
+  {
+    // Auto mode: a minimized game without hook frames yields to the desktop
+    // after three seconds; frames, restore or game-only mode end it at once.
+    shard::CaptureMinimizedDesktopFallback fallback;
+    assert(!fallback.update(true, true, false, 0));
+    assert(!fallback.update(true, true, false, 2999));
+    assert(fallback.update(true, true, false, 3000));
+    assert(fallback.active());
+    assert(!fallback.update(true, true, true, 3500)); // Hook shows frames.
+    assert(!fallback.update(true, true, false, 4000));
+    assert(!fallback.update(true, true, false, 6999)); // The delay restarts.
+    assert(fallback.update(true, true, false, 7000));
+    assert(!fallback.update(true, false, false, 7500)); // Restored.
+    assert(!fallback.active());
+    assert(!fallback.update(false, true, false, 8000)); // Game-only mode.
+    assert(!fallback.update(false, true, false, 20000));
+    // A hooked game that keeps presenting while minimized keeps the game.
+    shard::CaptureMinimizedDesktopFallback hooked;
+    for (uint64_t t = 0; t <= 10000; t += 500) assert(!hooked.update(true, true, true, t));
+  }
   assert(captureHookRetryDelayMs(0) == 3000);
   assert(captureHookRetryDelayMs(19) == 3000);
   assert(captureHookRetryDelayMs(20) == 15000);

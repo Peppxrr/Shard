@@ -130,6 +130,9 @@ private:
   // Re-apply the game_capture 10-bit color-space hint when the target display
   // changes between SDR and HDR. The hook source is not recreated.
   void refreshHookWindowLocked();
+  void applyMinimizedLayersLocked(bool minimized, bool hookRejected);
+  void setDesktopFallbackLocked(bool on);
+  void applyRememberedHookRejectionLocked();
   void applyHookColorSpaceLocked();
   std::string colorDiagnosticsLocked() const;
   void recreateGameCaptureLocked();
@@ -154,7 +157,8 @@ private:
   // layer); WGC window_capture is the fallback beneath it. When the hook is
   // producing frames its texture covers the fallback; when the hook is not
   // ready the fallback's WGC frames are exposed. This ordering survives
-  // minimization: WGC draws nothing while iconic, hook keeps updating.
+  // minimization: WGC draws nothing while iconic, hook keeps updating. A
+  // rejected hook is not rendered while minimized (captureSubjectLayers).
   obs_source_t* monitorSource_ = nullptr;
   obs_sceneitem_t* monitorItem_ = nullptr;
   obs_source_t* gameSource_ = nullptr; // game_capture (injected hook) - primary, top
@@ -175,6 +179,18 @@ private:
   int wgcRetryCount_ = 0;
   bool windowNoFramesReported_ = false;
   bool windowSuppressedForMinimize_ = false;
+  // A rejected hook's texture is not rendered while the target is minimized
+  // (captureSubjectLayers); the source stays enabled otherwise.
+  bool hookSuppressedForMinimize_ = false;
+  // Retry/recreate actions taken while CaptureBackendHealth rejects the hook,
+  // bounded by kRejectedHookRetries; reset by a new subject or a healthy hook.
+  int rejectedHookRetries_ = 0;
+  bool rejectedHookRetriesExhausted_ = false;
+  CaptureHookRejectionMemory hookRejectionMemory_;
+  // Auto mode: the desktop layer is raised over a minimized game that shows
+  // no frames. The subject stays the game.
+  CaptureMinimizedDesktopFallback minimizedDesktopFallback_;
+  bool desktopFallbackForMinimize_ = false;
   // The hook latched another (smaller) window of the subject's process; WGC
   // stays selected until the hook reports the target window again.
   bool hookOnSecondaryWindow_ = false;

@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace shard {
 
@@ -20,6 +21,22 @@ inline bool captureHookOnSecondaryWindow(uintptr_t hookedWindow, uintptr_t targe
                                          uint64_t hookedArea, uint64_t targetArea) noexcept
 {
   return hookedWindow && targetWindow && hookedWindow != targetWindow && hookedArea < targetArea;
+}
+
+// Which game-subject layers render. WGC has no usable surface for an iconic
+// window (some games leave a stale compositor frame), so a minimized target
+// hides it and the hook, which keeps its last presented texture, is the game
+// surface. A hook the watchdog rejected (black, frozen, or latched on a
+// secondary window) stays hidden too: its texture is the image WGC was selected
+// to replace, for example a black OpenGL surface with one stray panel drawn.
+struct CaptureSubjectLayers {
+  bool hook = true;
+  bool wgc = true;
+};
+
+inline CaptureSubjectLayers captureSubjectLayers(bool minimized, bool hookRejected) noexcept
+{
+  return minimized ? CaptureSubjectLayers{!hookRejected, false} : CaptureSubjectLayers{};
 }
 
 inline const char* captureFrameContentName(CaptureFrameContent content) noexcept
@@ -263,6 +280,25 @@ public:
     } else goodSince_ = 0;
   }
   bool hookRejected() const noexcept { return rejected_; }
+  enum class Rejection { None, Black, Frozen, Degraded };
+  Rejection rejection() const noexcept
+  {
+    return !rejected_ ? Rejection::None : frozenRejected_ ? Rejection::Frozen :
+           degradedRejected_ ? Rejection::Degraded : Rejection::Black;
+  }
+  // Start a new subject with a rejection proven earlier for the same window
+  // (CaptureHookRejectionMemory). The normal recovery still applies: two
+  // seconds of hook content (changed since now, for a freeze) restore it.
+  void rememberRejection(Rejection kind, uint64_t nowMs) noexcept
+  {
+    if (kind == Rejection::None) return;
+    rejected_ = true;
+    frozenRejected_ = kind == Rejection::Frozen;
+    degradedRejected_ = kind == Rejection::Degraded;
+    changedAfterRejection_ = false;
+    rejectedAtMs_ = nowMs;
+    badSince_ = goodSince_ = 0;
+  }
   bool hookRetryJustified(const CaptureFrameObservation& wgc, uint64_t nowMs) const noexcept
   {
     // Once a proven freeze has promoted WGC, a static menu must not cause
@@ -490,5 +526,101 @@ inline uint64_t captureHookRetryDelayMs(int attempts) noexcept
 {
   return attempts < 20 ? 3000 : 15000;
 }
+
+// A hook rejected by CaptureBackendHealth (black, frozen or probe-degraded
+// while WGC has content) gets this many retry/recreate actions, spaced by the
+// watchdog's 15-second rejected-hook delay, which covers loading screens.
+// Afterwards the still-attached hook can only regain preference by showing
+// content itself. A hook that is merely not attached keeps retrying.
+constexpr int kRejectedHookRetries = 3;
+
+inline bool captureRejectedHookRetryAllowed(int rejectedRetries) noexcept
+{
+  return rejectedRetries < kRejectedHookRetries;
+}
+
+// Windows whose hook stayed rejected through every bounded retry. Switching
+// back to such a window starts on WGC instead of re-proving the rejection
+// with seconds of black output. Keyed by pid, executable and window, so a
+// replaced window (splash -> game) or a reused pid starts unproven.
+class CaptureHookRejectionMemory {
+public:
+  using Rejection = CaptureBackendHealth::Rejection;
+
+  void remember(uint32_t pid, const std::string& exe, uintptr_t window, Rejection kind)
+  {
+    if (!pid || !window || kind == Rejection::None) return;
+    for (auto& entry : entries_) {
+      if (entry.pid == pid && entry.exe == exe && entry.window == window) {
+        entry.kind = kind;
+        return;
+      }
+    }
+    entries_.push_back({pid, exe, window, kind});
+  }
+  Rejection find(uint32_t pid, const std::string& exe, uintptr_t window) const noexcept
+  {
+    for (const auto& entry : entries_)
+      if (entry.pid == pid && entry.exe == exe && entry.window == window) return entry.kind;
+    return Rejection::None;
+  }
+  template <class Alive>
+  void prune(Alive&& alive)
+  {
+    for (size_t i = 0; i < entries_.size();) {
+      if (alive(entries_[i].pid)) {
+        ++i;
+      } else {
+        entries_[i] = entries_.back();
+        entries_.pop_back();
+      }
+    }
+  }
+  size_t size() const noexcept { return entries_.size(); }
+
+private:
+  struct Entry {
+    uint32_t pid;
+    std::string exe;
+    uintptr_t window;
+    Rejection kind;
+  };
+  std::vector<Entry> entries_;
+};
+
+// Auto mode shows the desktop while the primary game is minimized and its
+// hook shows no frames (rejected, detached, black or unobserved) for three
+// seconds. Content from the hook, a restored window, or leaving auto mode
+// ends it at once. Game-only mode never falls back.
+class CaptureMinimizedDesktopFallback {
+public:
+  static constexpr uint64_t kDelayMs = 3000;
+
+  bool update(bool autoMode, bool minimized, bool hookShowsFrames, uint64_t nowMs) noexcept
+  {
+    if (!autoMode || !minimized || hookShowsFrames) {
+      reset();
+      return false;
+    }
+    if (!waiting_) {
+      waiting_ = true;
+      since_ = nowMs;
+    }
+    active_ = nowMs - since_ >= kDelayMs;
+    return active_;
+  }
+  void reset() noexcept
+  {
+    waiting_ = false;
+    since_ = 0;
+    active_ = false;
+  }
+  bool active() const noexcept { return active_; }
+
+private:
+  uint64_t since_ = 0;
+  bool waiting_ = false;
+  bool active_ = false;
+};
 
 } // namespace shard

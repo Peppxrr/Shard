@@ -219,9 +219,22 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
   }
 
 
+  // A known game launched while another window had focus can minimize itself
+  // before it is ever captureable (common for fullscreen titles). Only an exact
+  // executable match of a known product may qualify such a window, with the
+  // runtime evidence its product kind requires below. A minimized window has
+  // no client area, so area/dwell evidence is never used for it.
+  const bool knownMinimizedWindow =
+      exact && !ctx.window.captureable && ctx.window.minimized && ctx.window.hasVisibleWindow;
+  const auto noteMinimized = [&] {
+    result.reasons.push_back({"minimized known game window", 0,
+                              p.exe + " is a known game whose window is minimized"});
+  };
+
   // Explicit user mappings are authoritative, but still need a real window;
   // otherwise a listed launcher/anti-cheat helper would create a dead session.
-  if (explicitUser && ctx.window.captureable) {
+  if (explicitUser && (ctx.window.captureable || knownMinimizedWindow)) {
+    if (knownMinimizedWindow) noteMinimized();
     result.decision = DetectionResult::Decision::Detected;
     return result;
   }
@@ -295,8 +308,12 @@ DetectionResult GameDetector::detect(const ProcessInfo& p, const DetectContext& 
   const bool unknownShape = untrustedProduct && !ctx.runtime.webRuntime &&
                             (((ctx.recentProcess || runtimeProduct || ctx.visibleWindowMs >= 1500) && ctx.runtime.gameRuntime) ||
                              stableGameInputSurface || minecraftRenderSurface);
-  const bool liveGameShape = ctx.window.captureable &&
-                             (knownProductShape || unknownShape);
+  const bool minimizedKnownShape =
+      knownMinimizedWindow && !ctx.runtime.webRuntime &&
+      ((confirmedProduct && (gameRuntime || ctx.runtime.graphicsApi)) || (runtimeProduct && gameRuntime));
+  if (minimizedKnownShape) noteMinimized();
+  const bool liveGameShape = (ctx.window.captureable && (knownProductShape || unknownShape)) ||
+                             minimizedKnownShape;
 
   if (liveGameShape) {
     // product==nullptr is intentional: GameSystem creates a stable runtime

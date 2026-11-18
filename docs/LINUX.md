@@ -102,6 +102,10 @@ portable to other distributions. The editor/export tools use
   on identity evidence (user mappings, launcher metadata, engine runtimes,
   Minecraft's Java entry point), focus-driven game switching is inactive, and
   the window fallback is uncropped.
+- The KWin window list reports minimized windows (`minimized=true`) like Win32,
+  so a known game that starts minimized qualifies the same way as on Windows.
+  Without window information every probe is treated as captureable, so that
+  rule is not needed there.
 
 ## Audio and encoding
 

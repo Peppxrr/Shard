@@ -51,6 +51,7 @@ struct WindowFacts {
   bool hasVisibleWindow = false;
   std::string title;            // selected top-level window title
   bool captureable = false; // visible, on-screen, non-tool top-level window
+  bool minimized = false;   // selected window is minimized (its area reads 0)
   bool fullscreen = false;
   bool foreground = false;
   int64_t area = 0;         // client pixels of the selected window

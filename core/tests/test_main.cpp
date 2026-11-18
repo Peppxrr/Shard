@@ -1387,6 +1387,74 @@ static void testRuntimeExecutablePersistence()
 }
 
 
+static void testMinimizedKnownGames()
+{
+  TestDir dir("minimized-known-games");
+  GameRegistry reg;
+  reg.setPath((dir.root / "games.json").string());
+  reg.load();
+  GameDefinition shooter;
+  shooter.id = "d:steam:4242";
+  shooter.name = "Big Shooter";
+  shooter.executables = {"bigshooter.exe"};
+  shooter.installPaths = {"c:\\games\\bigshooter\\"};
+  shooter.productType = "game";
+  shooter.source = GameSource::Discovered;
+  reg.mergeDiscovered(shooter);
+  GameDefinition learned;
+  learned.id = "d:runtime:indie";
+  learned.name = "Indie";
+  learned.executables = {"indie.exe"};
+  learned.productType = "game";
+  reg.mergeDiscovered(learned);
+  GameDefinition user;
+  user.name = "User Pick";
+  user.executables = {"userpick.exe"};
+  reg.upsertUserGame(user);
+
+  // A game launched while another window had focus minimized itself: no
+  // captureable surface and no client area, only a minimized top-level window.
+  WindowFacts minimized;
+  minimized.hasVisibleWindow = true;
+  minimized.minimized = true;
+  const auto detect = [&](const ProcessInfo& p, WindowFacts wf, RuntimeFacts runtime) {
+    return detectWith(reg, p, {}, {}, wf, 60000, runtime);
+  };
+  const auto isDetected = [](const DetectionResult& r) {
+    return r.decision == DetectionResult::Decision::Detected;
+  };
+  const ProcessInfo shooterProc = proc("bigshooter.exe", 1500, 0, "c:\\games\\bigshooter\\bigshooter.exe");
+  const auto known = detect(shooterProc, minimized, graphicsRuntime());
+  CHECK(isDetected(known));
+  CHECK_EQ(known.gameId, std::string("d:steam:4242"));
+  bool reason = false;
+  for (const auto& r : known.reasons) reason = reason || r.signal == "minimized known game window";
+  CHECK(reason);
+  // Identity alone is not enough for a launcher product: it needs a renderer.
+  CHECK(!isDetected(detect(shooterProc, minimized, RuntimeFacts{})));
+  // Only exact executables qualify; install containment or unknown processes
+  // still need a captureable window, whatever their runtime.
+  CHECK(!isDetected(detect(proc("helper.exe", 1501, 0, "c:\\games\\bigshooter\\helper.exe"), minimized,
+                           graphicsRuntime(true))));
+  CHECK(!isDetected(detect(proc("unknown.exe", 1502, 0, "", 59000), minimized, graphicsRuntime(true))));
+  // Learned runtime products keep their engine-evidence requirement.
+  CHECK(!isDetected(detect(proc("indie.exe", 1503), minimized, graphicsRuntime())));
+  CHECK(isDetected(detect(proc("indie.exe", 1504), minimized, graphicsRuntime(true))));
+  // Explicit user mappings still need a real (here minimized) window.
+  CHECK(isDetected(detect(proc("userpick.exe", 1505), minimized, RuntimeFacts{})));
+  WindowFacts hidden = minimized;
+  hidden.hasVisibleWindow = false;
+  CHECK(!isDetected(detect(proc("userpick.exe", 1506), hidden, RuntimeFacts{})));
+  CHECK(!isDetected(detect(shooterProc, hidden, graphicsRuntime(true))));
+  // Hosted web runtimes and editors keep their exclusions.
+  RuntimeFacts web = graphicsRuntime();
+  web.webRuntime = true;
+  CHECK(!isDetected(detect(shooterProc, minimized, web)));
+  RuntimeFacts editor = graphicsRuntime(true);
+  editor.editorRuntime = true;
+  CHECK(!isDetected(detect(proc("indie.exe", 1507), minimized, editor)));
+}
+
 int main()
 {
   try {
@@ -1413,6 +1481,8 @@ int main()
     testDetectorNonGames();
     testEditorsAndVisibleGames();
     std::printf("ok: detector/non-games\n");
+    testMinimizedKnownGames();
+    std::printf("ok: detector/minimized-known\n");
     testDetectorLauncherChain();
     std::printf("ok: detector/launcher-chain\n");
     testDetectorUserIgnoreWins();
