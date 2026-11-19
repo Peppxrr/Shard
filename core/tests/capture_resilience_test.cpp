@@ -61,6 +61,14 @@ int main()
   canvas.reset();                                     // full pipeline restart
   assert(canvas.update("monitor", true));
   assert(!canvas.update("game:A", true));             // auto mode: desktop -> game
+  // A 4:3 hook kept inside that 16:9 canvas is pillarboxed; the WGC layer
+  // beneath it is confined to this rectangle so the bars stay empty.
+  const auto pillar = shard::captureFitRect(1280, 960, 1920.0f, 1080.0f);
+  assert(pillar.x == 240.0f && pillar.y == 0.0f && pillar.width == 1440.0f && pillar.height == 1080.0f);
+  const auto letter = shard::captureFitRect(3440, 1440, 1920.0f, 1080.0f);
+  assert(letter.x > -0.01f && letter.x < 0.01f && letter.width > 1919.99f && letter.width < 1920.01f &&
+         letter.y > 138.0f && letter.y < 139.0f);
+  assert(shard::captureFitRect(0, 960, 1920.0f, 1080.0f).width == 0.0f);
   // WGC chrome/inset cleanup must not invent a 960x534 video format while
   // its validated client and hook both represent 16:9 content.
   const auto clientCrop = computeClientAreaCrop(962, 579, 0, 0, 1, 38, 960, 540);

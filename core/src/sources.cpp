@@ -403,7 +403,8 @@ void SourceManager::applySubjectLocked()
 // Fit a capture to the canvas without cropping its visible content. Window
 // fallback capture passes a validated scene crop that removes only the
 // non-client frame.
-void SourceManager::fillFrame(obs_sceneitem_t* item, const struct obs_sceneitem_crop* crop)
+void SourceManager::fillFrame(obs_sceneitem_t* item, const struct obs_sceneitem_crop* crop,
+                              const CaptureRect* target)
 {
   if (!item)
     return;
@@ -426,12 +427,10 @@ void SourceManager::fillFrame(obs_sceneitem_t* item, const struct obs_sceneitem_
   if (sourceWidth && sourceHeight) {
     const uint32_t visibleWidth = sourceWidth - static_cast<uint32_t>(appliedCrop.left + appliedCrop.right);
     const uint32_t visibleHeight = sourceHeight - static_cast<uint32_t>(appliedCrop.top + appliedCrop.bottom);
-    const float canvasWidth = (float)app_.baseWidth();
-    const float canvasHeight = (float)app_.baseHeight();
-    const float scale = std::min(canvasWidth / (float)visibleWidth, canvasHeight / (float)visibleHeight);
-    struct vec2 itemScale = {scale, scale};
-    struct vec2 pos = {(canvasWidth - (float)visibleWidth * scale) / 2.0f,
-                       (canvasHeight - (float)visibleHeight * scale) / 2.0f};
+    const CaptureRect rect = target && target->width > 0 && target->height > 0 ? *target
+        : captureFitRect(visibleWidth, visibleHeight, (float)app_.baseWidth(), (float)app_.baseHeight());
+    struct vec2 itemScale = {rect.width / (float)visibleWidth, rect.height / (float)visibleHeight};
+    struct vec2 pos = {rect.x, rect.y};
 
     obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_NONE);
     obs_sceneitem_set_bounds_crop(item, false);
@@ -466,7 +465,17 @@ void SourceManager::fillWindowFrameLocked()
       windowClientSize_ = crop.clientSize;
     }
   }
-  fillFrame(windowItem_, &sceneCrop);
+  // The hook (opaque, on top) is fitted to its own aspect ratio. When that
+  // differs from WGC's surface (e.g. a 4:3 game presented stretched on a 16:9
+  // window), a full-canvas WGC layer would show through the hook's letterbox
+  // bars as a second, stretched copy of the game. Keep WGC under the hook.
+  const uint32_t hookWidth = gameSource_ ? obs_source_get_width(gameSource_) : 0;
+  const uint32_t hookHeight = gameSource_ ? obs_source_get_height(gameSource_) : 0;
+  const bool underHook = activeBackend_ == ActiveBackend::Hook && gameItem_ && hookWidth && hookHeight &&
+                         obs_sceneitem_visible(gameItem_) && obs_source_enabled(gameSource_);
+  const CaptureRect hookRect = underHook
+      ? captureFitRect(hookWidth, hookHeight, (float)app_.baseWidth(), (float)app_.baseHeight()) : CaptureRect{};
+  fillFrame(windowItem_, &sceneCrop, underHook ? &hookRect : nullptr);
 }
 
 void SourceManager::setWindowTargetLocked(const Subject& s)
@@ -535,6 +544,7 @@ void SourceManager::recreateGameCaptureLocked()
   }
   if (windowItem_) obs_sceneitem_set_order(windowItem_, OBS_ORDER_MOVE_TOP);
   activeBackend_ = windowItem_ ? ActiveBackend::Wgc : ActiveBackend::None;
+  fillWindowFrameLocked();
   lastHookAction_ = "recreate";
   lastHookActionMs_ = duration_ms_now();
   logFormat("capture: recreated stalled game hook for pid=%lu; keeping WGC fallback",
@@ -1144,6 +1154,8 @@ void SourceManager::watchdogLoop()
               logRecoveryLocked(hookRejected ? hookRejectReason : "backend_readiness_changed",
                                 desired == ActiveBackend::Wgc ? "select_wgc" : "select_hook", 0, tickMs);
             activeBackend_ = desired;
+            // WGC is confined to the hook's rectangle only beneath the hook.
+            if (usableWindowReady) fillWindowFrameLocked();
             // A black hook still has an opaque texture. Merely naming WGC
             // as the backend cannot expose it; change the actual layer order.
             if (desired == ActiveBackend::Wgc && windowItem_)

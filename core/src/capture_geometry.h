@@ -23,6 +23,21 @@ inline CaptureSize fitCaptureSize(CaptureSize source, CaptureSize bounds)
           std::max(16u, static_cast<uint32_t>(source.height * scale) & ~1u)};
 }
 
+struct CaptureRect {
+  float x = 0, y = 0, width = 0, height = 0;
+};
+
+// Largest centered rectangle with the source's aspect ratio inside the canvas
+// (letterboxed or pillarboxed, never cropped).
+inline CaptureRect captureFitRect(uint32_t sourceWidth, uint32_t sourceHeight, float canvasWidth, float canvasHeight)
+{
+  if (!sourceWidth || !sourceHeight || canvasWidth <= 0 || canvasHeight <= 0) return {};
+  const float scale = std::min(canvasWidth / static_cast<float>(sourceWidth),
+                               canvasHeight / static_cast<float>(sourceHeight));
+  const float width = static_cast<float>(sourceWidth) * scale, height = static_cast<float>(sourceHeight) * scale;
+  return {(canvasWidth - width) / 2.0f, (canvasHeight - height) / 2.0f, width, height};
+}
+
 // Live scene transforms can absorb source-size changes without discarding
 // encoded history when the canvas proportions and output format stay fixed.
 // An aspect/encoded-size change still needs the normal video reset boundary.

@@ -111,9 +111,13 @@ private:
   // Requires sourceMutex_ held.
   void applySubjectLocked();
   void setWindowTargetLocked(const Subject& s);
-  void fillFrame(obs_sceneitem_t* item, const struct obs_sceneitem_crop* crop = nullptr);
+  // `target` stretches the item into that canvas rectangle instead of fitting it.
+  void fillFrame(obs_sceneitem_t* item, const struct obs_sceneitem_crop* crop = nullptr,
+                 const CaptureRect* target = nullptr);
   // Crop the full WGC surface at the scene layer. Invalid Win32 geometry
-  // deliberately falls back to the uncropped live surface.
+  // deliberately falls back to the uncropped live surface. While the hook is
+  // the visible top layer, WGC is confined to the hook's rectangle so it never
+  // shows in the hook's letterbox bars.
   void fillWindowFrameLocked();
   void retryMonitorCaptureLocked();
   // Reset a stalled WGC session by re-applying the current target. OBS only
