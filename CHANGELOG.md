@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.16
+
+- Fixed games that run at a different aspect ratio than your screen (such as Counter-Strike 2 at 4:3 stretched) showing a second, stretched copy of the game in the black bars of clips.
+- Fixed an app's audio moving to a different Desktop audio track mid-clip when it used more than one output device.
+- Fixed minimized apps whose game capture does not work (such as Blender) recording a black or frozen picture. In auto mode, Shard now shows the desktop while such a game is minimized and returns to the game when it is restored.
+- Switching back to a game whose game capture does not work now shows it right away instead of a few seconds of black, and Shard stops retrying that capture endlessly in the background.
+- Games that start in the background and minimize themselves before you see them are now detected.
+- Fixed Shard freezing on an endless "write EPIPE" error when the terminal or tool that started it closed.
+
 ## 0.1.15
 
 - Much smaller download and install: the installer is about a third smaller (around 112 MB) and Shard takes about 400 MB on disk. The editor's video tools are now a lean build made for Shard, with the same export encoders, and parts of the app framework Shard never uses are no longer included.
